@@ -1,0 +1,13 @@
+feat:
+
+# Por qué es necesario este cambio (omitir si el título es autoexplicativo).
+
+Closes #
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tipos : feat | fix | refactor | chore | docs | ci | test | perf
+# Gate  : ./gradlew build (unit + integración sin fallos)
+# Reglas: cobertura de dominio ≥ 90 % · no usar --no-verify
+# IA    : Co-Authored-By: Claude <model> <noreply@anthropic.com>
+#         Claude-Session: https://claude.ai/code/session_XXXX
+# ──────────────────────────────────────────────────────────────────────────────
