@@ -1,0 +1,115 @@
+plugins {
+    id 'org.springframework.boot'         version '3.4.1'
+    id 'io.spring.dependency-management'  version '1.1.7'
+    id 'java'
+}
+
+group   = 'com.hyperbrain'
+version = '0.0.1-SNAPSHOT'
+
+// Override Spring Boot BOM pin: TC 1.20.4 bundles docker-java 3.3.x which negotiates
+// API version 1.32 — rejected by Colima (minimum 1.40). TC 1.21.x bundles docker-java 3.4.x.
+ext['testcontainers.version'] = '1.21.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    maven { url 'https://repo.spring.io/milestone' }
+    mavenCentral()
+}
+
+dependencyManagement {
+    imports {
+        mavenBom 'io.awspring.cloud:spring-cloud-aws-dependencies:3.3.0'
+        mavenBom 'org.springframework.ai:spring-ai-bom:1.0.0'
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Test source sets
+//   src/test/unit/java       → ./gradlew test           (unit, no Spring context)
+//   src/test/integration/java
+//   src/test/fixture/java    → ./gradlew integrationTest (Testcontainers: PG + LocalStack)
+// ──────────────────────────────────────────────────────────────────────────────
+sourceSets {
+    test {
+        java.srcDirs       = ['src/test/unit/java']
+        resources.srcDirs  = ['src/test/unit/resources']
+    }
+    integrationTest {
+        java.srcDirs      = ['src/test/integration/java', 'src/test/fixture/java']
+        resources.srcDirs = ['src/test/integration/resources']
+        compileClasspath  += sourceSets.main.output
+        runtimeClasspath  += sourceSets.main.output
+    }
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom    testRuntimeOnly
+}
+
+dependencies {
+    // ── Core ──────────────────────────────────────────────────────────────────
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // ── Messaging (EDA) ───────────────────────────────────────────────────────
+    implementation 'io.awspring.cloud:spring-cloud-aws-starter-sqs'
+
+    // ── Persistence ───────────────────────────────────────────────────────────
+    runtimeOnly    'org.postgresql:postgresql'
+    implementation 'com.pgvector:pgvector:0.1.6'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+
+    // ── AI (core; provider autoconfiguration added with cognitive module) ─────
+    implementation 'org.springframework.ai:spring-ai-core:1.0.0-M6'
+
+    // ── Unit tests ────────────────────────────────────────────────────────────
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'com.tngtech.archunit:archunit-junit5:1.3.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // ── Integration tests ─────────────────────────────────────────────────────
+    integrationTestImplementation 'org.springframework.boot:spring-boot-starter-test'
+    integrationTestImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    integrationTestImplementation 'org.testcontainers:junit-jupiter'
+    integrationTestImplementation 'org.testcontainers:postgresql'
+    integrationTestImplementation 'org.testcontainers:localstack'
+    integrationTestRuntimeOnly    'org.postgresql:postgresql'
+}
+
+// ── Test tasks ────────────────────────────────────────────────────────────────
+tasks.named('test', Test) {
+    useJUnitPlatform()
+}
+
+tasks.register('integrationTest', Test) {
+    description        = 'Runs integration tests using Testcontainers (PostgreSQL + LocalStack).'
+    group              = 'verification'
+    testClassesDirs    = sourceSets.integrationTest.output.classesDirs
+    classpath          = sourceSets.integrationTest.runtimeClasspath
+    useJUnitPlatform()
+    shouldRunAfter tasks.named('test')
+
+    // TC's shaded docker-java reads "api.version" from JVM system properties.
+    // Modern Docker daemons (Desktop 29.x, Colima) require minimum API v1.40;
+    // the shaded default is 1.32, which is rejected.
+    systemProperty 'api.version', '1.43'
+
+    // Use Docker Desktop socket (works on macOS without Colima quirks).
+    // TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE tells Ryuk which path to mount inside
+    // the container — /var/run/docker.sock is Docker Desktop's canonical in-VM path.
+    environment 'DOCKER_HOST', 'unix:///Users/danielc/.docker/run/docker.sock'
+    environment 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', '/var/run/docker.sock'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest')
+}

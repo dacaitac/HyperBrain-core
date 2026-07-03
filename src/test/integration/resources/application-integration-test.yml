@@ -1,0 +1,10 @@
+# Test profile: provides fake AWS credentials so Spring Cloud AWS starts without real endpoints.
+# Containers (PG, LocalStack) are managed by @ImportTestcontainers via ContainersConfiguration.
+spring:
+  cloud:
+    aws:
+      region:
+        static: us-east-1
+      credentials:
+        access-key: test
+        secret-key: test
