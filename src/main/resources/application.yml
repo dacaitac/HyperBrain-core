@@ -17,7 +17,10 @@ spring:
     open-in-view: false
 
   flyway:
-    enabled:   true
+    # Disabled in the default (runtime) profile: the real DB is managed by Supabase CLI
+    # migrations (supabase/migrations/), not Flyway. Flyway runs only in the
+    # integration-test profile against an ephemeral Testcontainers DB (see S0-07, issue #29).
+    enabled:   false
     locations: classpath:db/migration
     baseline-on-migrate: false
 

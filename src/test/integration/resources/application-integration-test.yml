@@ -1,5 +1,7 @@
-# Test profile: provides fake AWS credentials so Spring Cloud AWS starts without real endpoints.
-# Containers (PG, LocalStack) are managed by @ImportTestcontainers via ContainersConfiguration.
+# Integration-test profile: Spring Boot context for @SpringBootTest + Testcontainers.
+# Containers (PostgreSQL, LocalStack) are started by ContainersConfiguration.
+# Flyway is enabled here to provision the ephemeral DB from V1__init.sql
+# (the real Compose DB uses supabase/migrations/ instead — see S0-07, issue #29).
 spring:
   cloud:
     aws:
@@ -8,3 +10,8 @@ spring:
       credentials:
         access-key: test
         secret-key: test
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
