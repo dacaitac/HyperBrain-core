@@ -57,6 +57,7 @@ dependencies {
     // ── Core ──────────────────────────────────────────────────────────────────
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
     // ── Messaging (EDA) ───────────────────────────────────────────────────────
@@ -79,6 +80,7 @@ dependencies {
     // ── Integration tests ─────────────────────────────────────────────────────
     integrationTestImplementation 'org.springframework.boot:spring-boot-starter-test'
     integrationTestImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    integrationTestImplementation 'io.awspring.cloud:spring-cloud-aws-testcontainers'
     integrationTestImplementation 'org.testcontainers:junit-jupiter'
     integrationTestImplementation 'org.testcontainers:postgresql'
     integrationTestImplementation 'org.testcontainers:localstack'

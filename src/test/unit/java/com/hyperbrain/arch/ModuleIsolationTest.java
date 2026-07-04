@@ -61,4 +61,44 @@ class ModuleIsolationTest {
                 "com.hyperbrain.prioritizer.infrastructure..",
                 "com.hyperbrain.planner.infrastructure.."
             );
+
+    /**
+     * The shared pipeline (outbox relay, messaging ports) is a leaf: feature modules depend on it,
+     * never the other way around. This also enforces that the OutboxWorker holds no business logic —
+     * it structurally cannot reach into any module.
+     */
+    @ArchTest
+    static final ArchRule shared_does_not_depend_on_feature_modules =
+        noClasses()
+            .that().resideInAPackage("com.hyperbrain.shared..")
+            .should().dependOnClassesThat()
+            .resideInAnyPackage(
+                "com.hyperbrain.core..",
+                "com.hyperbrain.sync..",
+                "com.hyperbrain.finance..",
+                "com.hyperbrain.learning..",
+                "com.hyperbrain.cognitive..",
+                "com.hyperbrain.prioritizer..",
+                "com.hyperbrain.planner..",
+                "com.hyperbrain.gateway.."
+            );
+
+    /**
+     * The sync SQS adapter (Consumer) must not reach into other feature modules' internals;
+     * it only deserializes and delegates to its own application layer.
+     */
+    @ArchTest
+    static final ArchRule sync_infrastructure_does_not_depend_on_other_modules =
+        noClasses()
+            .that().resideInAPackage("com.hyperbrain.sync.infrastructure..")
+            .should().dependOnClassesThat()
+            .resideInAnyPackage(
+                "com.hyperbrain.core..",
+                "com.hyperbrain.finance..",
+                "com.hyperbrain.learning..",
+                "com.hyperbrain.cognitive..",
+                "com.hyperbrain.prioritizer..",
+                "com.hyperbrain.planner..",
+                "com.hyperbrain.gateway.."
+            );
 }

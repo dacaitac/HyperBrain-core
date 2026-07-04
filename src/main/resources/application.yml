@@ -37,6 +37,16 @@ spring:
           core-events: ${SQS_QUEUE_CORE_EVENTS:core-events}
           ia-jobs:     ${SQS_QUEUE_IA_JOBS:ia-jobs}
 
+app:
+  sync:
+    consumer:
+      enabled: true
+  outbox:
+    poll-interval-ms:   2000
+    batch-size:         50
+    retention-days:     7
+    scheduling-enabled: true
+
 management:
   endpoints:
     web:

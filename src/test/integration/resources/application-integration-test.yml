@@ -15,3 +15,14 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: false
+
+# Outbox scheduling is off so tests drive drainBatch()/purgeExpired() deterministically.
+# The inbound SQS consumer is off by default so only the tests that need it (SqsConsumerIT,
+# via @TestPropertySource) run a listener — otherwise competing listeners from cached contexts
+# would steal messages from the shared sync-events.fifo queue.
+app:
+  sync:
+    consumer:
+      enabled: false
+  outbox:
+    scheduling-enabled: false
