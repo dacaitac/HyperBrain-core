@@ -32,6 +32,10 @@ spring:
         access-key:  ${AWS_ACCESS_KEY_ID:}
         secret-key:  ${AWS_SECRET_ACCESS_KEY:}
       sqs:
+        # MVP runs entirely against LocalStack (Infra profile), never real AWS — see ADR-006.
+        # Defaults to the host-published port for native `bootRun`; Compose overrides it to
+        # the internal Docker network hostname (see AWS_SQS_ENDPOINT_OVERRIDE in docker-compose.yml).
+        endpoint: ${AWS_SQS_ENDPOINT_OVERRIDE:http://localhost:4566}
         queues:
           sync-events: ${SQS_QUEUE_SYNC_EVENTS:sync-events.fifo}
           core-events: ${SQS_QUEUE_CORE_EVENTS:core-events}
