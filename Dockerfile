@@ -7,7 +7,7 @@ WORKDIR /app
 # Cache dependency layer (invalidated only when build files change)
 COPY gradle gradle
 COPY gradlew .
-COPY settings.gradle build.gradle .
+COPY settings.gradle build.gradle ./
 RUN ./gradlew dependencies --no-daemon --quiet
 
 COPY src src
