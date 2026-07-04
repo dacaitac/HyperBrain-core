@@ -1,0 +1,27 @@
+name: PR Integration
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      # NOTE: AsyncAPI contract validation (docs/04-contracts/async/events-v1.yaml)
+      # is intentionally out of scope here — that spec lives in the private
+      # HyperBrain-docs repo and no validateAsyncApi task exists yet. Tracked as
+      # follow-up once HU-09 defines the real event contracts (see TD-09 #32).
+      - name: Build + unit tests + Testcontainers (PostgreSQL + LocalStack)
+        run: ./gradlew build
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test

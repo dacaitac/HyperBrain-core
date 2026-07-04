@@ -1,0 +1,45 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: |
+            ghcr.io/dacaitac/hyperbrain-core:latest
+            ghcr.io/dacaitac/hyperbrain-core:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: [self-hosted, daniel-ubuntu]
+    environment: production
+    steps:
+      # docker-compose.yml lives at ~/hyperbrain-deploy, kept in sync by
+      # HyperBrain-Infra/deploy.yml on every merge to its main. This job only
+      # refreshes the hyperbrain-core service image, never touches the rest
+      # of the stack (--no-deps).
+      - name: Pull new image and restart service
+        run: |
+          docker pull ghcr.io/dacaitac/hyperbrain-core:latest
+          docker compose -f ~/hyperbrain-deploy/docker-compose.yml --env-file ~/hyperbrain-deploy/.env up -d --no-deps hyperbrain-core
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f http://localhost:8080/actuator/health || exit 1

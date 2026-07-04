@@ -1,5 +1,7 @@
 # HyperBrain-core
 
+[![CI](https://github.com/dacaitac/HyperBrain-core/actions/workflows/ci.yml/badge.svg)](https://github.com/dacaitac/HyperBrain-core/actions/workflows/ci.yml)
+
 Backend del ecosistema **HyperBrain**: monolito Spring Boot 3 (Java 21, Gradle) con arquitectura
 DDD modular y Event-Driven.
 
