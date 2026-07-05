@@ -9,6 +9,8 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,6 +57,36 @@ class PostgresConnectionIT {
                  "SELECT 1 FROM pg_extension WHERE extname = 'vector'")) {
             ResultSet rs = stmt.executeQuery();
             assertThat(rs.next()).as("pgvector extension must be installed").isTrue();
+        }
+    }
+
+    @Test
+    @DisplayName("All 24 domain tables from V1 DDL exist in public schema")
+    void allDomainTablesExist() throws Exception {
+        List<String> expected = List.of(
+                "sys_user", "sync_credential",
+                "core_project", "core_cycle", "core_executable",
+                "core_execution_profile", "core_time_block",
+                "fin_account", "fin_category", "fin_budget_template",
+                "fin_budget", "fin_goal", "fin_transaction", "fin_networth_snapshot",
+                "lrn_topic", "lrn_assessment",
+                "tel_sleep_record", "tel_activity_stream",
+                "brain_idea", "context_event", "rag_embedding",
+                "sync_mappings", "outbox_events", "processed_message"
+        );
+
+        try (Connection conn = dataSource.getConnection()) {
+            List<String> missing = new ArrayList<>();
+            for (String table : expected) {
+                ResultSet rs = conn.getMetaData()
+                        .getTables(null, "public", table, new String[]{"TABLE"});
+                if (!rs.next()) {
+                    missing.add(table);
+                }
+            }
+            assertThat(missing)
+                    .as("Tables missing from V1 DDL (check V1__init.sql vs supabase migrations): %s", missing)
+                    .isEmpty();
         }
     }
 }
