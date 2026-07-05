@@ -105,11 +105,14 @@ tasks.register('integrationTest', Test) {
     // the shaded default is 1.32, which is rejected.
     systemProperty 'api.version', '1.43'
 
-    // Use Docker Desktop socket (works on macOS without Colima quirks).
+    // On macOS (Docker Desktop) the socket lives at a non-standard path; on Linux
+    // (ubuntu-latest CI runner) it is /var/run/docker.sock — no override needed.
     // TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE tells Ryuk which path to mount inside
     // the container — /var/run/docker.sock is Docker Desktop's canonical in-VM path.
-    environment 'DOCKER_HOST', 'unix:///Users/danielc/.docker/run/docker.sock'
-    environment 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', '/var/run/docker.sock'
+    if (System.getProperty('os.name').toLowerCase().contains('mac')) {
+        environment 'DOCKER_HOST', 'unix:///Users/danielc/.docker/run/docker.sock'
+        environment 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', '/var/run/docker.sock'
+    }
 }
 
 tasks.named('check') {
