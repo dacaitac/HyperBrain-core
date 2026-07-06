@@ -40,11 +40,17 @@ spring:
           sync-events: ${SQS_QUEUE_SYNC_EVENTS:sync-events.fifo}
           core-events: ${SQS_QUEUE_CORE_EVENTS:core-events}
           ia-jobs:     ${SQS_QUEUE_IA_JOBS:ia-jobs}
+          apple-commands:         ${SQS_QUEUE_APPLE_COMMANDS:apple-commands.fifo}
+          apple-commands-results: ${SQS_QUEUE_APPLE_COMMANDS_RESULTS:apple-commands-results.fifo}
 
 app:
   sync:
     consumer:
       enabled: true
+    results-consumer:
+      # Listener of apple-commands-results.fifo; disable while the queue is not provisioned
+      # (a missing queue fails the listener container at startup).
+      enabled: ${SYNC_RESULTS_CONSUMER_ENABLED:true}
     # Single-user MVP: every inbound Apple event is owned by this user.
     # Override via SYNC_DEFAULT_USER_ID env var in production.
     default-user-id: ${SYNC_DEFAULT_USER_ID:00000000-0000-0000-0000-000000000001}

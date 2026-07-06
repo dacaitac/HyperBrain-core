@@ -31,6 +31,13 @@ class JdbcSyncMappingRepository implements SyncMappingRepository {
         WHERE external_system = ? AND external_id = ?
         """;
 
+    private static final String FIND_BY_LOCAL_SQL = """
+        SELECT id, user_id, local_id, external_system, external_id,
+               last_known_checksum, sync_status, last_synced_at
+        FROM sync_mappings
+        WHERE external_system = ? AND local_id = ?
+        """;
+
     private static final String UPDATE_SQL = """
         UPDATE sync_mappings
         SET last_known_checksum = ?, sync_status = ?, last_synced_at = ?
@@ -64,6 +71,12 @@ class JdbcSyncMappingRepository implements SyncMappingRepository {
     @Override
     public Optional<SyncMapping> findByExternalSystemAndId(String externalSystem, String externalId) {
         List<SyncMapping> rows = jdbcTemplate.query(FIND_SQL, ROW_MAPPER, externalSystem, externalId);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    @Override
+    public Optional<SyncMapping> findByExternalSystemAndLocalId(String externalSystem, UUID localId) {
+        List<SyncMapping> rows = jdbcTemplate.query(FIND_BY_LOCAL_SQL, ROW_MAPPER, externalSystem, localId);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 

@@ -378,3 +378,25 @@ CREATE TABLE processed_message (
     event_type    TEXT,
     processed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Correlation log of WriteCommands emitted to apple-commands.fifo (HU-09c, ADR-010).
+-- Mirrors HyperBrain-Infra/supabase/migrations/20260706130000_sync_write_commands.sql (S0-07).
+CREATE TABLE sync_write_commands (
+    command_id    UUID PRIMARY KEY,
+    user_id       UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
+    local_id      UUID NOT NULL,
+    command_type  TEXT NOT NULL CHECK (command_type IN ('REMINDER', 'CALENDAR_EVENT')),
+    operation     TEXT NOT NULL CHECK (operation IN ('CREATED', 'UPDATED', 'DELETED')),
+    entity_id     TEXT,
+    payload       JSONB,
+    status        TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPLIED', 'FAILED')),
+    error         TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at   TIMESTAMPTZ
+);
+
+CREATE INDEX idx_sync_write_commands_pending
+    ON sync_write_commands (created_at)
+    WHERE status = 'PENDING';
+
+CREATE INDEX idx_sync_write_commands_local ON sync_write_commands (local_id);

@@ -3,6 +3,7 @@ package com.hyperbrain.sync.domain.port.out;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Outbound port: persistence of {@link SyncMapping} records that bridge external entities
@@ -18,6 +19,16 @@ public interface SyncMappingRepository {
      * @return the mapping, or empty
      */
     Optional<SyncMapping> findByExternalSystemAndId(String externalSystem, String externalId);
+
+    /**
+     * Returns the mapping that links a local {@code core_executable} to the given external
+     * system, or empty if the entity has no counterpart there yet.
+     *
+     * @param externalSystem e.g. {@code "APPLE"}
+     * @param localId        the {@code core_executable} id
+     * @return the mapping, or empty
+     */
+    Optional<SyncMapping> findByExternalSystemAndLocalId(String externalSystem, UUID localId);
 
     /**
      * Inserts a new mapping row. The caller is responsible for generating {@code id}.

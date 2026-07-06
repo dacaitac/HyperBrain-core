@@ -24,5 +24,7 @@ app:
   sync:
     consumer:
       enabled: false
+    results-consumer:
+      enabled: false
   outbox:
     scheduling-enabled: false

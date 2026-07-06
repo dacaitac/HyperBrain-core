@@ -23,5 +23,5 @@ public record CalendarEventPayload(
     String calendarId,
     String calendarName,
     String location
-) {
+) implements WritePayload {
 }

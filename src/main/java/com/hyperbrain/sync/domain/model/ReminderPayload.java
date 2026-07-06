@@ -22,5 +22,5 @@ public record ReminderPayload(
     int priority,
     String listId,
     String listName
-) {
+) implements WritePayload {
 }

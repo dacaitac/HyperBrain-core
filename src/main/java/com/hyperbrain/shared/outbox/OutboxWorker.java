@@ -1,5 +1,6 @@
 package com.hyperbrain.shared.outbox;
 
+import com.hyperbrain.shared.messaging.IEventPropagator;
 import com.hyperbrain.shared.messaging.IEventPublisher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,13 +10,15 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 /**
- * Transactional Outbox relay: drains {@code outbox_events} and hands each event to the
- * {@link IEventPublisher}. The single component that reads the outbox table.
+ * Transactional Outbox relay: drains {@code outbox_events}, hands each event to the
+ * {@link IEventPublisher} and then to every registered {@link IEventPropagator}
+ * (satellite write-back, HU-09c). The single component that reads the outbox table.
  *
  * <p>Draining runs in one transaction so the {@code FOR UPDATE SKIP LOCKED} claim holds until
- * commit — concurrent workers never publish the same event. A publish failure is logged and
- * skipped (the row stays {@code processed = false}) so it is retried on the next poll; it does
- * not roll back siblings already published in the same batch.
+ * commit — concurrent workers never publish the same event. A publish or propagation failure is
+ * logged and skipped (the row stays {@code processed = false}) so it is retried on the next poll;
+ * it does not roll back siblings already published in the same batch. Retries can re-publish an
+ * already-delivered message, so all downstream consumers deduplicate (at-least-once).
  */
 @Component
 public class OutboxWorker {
@@ -24,11 +27,18 @@ public class OutboxWorker {
 
     private final OutboxRepository repository;
     private final IEventPublisher publisher;
+    private final List<IEventPropagator> propagators;
     private final OutboxProperties properties;
 
-    public OutboxWorker(OutboxRepository repository, IEventPublisher publisher, OutboxProperties properties) {
+    public OutboxWorker(
+        OutboxRepository repository,
+        IEventPublisher publisher,
+        List<IEventPropagator> propagators,
+        OutboxProperties properties
+    ) {
         this.repository = repository;
         this.publisher = publisher;
+        this.propagators = propagators;
         this.properties = properties;
     }
 
@@ -44,6 +54,9 @@ public class OutboxWorker {
         for (OutboxEvent event : batch) {
             try {
                 publisher.publish(event);
+                for (IEventPropagator propagator : propagators) {
+                    propagator.propagate(event);
+                }
                 repository.markProcessed(event.id());
                 published++;
             } catch (RuntimeException ex) {
