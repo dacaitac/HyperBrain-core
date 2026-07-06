@@ -33,4 +33,12 @@ public interface OutboxRepository {
      * @return number of rows deleted
      */
     int purgeProcessedOlderThan(int days);
+
+    /**
+     * Inserts a new outbox event. Must be called within the same transaction as the domain change
+     * that produced it (Transactional Outbox guarantee — never call this from outside a transaction).
+     *
+     * @param event the event to append
+     */
+    void append(OutboxEvent event);
 }

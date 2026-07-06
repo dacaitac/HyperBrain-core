@@ -32,6 +32,11 @@ public class JdbcOutboxRepository implements OutboxRepository {
     private static final String PURGE_SQL =
         "DELETE FROM outbox_events WHERE processed = true AND processed_at < now() - make_interval(days => ?)";
 
+    private static final String APPEND_SQL = """
+        INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, source_system, occurred_at)
+        VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)
+        """;
+
     private static final RowMapper<OutboxEvent> ROW_MAPPER = (rs, rowNum) -> new OutboxEvent(
         rs.getObject("id", UUID.class),
         rs.getString("aggregate_type"),
@@ -61,5 +66,17 @@ public class JdbcOutboxRepository implements OutboxRepository {
     @Override
     public int purgeProcessedOlderThan(int days) {
         return jdbcTemplate.update(PURGE_SQL, days);
+    }
+
+    @Override
+    public void append(OutboxEvent event) {
+        jdbcTemplate.update(APPEND_SQL,
+            event.id(),
+            event.aggregateType(),
+            event.aggregateId(),
+            event.eventType(),
+            event.payload(),
+            event.sourceSystem(),
+            event.occurredAt());
     }
 }

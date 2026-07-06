@@ -45,6 +45,9 @@ app:
   sync:
     consumer:
       enabled: true
+    # Single-user MVP: every inbound Apple event is owned by this user.
+    # Override via SYNC_DEFAULT_USER_ID env var in production.
+    default-user-id: ${SYNC_DEFAULT_USER_ID:00000000-0000-0000-0000-000000000001}
   outbox:
     poll-interval-ms:   2000
     batch-size:         50

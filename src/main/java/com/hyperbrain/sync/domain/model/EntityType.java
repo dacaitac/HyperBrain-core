@@ -6,5 +6,7 @@ package com.hyperbrain.sync.domain.model;
  */
 public enum EntityType {
     REMINDER,
-    CALENDAR_EVENT
+    CALENDAR_EVENT,
+    REMINDER_LIST,
+    CALENDAR
 }
