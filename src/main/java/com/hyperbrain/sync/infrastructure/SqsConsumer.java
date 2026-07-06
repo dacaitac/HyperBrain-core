@@ -40,6 +40,12 @@ public class SqsConsumer {
     public void onMessage(String body) {
         SentinelEvent event = deserialize(body);
         validate(event);
+        log.info(
+            "sync event received: {} {} entityId={} eventId={}",
+            event.entityType(),
+            event.operation(),
+            event.entityId(),
+            event.eventId());
         ingestionService.ingest(event);
     }
 
