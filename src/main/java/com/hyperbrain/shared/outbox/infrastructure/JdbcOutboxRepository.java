@@ -78,5 +78,8 @@ public class JdbcOutboxRepository implements OutboxRepository {
             event.payload(),
             event.sourceSystem(),
             event.occurredAt());
+        // Signals OutboxListenConnection to drain immediately. Runs on the same connection as the
+        // INSERT so the NOTIFY is delivered only on commit and discarded on rollback (PG guarantee).
+        jdbcTemplate.execute("SELECT pg_notify('outbox_drain', '')");
     }
 }

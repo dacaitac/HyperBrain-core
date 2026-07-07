@@ -28,3 +28,6 @@ app:
       enabled: false
   outbox:
     scheduling-enabled: false
+    # OutboxListenConnection is off so OutboxWorkerIT can drive drainBatch() manually without
+    # async interference from the background listener thread.
+    notify-listen-enabled: false

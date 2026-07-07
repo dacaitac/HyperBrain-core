@@ -62,10 +62,13 @@ app:
       tasks-data-source-id: ${NOTION_TASKS_DATA_SOURCE_ID:1bf8bc9c5d918171b7ea000b7e326082}
       cycles-data-source-id: ${NOTION_CYCLES_DATA_SOURCE_ID:1bf8bc9c5d9181e78737000b45812f45}
   outbox:
-    poll-interval-ms:   2000
+    # Primary drain trigger is LISTEN/NOTIFY (OutboxListenConnection). This poll runs as a
+    # backup at a long interval to recover events that survived a connection drop or restart.
+    poll-interval-ms:   30000
     batch-size:         50
     retention-days:     7
     scheduling-enabled: true
+    notify-listen-enabled: true
 
 management:
   endpoints:
