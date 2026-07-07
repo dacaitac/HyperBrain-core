@@ -131,6 +131,14 @@ class NotionRestClient implements NotionPort {
                 if (status.value() == 404) {
                     throw new NotionPageNotFoundException(path);
                 }
+                if (status.value() == 400) {
+                    String responseBody = ex.getResponseBodyAsString();
+                    // Already-archived pages are in the target state; treat as gone (idempotent)
+                    if (responseBody.contains("\"code\":\"validation_error\"")
+                            && responseBody.contains("archived")) {
+                        throw new NotionPageNotFoundException(path);
+                    }
+                }
                 if (status.value() != 429 && !status.is5xxServerError()) {
                     throw new NotionApiException(
                         "Notion rejected %s %s with status %d".formatted(method, path, status.value()), ex);

@@ -198,6 +198,30 @@ class NotionWriteBackIT {
     }
 
     @Test
+    @DisplayName("DELETE: Notion 400 validation_error already-archived is treated as success and cleans the mapping")
+    void delete_already_archived_page_is_idempotent() {
+        // Given a page that was already archived in Notion before the outbox event fires
+        UUID localId = UUID.randomUUID();
+        String externalId = "page0000000000000000000000000dd2";
+        insertMapping(localId, externalId, null);
+        insertOutboxEvent(localId, "CORE_EXECUTABLE", "ExecutableDeletedEvent", "SYSTEM");
+        NOTION.stubFor(WireMock.patch(urlEqualTo("/v1/pages/" + externalId))
+            .willReturn(aResponse().withStatus(400)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"object\":\"error\",\"status\":400,\"code\":\"validation_error\"," +
+                    "\"message\":\"Can't edit block that is archived. You must unarchive the block before editing.\"}")));
+
+        // When
+        outboxWorker.drainBatch();
+
+        // Then the event completes and the stale mapping is removed
+        assertThat(unprocessedEvents()).isZero();
+        Integer mappings = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_mappings WHERE external_id = ?", Integer.class, externalId);
+        assertThat(mappings).isZero();
+    }
+
+    @Test
     @DisplayName("Cycles: a task with an unmapped cycle creates the cycle page first and links the relation (CA-6)")
     void unmapped_cycle_is_created_before_the_task() throws Exception {
         // Given an executable owned by a cycle that has no Notion page yet
