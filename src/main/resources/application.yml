@@ -47,6 +47,15 @@ app:
   sync:
     consumer:
       enabled: true
+      # Batch + long-polling tunables for SqsMessageListenerContainerFactory (CA-6, CA-9).
+      # max-messages-per-poll: maps to SQS MaxNumberOfMessages (max 10 per API constraint).
+      max-messages-per-poll: 10
+      # wait-time-seconds: maps to SQS WaitTimeSeconds; long-poll eliminates empty polls.
+      wait-time-seconds: 20
+      # visibility-timeout-seconds: how long a received message stays invisible in SQS.
+      # Criterion: p99 ingestion path (dedup + DB write + optional Notion write-back) ≈ 10 s;
+      # 3× safety margin = 30 s to absorb transient DB/Notion latency spikes.
+      visibility-timeout-seconds: 30
     results-consumer:
       # Listener of apple-commands-results.fifo; disable while the queue is not provisioned
       # (a missing queue fails the listener container at startup).
