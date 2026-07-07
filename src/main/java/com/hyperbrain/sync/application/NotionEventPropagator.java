@@ -2,7 +2,9 @@ package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.messaging.IEventPropagator;
+import com.hyperbrain.shared.messaging.SyncedEntityType;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.sync.domain.NotionApiException;
 import com.hyperbrain.sync.domain.NotionPageNotFoundException;
@@ -30,17 +32,23 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Outbound half of the SyncServ towards Notion (HU-10): propagates {@code core_executable}
- * changes to the Tasks database and {@code core_cycle} changes to the Cycles database
- * (ADR-011: Cycles sync is fully bidirectional).
+ * Notion {@link IEventPropagator} (HU-10, refactored to the propagator pattern in HU-14 CA-11):
+ * propagates {@code core_executable} changes to the Tasks database and {@code core_cycle}
+ * changes to the Cycles database (ADR-011: Cycles sync is fully bidirectional).
  *
  * <p>Routing rules (RF-17 loop protection):
  * <ul>
- *   <li>Events with {@code source_system = NOTION} (or unknown origin) never bounce back to
- *       Notion; {@code APPLE} and {@code SYSTEM} do propagate (CA-2).
+ *   <li>Framework contract: the drain never invokes it for {@code source_system = NOTION};
+ *       {@link #shouldPropagate} additionally rejects unknown origins. {@code APPLE} and
+ *       {@code SYSTEM} do propagate (CA-2), for executables and cycles alike.
  *   <li>Unlike the Apple write-back (ADR-009), {@code AGENDA} executables ARE propagated —
  *       the read-only restriction applies only towards Apple.
  * </ul>
+ *
+ * <p>Runs on a virtual thread outside the drain transaction (HU-14 CA-13): every statement
+ * commits independently, so the {@code sync_status=ERROR} marker survives the rethrow that
+ * leaves the outbox event unprocessed for retry; partial writes are repaired by the retry
+ * (all operations are idempotent). A failure never cancels the sibling propagators (CA-23).
  *
  * <p>Contract with Notion (ADR-011, no result queue): CREATE persists the synchronously
  * returned {@code page_id} in {@code sync_mappings} within the same drain transaction (CA-3);
@@ -56,9 +64,9 @@ import java.util.UUID;
  */
 @Service
 @ConditionalOnProperty(prefix = "app.sync.notion", name = "enabled", havingValue = "true")
-public class NotionWriteBackService implements IEventPropagator {
+public class NotionEventPropagator implements IEventPropagator {
 
-    private static final Logger log = LoggerFactory.getLogger(NotionWriteBackService.class);
+    private static final Logger log = LoggerFactory.getLogger(NotionEventPropagator.class);
 
     private static final String EXTERNAL_SYSTEM = "NOTION";
     private static final String STATUS_SYNCED = "SYNCED";
@@ -99,7 +107,7 @@ public class NotionWriteBackService implements IEventPropagator {
     private final ObjectMapper objectMapper;
     private final MeterRegistry meterRegistry;
 
-    public NotionWriteBackService(
+    public NotionEventPropagator(
         SyncSnapshotRepository snapshotRepo,
         SyncMappingRepository syncMappingRepo,
         NotionPort notion,
@@ -113,6 +121,17 @@ public class NotionWriteBackService implements IEventPropagator {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.meterRegistry = meterRegistry;
+    }
+
+    @Override
+    public ExternalSystem target() {
+        return ExternalSystem.NOTION;
+    }
+
+    @Override
+    public boolean shouldPropagate(ExternalSystem origin, SyncedEntityType entityType) {
+        return origin != ExternalSystem.UNKNOWN
+            && (entityType == SyncedEntityType.EXECUTABLE || entityType == SyncedEntityType.CYCLE);
     }
 
     @Override
@@ -132,11 +151,6 @@ public class NotionWriteBackService implements IEventPropagator {
             operation = CYCLE_EVENT_OPERATIONS.get(event.eventType());
         }
         if (operation == null) {
-            return;
-        }
-        if (event.sourceSystem() == null || EXTERNAL_SYSTEM.equals(event.sourceSystem())) {
-            log.debug("Loop protection: not writing event {} (source_system={}) back to Notion",
-                event.id(), event.sourceSystem());
             return;
         }
         UUID localId = isAppleSync

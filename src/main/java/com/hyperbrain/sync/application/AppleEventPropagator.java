@@ -1,6 +1,8 @@
 package com.hyperbrain.sync.application;
 
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.messaging.IEventPropagator;
+import com.hyperbrain.shared.messaging.SyncedEntityType;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
@@ -25,13 +27,17 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Outbound half of the SyncServ (HU-09c): turns {@code core_executable} changes drained from the
- * Transactional Outbox into {@link WriteCommand}s on {@code apple-commands.fifo}.
+ * Apple {@link IEventPropagator} (HU-09c, refactored to the propagator pattern in HU-14 CA-12):
+ * turns {@code core_executable} changes drained from the Transactional Outbox into
+ * {@link WriteCommand}s on {@code apple-commands.fifo}.
  *
  * <p>Routing rules (RF-17 loop protection + ADR-009):
  * <ul>
- *   <li>Events with {@code source_system = APPLE} (or unknown origin) never bounce back to Apple.
- *   <li>Executables mapped as {@code AGENDA} are read-only and never produce a command.
+ *   <li>Framework contract: the drain never invokes it for {@code source_system = APPLE};
+ *       {@link #shouldPropagate} additionally rejects unknown origins and non-executable
+ *       aggregates (cycles have no Apple counterpart).
+ *   <li>Executables mapped as {@code AGENDA} are read-only and never produce a command; that
+ *       check needs the persisted row, so it lives in {@link #propagate} (ADR-009).
  *   <li>The effective operation follows the {@code sync_mapping}: mapped → UPDATED against the
  *       EventKit id; unmapped → CREATED with a null id, closed later by the
  *       {@code WriteCommandResult} (ADR-010).
@@ -39,13 +45,15 @@ import java.util.UUID;
  *
  * <p>The {@code commandId} is derived deterministically from the outbox event id, so a retried
  * drain re-emits the same command (SQS FIFO + SentinelAPI dedup absorb the duplicate) instead of
- * creating a second EventKit entity. Runs inside the drain transaction; any failure leaves the
- * outbox row unprocessed for retry.
+ * creating a second EventKit entity. Runs on a virtual thread outside the drain transaction
+ * (CA-13): every statement commits independently and retries repair any partial write (all
+ * operations are idempotent). Any failure leaves the outbox row unprocessed for retry and
+ * never cancels the sibling propagators of the same event (CA-23).
  */
 @Service
-public class AppleWriteBackService implements IEventPropagator {
+public class AppleEventPropagator implements IEventPropagator {
 
-    private static final Logger log = LoggerFactory.getLogger(AppleWriteBackService.class);
+    private static final Logger log = LoggerFactory.getLogger(AppleEventPropagator.class);
 
     private static final String EXTERNAL_SYSTEM = "APPLE";
     private static final String COMMAND_ID_NAMESPACE = "hyperbrain-write-command:";
@@ -66,7 +74,7 @@ public class AppleWriteBackService implements IEventPropagator {
     private final WriteCommandPublisher commandPublisher;
     private final WriteCommandWireMapper wireMapper;
 
-    public AppleWriteBackService(
+    public AppleEventPropagator(
         CoreExecutableRepository executableRepo,
         SyncMappingRepository syncMappingRepo,
         WriteCommandLogRepository commandLogRepo,
@@ -81,17 +89,22 @@ public class AppleWriteBackService implements IEventPropagator {
     }
 
     @Override
+    public ExternalSystem target() {
+        return ExternalSystem.APPLE;
+    }
+
+    @Override
+    public boolean shouldPropagate(ExternalSystem origin, SyncedEntityType entityType) {
+        return origin != ExternalSystem.UNKNOWN && entityType == SyncedEntityType.EXECUTABLE;
+    }
+
+    @Override
     public void propagate(OutboxEvent event) {
         if (!EXECUTABLE_AGGREGATES.contains(event.aggregateType())) {
             return;
         }
         Operation operation = EVENT_OPERATIONS.get(event.eventType());
         if (operation == null) {
-            return;
-        }
-        if (event.sourceSystem() == null || EXTERNAL_SYSTEM.equals(event.sourceSystem())) {
-            log.debug("Loop protection: not writing event {} (source_system={}) back to Apple",
-                event.id(), event.sourceSystem());
             return;
         }
         UUID localId = parseLocalId(event.aggregateId());

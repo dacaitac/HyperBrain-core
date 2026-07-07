@@ -63,15 +63,6 @@ public final class NotionTaskMapper {
         "AGENDA", "Agenda",
         "LEARNING_SESSION", "Learning Session");
 
-    private static final List<String> IMPACT_OPTIONS =
-        List.of("Irrelevante", "Bajo", "Moderado", "Alto", "Crítico");
-
-    private static final List<String> ENERGY_OPTIONS =
-        List.of("Automático", "Ejecución", "Sostenido", "Exigente", "Intenso");
-
-    private static final List<String> MENTAL_LOAD_OPTIONS =
-        List.of("Rutinario", "Foco", "Análisis", "Complejo", "Abstracto");
-
     private NotionTaskMapper() {
     }
 
@@ -102,9 +93,9 @@ public final class NotionTaskMapper {
         putNumber(props, NotionSchema.PROP_PRIORITY_SCORE, snapshot.priorityScore());
         putNumber(props, NotionSchema.PROP_URGENCE, snapshot.urgencyScore());
         putNumber(props, NotionSchema.PROP_EFFORT, snapshot.effortScore());
-        putScale(props, NotionSchema.PROP_IMPACT, snapshot.impact(), IMPACT_OPTIONS);
-        putScale(props, NotionSchema.PROP_ENERGY, snapshot.energyDrain(), ENERGY_OPTIONS);
-        putScale(props, NotionSchema.PROP_MENTAL_LOAD, snapshot.mentalLoad(), MENTAL_LOAD_OPTIONS);
+        putScale(props, NotionSchema.PROP_IMPACT, snapshot.impact(), NotionSchema.IMPACT_OPTIONS);
+        putScale(props, NotionSchema.PROP_ENERGY, snapshot.energyDrain(), NotionSchema.ENERGY_OPTIONS);
+        putScale(props, NotionSchema.PROP_MENTAL_LOAD, snapshot.mentalLoad(), NotionSchema.MENTAL_LOAD_OPTIONS);
         if (cycleExternalId != null) {
             props.put(NotionSchema.PROP_CYCLE, relation(cycleExternalId));
         }

@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.domain.port.out;
 
 import com.hyperbrain.sync.domain.model.CoreExecutable;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -39,4 +40,14 @@ public interface CoreExecutableRepository {
      * @param id surrogate key
      */
     void deleteById(UUID id);
+
+    /**
+     * Inserts or updates the full attribute set of the Notion inbound mapping (HU-14 CA-28):
+     * {@code core_executable} columns plus the {@code core_execution_profile} scales, keyed
+     * by {@code id}. The upsert makes CREATE-vs-UPDATE resolution independent of the webhook
+     * event type.
+     *
+     * @param snapshot the state to persist
+     */
+    void upsert(ExecutableSnapshot snapshot);
 }

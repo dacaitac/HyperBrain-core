@@ -2,6 +2,8 @@ package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.hyperbrain.shared.messaging.ExternalSystem;
+import com.hyperbrain.shared.messaging.SyncedEntityType;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
@@ -34,8 +36,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-@DisplayName("AppleWriteBackService")
-class AppleWriteBackServiceTest {
+@DisplayName("AppleEventPropagator")
+class AppleEventPropagatorTest {
 
     private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final UUID LOCAL_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
@@ -45,7 +47,7 @@ class AppleWriteBackServiceTest {
     private SyncMappingRepository syncMappingRepo;
     private WriteCommandLogRepository commandLogRepo;
     private WriteCommandPublisher commandPublisher;
-    private AppleWriteBackService service;
+    private AppleEventPropagator service;
 
     @BeforeEach
     void setUp() {
@@ -55,28 +57,20 @@ class AppleWriteBackServiceTest {
         commandPublisher = mock(WriteCommandPublisher.class);
         WriteCommandWireMapper wireMapper =
             new WriteCommandWireMapper(new ObjectMapper().registerModule(new JavaTimeModule()));
-        service = new AppleWriteBackService(
+        service = new AppleEventPropagator(
             executableRepo, syncMappingRepo, commandLogRepo, commandPublisher, wireMapper);
     }
 
     @Test
-    @DisplayName("loop protection: source_system=APPLE never bounces back to Apple (CA-10)")
-    void apple_sourced_event_is_not_propagated() {
-        // When
-        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "APPLE"));
-
-        // Then
-        verifyNoInteractions(executableRepo, syncMappingRepo, commandLogRepo, commandPublisher);
-    }
-
-    @Test
-    @DisplayName("loop protection: events with unknown origin are not propagated")
-    void null_source_event_is_not_propagated() {
-        // When
-        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", null));
-
-        // Then
-        verifyNoInteractions(executableRepo, syncMappingRepo, commandLogRepo, commandPublisher);
+    @DisplayName("propagator contract: target is APPLE and only executables from known origins are eligible (CA-12)")
+    void should_propagate_only_executables_from_known_origins() {
+        // Then — the drain excludes origin == target before consulting shouldPropagate (CA-10)
+        assertThat(service.target()).isEqualTo(ExternalSystem.APPLE);
+        assertThat(service.shouldPropagate(ExternalSystem.NOTION, SyncedEntityType.EXECUTABLE)).isTrue();
+        assertThat(service.shouldPropagate(ExternalSystem.SYSTEM, SyncedEntityType.EXECUTABLE)).isTrue();
+        assertThat(service.shouldPropagate(ExternalSystem.UNKNOWN, SyncedEntityType.EXECUTABLE)).isFalse();
+        assertThat(service.shouldPropagate(ExternalSystem.NOTION, SyncedEntityType.CYCLE)).isFalse();
+        assertThat(service.shouldPropagate(ExternalSystem.SYSTEM, SyncedEntityType.OTHER)).isFalse();
     }
 
     @Test

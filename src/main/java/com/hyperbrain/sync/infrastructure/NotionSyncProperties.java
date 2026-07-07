@@ -27,6 +27,12 @@ public class NotionSyncProperties {
     /** Data source id of the Cycles database. */
     private String cyclesDataSourceId = "";
 
+    /** Database id of the Tasks database (webhook parents may carry it instead of the data source id, HU-14). */
+    private String tasksDatabaseId = "";
+
+    /** Database id of the Cycles database (HU-14). */
+    private String cyclesDatabaseId = "";
+
     /** Attempts per request before the failure escalates (429/5xx/IO, CA-8/CA-13). */
     private int maxAttempts = 3;
 
@@ -88,6 +94,22 @@ public class NotionSyncProperties {
 
     public void setCyclesDataSourceId(String cyclesDataSourceId) {
         this.cyclesDataSourceId = cyclesDataSourceId;
+    }
+
+    public String getTasksDatabaseId() {
+        return tasksDatabaseId;
+    }
+
+    public void setTasksDatabaseId(String tasksDatabaseId) {
+        this.tasksDatabaseId = tasksDatabaseId;
+    }
+
+    public String getCyclesDatabaseId() {
+        return cyclesDatabaseId;
+    }
+
+    public void setCyclesDatabaseId(String cyclesDatabaseId) {
+        this.cyclesDatabaseId = cyclesDatabaseId;
     }
 
     public int getMaxAttempts() {

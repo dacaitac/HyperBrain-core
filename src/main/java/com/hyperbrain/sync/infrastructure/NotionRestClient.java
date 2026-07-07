@@ -19,6 +19,9 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -86,16 +89,43 @@ class NotionRestClient implements NotionPort {
         exchange(HttpMethod.PATCH, "/v1/pages/" + pageId, Map.of("archived", true));
     }
 
+    @Override
+    public String retrievePage(String pageId) {
+        return exchange(HttpMethod.GET, "/v1/pages/" + pageId, null);
+    }
+
+    @Override
+    public List<String> queryAllPages(String dataSourceId) {
+        List<String> pages = new ArrayList<>();
+        String cursor = null;
+        do {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("page_size", 100);
+            if (cursor != null) {
+                body.put("start_cursor", cursor);
+            }
+            String response = exchange(HttpMethod.POST, "/v1/data_sources/" + dataSourceId + "/query", body);
+            JsonNode root = parse(response);
+            for (JsonNode page : root.path("results")) {
+                pages.add(page.toString());
+            }
+            cursor = root.path("has_more").asBoolean(false)
+                ? root.path("next_cursor").asText(null)
+                : null;
+        } while (cursor != null);
+        return pages;
+    }
+
     private String exchange(HttpMethod method, String path, Map<String, Object> body) {
         NotionApiException lastFailure = null;
         for (int attempt = 1; attempt <= properties.getMaxAttempts(); attempt++) {
             throttle();
             try {
-                return restClient.method(method)
-                    .uri(path)
-                    .body(body)
-                    .retrieve()
-                    .body(String.class);
+                var request = restClient.method(method).uri(path);
+                if (body != null) {
+                    request.body(body);
+                }
+                return request.retrieve().body(String.class);
             } catch (RestClientResponseException ex) {
                 HttpStatusCode status = ex.getStatusCode();
                 if (status.value() == 404) {
@@ -157,15 +187,18 @@ class NotionRestClient implements NotionPort {
     }
 
     private String extractPageId(String responseJson) {
+        String id = parse(responseJson).path("id").asText();
+        if (id.isBlank()) {
+            throw new NotionApiException("Notion create-page response carries no page id");
+        }
+        return id;
+    }
+
+    private JsonNode parse(String responseJson) {
         try {
-            JsonNode node = objectMapper.readTree(responseJson);
-            String id = node.path("id").asText();
-            if (id.isBlank()) {
-                throw new NotionApiException("Notion create-page response carries no page id");
-            }
-            return id;
+            return objectMapper.readTree(responseJson);
         } catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
-            throw new NotionApiException("Unparseable Notion create-page response", ex);
+            throw new NotionApiException("Unparseable Notion API response", ex);
         }
     }
 

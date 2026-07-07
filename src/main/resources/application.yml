@@ -2,6 +2,12 @@ spring:
   application:
     name: hyperbrain-core
 
+  # Virtual threads for Tomcat, @Async and task scheduling (HU-14 CA-14). The outbox drain
+  # additionally runs its propagators on a dedicated virtual-thread executor (PipelineConfig).
+  threads:
+    virtual:
+      enabled: true
+
   datasource:
     url:      ${DB_URL:jdbc:postgresql://localhost:5432/hyperbrain}
     username: ${DB_USER:hyperbrain}
@@ -70,6 +76,10 @@ app:
       token: ${NOTION_TOKEN:}
       tasks-data-source-id: ${NOTION_TASKS_DATA_SOURCE_ID:1bf8bc9c5d918171b7ea000b7e326082}
       cycles-data-source-id: ${NOTION_CYCLES_DATA_SOURCE_ID:1bf8bc9c5d9181e78737000b45812f45}
+      # Database ids of the same DBs (HU-14): webhook payloads may reference the parent as a
+      # database_id (automations) or a data_source_id (subscription); both are matched.
+      tasks-database-id: ${NOTION_TASKS_DATABASE_ID:1bf8bc9c5d91812b8c97e5e6450858aa}
+      cycles-database-id: ${NOTION_CYCLES_DATABASE_ID:1bf8bc9c5d9181d882cfe1f4aa38f295}
   outbox:
     # Primary drain trigger is LISTEN/NOTIFY (OutboxListenConnection). This poll runs as a
     # backup at a long interval to recover events that survived a connection drop or restart.

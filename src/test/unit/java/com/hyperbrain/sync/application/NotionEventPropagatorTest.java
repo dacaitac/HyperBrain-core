@@ -1,6 +1,8 @@
 package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.shared.messaging.ExternalSystem;
+import com.hyperbrain.shared.messaging.SyncedEntityType;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.sync.domain.NotionApiException;
 import com.hyperbrain.sync.domain.NotionPageNotFoundException;
@@ -40,8 +42,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-@DisplayName("NotionWriteBackService")
-class NotionWriteBackServiceTest {
+@DisplayName("NotionEventPropagator")
+class NotionEventPropagatorTest {
 
     private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final UUID LOCAL_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
@@ -55,7 +57,7 @@ class NotionWriteBackServiceTest {
     private SyncMappingRepository syncMappingRepo;
     private NotionPort notion;
     private SimpleMeterRegistry meterRegistry;
-    private NotionWriteBackService service;
+    private NotionEventPropagator service;
 
     @BeforeEach
     void setUp() {
@@ -67,30 +69,21 @@ class NotionWriteBackServiceTest {
         properties.setEnabled(true);
         properties.setTasksDataSourceId(TASKS_DS);
         properties.setCyclesDataSourceId(CYCLES_DS);
-        service = new NotionWriteBackService(snapshotRepo, syncMappingRepo, notion,
+        service = new NotionEventPropagator(snapshotRepo, syncMappingRepo, notion,
             properties, new ObjectMapper(), meterRegistry);
     }
 
     // ── Routing (CA-2, RF-17) ─────────────────────────────────────────────────
 
     @Test
-    @DisplayName("loop protection: source_system=NOTION never bounces back to Notion (CA-2)")
-    void notion_sourced_event_is_not_propagated() {
-        // When
-        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
-
-        // Then
-        verifyNoInteractions(snapshotRepo, syncMappingRepo, notion);
-    }
-
-    @Test
-    @DisplayName("loop protection: events with unknown origin are not propagated")
-    void null_source_event_is_not_propagated() {
-        // When
-        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", null));
-
-        // Then
-        verifyNoInteractions(snapshotRepo, syncMappingRepo, notion);
+    @DisplayName("propagator contract: target is NOTION; executables and cycles from known origins are eligible (CA-11)")
+    void should_propagate_executables_and_cycles_from_known_origins() {
+        // Then — the drain excludes origin == target before consulting shouldPropagate (CA-10)
+        assertThat(service.target()).isEqualTo(ExternalSystem.NOTION);
+        assertThat(service.shouldPropagate(ExternalSystem.APPLE, SyncedEntityType.EXECUTABLE)).isTrue();
+        assertThat(service.shouldPropagate(ExternalSystem.SYSTEM, SyncedEntityType.CYCLE)).isTrue();
+        assertThat(service.shouldPropagate(ExternalSystem.UNKNOWN, SyncedEntityType.EXECUTABLE)).isFalse();
+        assertThat(service.shouldPropagate(ExternalSystem.APPLE, SyncedEntityType.OTHER)).isFalse();
     }
 
     @Test

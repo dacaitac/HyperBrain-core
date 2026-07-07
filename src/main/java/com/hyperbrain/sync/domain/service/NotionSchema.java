@@ -1,5 +1,6 @@
 package com.hyperbrain.sync.domain.service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,6 +33,18 @@ public final class NotionSchema {
 
     // ── Cycles DB ─────────────────────────────────────────────────────────────
     public static final String PROP_INACTIVE = "Inactive";
+
+    // ── Canonical select options (1-based domain scale ↔ option index) ────────
+    // Shared by the outbound (HU-10) and inbound (HU-14) mappers so both directions
+    // agree on the same scale encoding.
+    public static final List<String> IMPACT_OPTIONS =
+        List.of("Irrelevante", "Bajo", "Moderado", "Alto", "Crítico");
+
+    public static final List<String> ENERGY_OPTIONS =
+        List.of("Automático", "Ejecución", "Sostenido", "Exigente", "Intenso");
+
+    public static final List<String> MENTAL_LOAD_OPTIONS =
+        List.of("Rutinario", "Foco", "Análisis", "Complejo", "Abstracto");
 
     /**
      * Formula and rollup properties (both databases): computed by Notion, writing them is a

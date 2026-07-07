@@ -3,6 +3,7 @@ package com.hyperbrain.sync.domain.port.out;
 import com.hyperbrain.sync.domain.NotionApiException;
 import com.hyperbrain.sync.domain.NotionPageNotFoundException;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -45,4 +46,26 @@ public interface NotionPort {
      * @throws NotionApiException          if the API rejects the call or stays unavailable
      */
     void archivePage(String pageId);
+
+    /**
+     * Retrieves the current state of a page as raw JSON (HU-14): subscription webhook
+     * deliveries are thin, so the Consumer fetches the page to map its properties.
+     *
+     * @param pageId the Notion page id (with or without dashes)
+     * @return the raw page object JSON
+     * @throws NotionPageNotFoundException if the page was permanently deleted or access was lost
+     * @throws NotionApiException          if the API rejects the call or stays unavailable
+     */
+    String retrievePage(String pageId);
+
+    /**
+     * Lists every page of a data source, following pagination to the end (HU-14 backfill,
+     * CA-8). Suitable for the MVP data volumes (hundreds of pages); each underlying request
+     * honors the rate-limit throttle.
+     *
+     * @param dataSourceId the data source to query (Tasks or Cycles)
+     * @return the raw page object JSONs, in query order
+     * @throws NotionApiException if the API rejects a call or stays unavailable
+     */
+    List<String> queryAllPages(String dataSourceId);
 }

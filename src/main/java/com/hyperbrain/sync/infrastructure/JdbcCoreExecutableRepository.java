@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.infrastructure;
 
 import com.hyperbrain.sync.domain.model.CoreExecutable;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -39,6 +40,34 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
 
     private static final String DELETE_BY_ID_SQL =
         "DELETE FROM core_executable WHERE id = ?";
+
+    private static final String UPSERT_SQL = """
+        INSERT INTO core_executable
+            (id, user_id, parent_id, cycle_id, name, description, type, status,
+             priority_score, urgency_score, effort_score, start_time, end_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            parent_id      = EXCLUDED.parent_id,
+            cycle_id       = EXCLUDED.cycle_id,
+            name           = EXCLUDED.name,
+            description    = EXCLUDED.description,
+            type           = EXCLUDED.type,
+            status         = EXCLUDED.status,
+            priority_score = EXCLUDED.priority_score,
+            urgency_score  = EXCLUDED.urgency_score,
+            effort_score   = EXCLUDED.effort_score,
+            start_time     = EXCLUDED.start_time,
+            end_time       = EXCLUDED.end_time
+        """;
+
+    private static final String UPSERT_PROFILE_SQL = """
+        INSERT INTO core_execution_profile (executable_id, energy_drain, mental_load, impact)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (executable_id) DO UPDATE SET
+            energy_drain = EXCLUDED.energy_drain,
+            mental_load  = EXCLUDED.mental_load,
+            impact       = EXCLUDED.impact
+        """;
 
     private static final RowMapper<CoreExecutable> ROW_MAPPER = (rs, rowNum) -> {
         Timestamp startTs = rs.getTimestamp("start_time");
@@ -87,6 +116,16 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
     @Override
     public void deleteById(UUID id) {
         jdbcTemplate.update(DELETE_BY_ID_SQL, id);
+    }
+
+    @Override
+    public void upsert(ExecutableSnapshot s) {
+        jdbcTemplate.update(UPSERT_SQL,
+            s.id(), s.userId(), s.parentId(), s.cycleId(), s.name(), s.description(),
+            s.type(), s.status(), s.priorityScore(), s.urgencyScore(), s.effortScore(),
+            toTimestamp(s.startTime()), toTimestamp(s.endTime()));
+        jdbcTemplate.update(UPSERT_PROFILE_SQL,
+            s.id(), s.energyDrain(), s.mentalLoad(), s.impact());
     }
 
     private static Timestamp toTimestamp(OffsetDateTime odt) {

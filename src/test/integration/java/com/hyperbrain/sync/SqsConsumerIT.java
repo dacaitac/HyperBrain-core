@@ -96,21 +96,24 @@ class SqsConsumerIT {
     }
 
     @Test
-    @DisplayName("acknowledges a NOTION webhook envelope with dedup and no routing (pre-HU-14)")
-    void acknowledges_notion_envelope_without_routing() {
+    @DisplayName("discards a NOTION envelope of an unmapped database without routing it (HU-14 CA-1)")
+    void discards_notion_envelope_of_unmapped_database() {
         String messageId = UUID.randomUUID().toString();
-        String body = notionBody(messageId);
+        String controlId = UUID.randomUUID().toString();
+        String controlEntity = "EKReminder-" + UUID.randomUUID();
 
-        // Two deliveries with the same message_id but distinct SQS dedup ids
-        send(body, "notion-smoke-entity", UUID.randomUUID().toString());
-        send(body, "notion-smoke-entity", UUID.randomUUID().toString());
+        send(notionBody(messageId), "notion-smoke-entity", UUID.randomUUID().toString());
+        send(reminderBody(controlId, "APPLE", controlEntity), controlEntity, UUID.randomUUID().toString());
 
-        // Acknowledged exactly once, and nothing was routed into the domain
+        // Control event processed → the consumer drained past the Notion envelope
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-            assertThat(countProcessed(messageId)).isEqualTo(1));
+            assertThat(countProcessed(controlId)).isEqualTo(1));
+
+        // The foreign-database envelope left no trace: not deduped, nothing routed
+        assertThat(countProcessed(messageId)).isZero();
         Integer executables = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM core_executable", Integer.class);
-        assertThat(executables).isZero();
+        assertThat(executables).isEqualTo(1);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
