@@ -95,6 +95,24 @@ class SqsConsumerIT {
         assertThat(countExecutable(selfEntity)).isZero();
     }
 
+    @Test
+    @DisplayName("acknowledges a NOTION webhook envelope with dedup and no routing (pre-HU-14)")
+    void acknowledges_notion_envelope_without_routing() {
+        String messageId = UUID.randomUUID().toString();
+        String body = notionBody(messageId);
+
+        // Two deliveries with the same message_id but distinct SQS dedup ids
+        send(body, "notion-smoke-entity", UUID.randomUUID().toString());
+        send(body, "notion-smoke-entity", UUID.randomUUID().toString());
+
+        // Acknowledged exactly once, and nothing was routed into the domain
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+            assertThat(countProcessed(messageId)).isEqualTo(1));
+        Integer executables = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable", Integer.class);
+        assertThat(executables).isZero();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void send(String body, String groupId, String dedupId) {
@@ -119,6 +137,21 @@ class SqsConsumerIT {
             WHERE m.external_system='APPLE' AND m.external_id=?
             """, Integer.class, externalId);
         return count == null ? 0 : count;
+    }
+
+    private static String notionBody(String messageId) {
+        return """
+            {
+              "source_system": "NOTION",
+              "message_id": "%s",
+              "timestamp": "2026-07-07T10:00:00Z",
+              "payload": {
+                "id": "%s",
+                "type": "page.content_updated",
+                "entity": { "id": "notion-smoke-entity", "type": "page" }
+              }
+            }
+            """.formatted(messageId, messageId);
     }
 
     private static String reminderBody(String eventId, String sourceSystem, String entityId) {

@@ -23,6 +23,9 @@ public class SyncEventIngestionService {
      */
     private static final String SELF_SOURCE_SYSTEM = "HYPERBRAIN_CORE";
 
+    /** Diagnostic classification stored in {@code processed_message} for Notion webhook envelopes. */
+    private static final String NOTION_EVENT_TYPE = "NOTION_WEBHOOK";
+
     private final ProcessedMessageStore processedMessageStore;
     private final EventRouter eventRouter;
 
@@ -51,5 +54,22 @@ public class SyncEventIngestionService {
         }
 
         eventRouter.route(event);
+    }
+
+    /**
+     * Acknowledges a Notion webhook envelope (ADR-011): deduplicates by {@code message_id} and
+     * stops there — no routing exists until the Notion ingestion lands (HU-14). Acknowledging
+     * instead of failing keeps prod deliveries from cycling into the DLQ meanwhile.
+     *
+     * @param messageId stable webhook delivery identity used for deduplication
+     */
+    @Transactional
+    public void acknowledgeNotionEvent(String messageId) {
+        boolean firstTime = processedMessageStore.markProcessed(messageId, NOTION_EVENT_TYPE);
+        if (!firstTime) {
+            log.warn("Duplicate event {} ignored (already processed)", messageId);
+            return;
+        }
+        log.info("notion event received: message_id={} acknowledged without routing (HU-14 pending)", messageId);
     }
 }
