@@ -5,6 +5,8 @@ import com.hyperbrain.sync.domain.model.CycleSnapshot;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static java.util.Collections.singletonMap;
+
 /*
  * Design pattern: Translator (a.k.a. Data Mapper)
  * Reason: same rationale as NotionTaskMapper — one pure class owns the core_cycle → Notion
@@ -22,9 +24,11 @@ import java.util.Map;
  *   <li>{@code status} → {@code Inactive} (checkbox, inverted: true iff COMPLETED)</li>
  * </ul>
  *
- * <p>{@code core_cycle} has no description column in data-model v2.x, so the Notion
- * {@code Description} property is left untouched. Read-only formulas ({@code Presupuestado},
- * {@code Ejecutado}) are never produced (CA-9). Thread-safe: stateless, static methods only.
+ * <p>Full-mirror contract (ADR-012 D3): null {@code type}/{@code start_date} clear their
+ * properties explicitly. {@code core_cycle} has no description column in data-model v2.x, so
+ * the Notion {@code Description} property is left untouched. Read-only formulas
+ * ({@code Presupuestado}, {@code Ejecutado}) are never produced (CA-9). Thread-safe:
+ * stateless, static methods only.
  */
 public final class NotionCycleMapper {
 
@@ -46,14 +50,14 @@ public final class NotionCycleMapper {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(NotionSchema.PROP_NAME, NotionTaskMapper.title(snapshot.name()));
         String notionType = snapshot.type() != null ? TYPE_TO_NOTION.get(snapshot.type()) : null;
-        if (notionType != null) {
-            props.put(NotionSchema.PROP_TYPE, NotionTaskMapper.select(notionType));
-        }
-        if (snapshot.startDate() != null) {
-            props.put(NotionSchema.PROP_DATE, NotionTaskMapper.dateValue(
+        props.put(NotionSchema.PROP_TYPE, notionType != null
+            ? NotionTaskMapper.select(notionType)
+            : singletonMap("select", null));
+        props.put(NotionSchema.PROP_DATE, snapshot.startDate() != null
+            ? NotionTaskMapper.dateValue(
                 snapshot.startDate().toString(),
-                snapshot.endDate() != null ? snapshot.endDate().toString() : null));
-        }
+                snapshot.endDate() != null ? snapshot.endDate().toString() : null)
+            : singletonMap("date", null));
         props.put(NotionSchema.PROP_INACTIVE,
             NotionTaskMapper.checkbox("COMPLETED".equals(snapshot.status())));
         NotionSchema.assertWritable(props);

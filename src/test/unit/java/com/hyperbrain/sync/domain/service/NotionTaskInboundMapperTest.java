@@ -33,6 +33,7 @@ class NotionTaskInboundMapperTest {
             "In progress", false, "Activity",
             "2026-07-07T10:00:00.000-05:00", "2026-07-07T11:30:00.000-05:00",
             0.8, 0.6, 2.5,
+            true, 3.0,
             "Alto", "Intenso", "Rutinario",
             "cycle000000000000000000000000001", "parent00000000000000000000000001");
 
@@ -45,8 +46,10 @@ class NotionTaskInboundMapperTest {
             ID, USER_ID, PARENT_ID, CYCLE_ID,
             "Write tests", "Detailed description", "ACTIVITY", "IN_PROGRESS",
             0.8, 0.6, 2.5,
+            true, 3.0,
             OffsetDateTime.parse("2026-07-07T10:00:00-05:00"),
             OffsetDateTime.parse("2026-07-07T11:30:00-05:00"),
+            null,
             5, 1, 4));
     }
 
@@ -130,7 +133,7 @@ class NotionTaskInboundMapperTest {
         // Then
         assertThat(snapshot).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
             ID, USER_ID, null, null, "", null, "TASK", "TODO",
-            null, null, null, null, null, null, null, null));
+            null, null, null, false, null, null, null, null, null, null, null));
     }
 
     private static NotionTaskPage minimalPage(Double priority, Double effort) {
@@ -138,6 +141,7 @@ class NotionTaskInboundMapperTest {
             "page0000000000000000000000000002", null, false,
             null, "  ", null, null, null,
             null, null, priority, null, effort,
+            null, null,
             null, null, null, null, null);
     }
 }

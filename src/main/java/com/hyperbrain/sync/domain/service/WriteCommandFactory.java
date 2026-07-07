@@ -8,6 +8,7 @@ import com.hyperbrain.sync.domain.model.ReminderPayload;
 import com.hyperbrain.sync.domain.model.WriteCommand;
 import com.hyperbrain.sync.domain.model.WritePayload;
 
+import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -89,10 +90,15 @@ public final class WriteCommandFactory {
     }
 
     private static ReminderPayload reminderPayload(CoreExecutable executable) {
+        // Due date projection (ADR-012 D3): end_time ?? start_time, so a Notion single-date
+        // task (which only fills start_time) still reaches Reminders with a due date.
+        OffsetDateTime dueDate = executable.endTime() != null
+            ? executable.endTime()
+            : executable.startTime();
         return new ReminderPayload(
             executable.name(),
             executable.description(),
-            executable.endTime(),
+            dueDate,
             STATUS_DONE.equals(executable.status()),
             0,
             "",

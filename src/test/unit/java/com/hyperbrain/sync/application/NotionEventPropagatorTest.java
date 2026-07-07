@@ -440,12 +440,12 @@ class NotionEventPropagatorTest {
 
     private static ExecutableSnapshot taskSnapshot(String status) {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", null,
-            "TASK", status, null, null, null, START, null, null, null, null);
+            "TASK", status, null, null, null, false, null, START, null, null, null, null, null);
     }
 
     private static ExecutableSnapshot taskSnapshotWithCycle() {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, CYCLE_ID, "Write tests", null,
-            "TASK", "TODO", null, null, null, null, null, null, null, null);
+            "TASK", "TODO", null, null, null, false, null, null, null, null, null, null, null);
     }
 
     private static CycleSnapshot cycleSnapshot(UUID id) {

@@ -82,6 +82,10 @@ CREATE TABLE core_executable (
     urgency_score      DOUBLE PRECISION,
     effort_score       DOUBLE PRECISION
                            CHECK (effort_score IS NULL OR effort_score BETWEEN 0 AND 5),
+    is_important       BOOLEAN NOT NULL DEFAULT false,
+    frequency          DOUBLE PRECISION,
+    -- FK to lrn_topic added after that table exists (ADR-012 D4, Notion Tasks parity)
+    learning_topic_id  UUID,
     estimated_cost     NUMERIC(19, 4),
     current_streak     INTEGER NOT NULL DEFAULT 0,
     best_streak        INTEGER NOT NULL DEFAULT 0,
@@ -249,6 +253,13 @@ CREATE TABLE lrn_topic (
 
 CREATE INDEX idx_lrn_topic_user        ON lrn_topic (user_id);
 CREATE INDEX idx_lrn_topic_next_review ON lrn_topic (next_review_date);
+
+-- ADR-012 D4: deferred FK — core_executable is created before lrn_topic in this consolidated DDL
+ALTER TABLE core_executable
+    ADD CONSTRAINT fk_core_executable_learning_topic
+        FOREIGN KEY (learning_topic_id) REFERENCES lrn_topic (id) ON DELETE SET NULL;
+
+CREATE INDEX idx_core_executable_learning ON core_executable (learning_topic_id);
 
 CREATE TABLE lrn_assessment (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),

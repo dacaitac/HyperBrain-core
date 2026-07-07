@@ -1,16 +1,20 @@
 package com.hyperbrain.sync.application;
 
+import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.CalendarEventPayload;
-import com.hyperbrain.sync.domain.model.CoreExecutable;
 import com.hyperbrain.sync.domain.model.EntityType;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SentinelEvent;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.in.IEventHandler;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
+import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
+import com.hyperbrain.sync.domain.service.SourceAwareMerge;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,8 +28,10 @@ import java.util.UUID;
 /**
  * Handles inbound {@link EntityType#CALENDAR_EVENT} sync events from Apple EventKit.
  *
- * <p>Same CRUD pipeline as {@link ReminderEventHandler}: parse → checksum → upsert
- * {@code core_executable} (type=ACTIVITY) + {@code sync_mappings} → Outbox.
+ * <p>Same pipeline as {@link ReminderEventHandler} (HU-09 + ADR-012): parse → checksum →
+ * source-aware merge (Apple authority: name, notes, start/end, calendar; status and type are
+ * kept — EventKit events carry no completed flag and {@code AGENDA} stays {@code AGENDA}) →
+ * {@link DomainChangeProcessor} → single persist + Outbox.
  */
 @Component
 public class CalendarEventHandler implements IEventHandler {
@@ -33,26 +39,31 @@ public class CalendarEventHandler implements IEventHandler {
     private static final Logger log = LoggerFactory.getLogger(CalendarEventHandler.class);
 
     private static final String EXTERNAL_SYSTEM = "APPLE";
-    private static final String EXECUTABLE_TYPE = "ACTIVITY";
     private static final String AGGREGATE_TYPE = "SYNC_APPLE";
     private static final String SYNC_STATUS = "SYNCED";
 
     private final CoreExecutableRepository executableRepo;
+    private final SyncSnapshotRepository snapshotRepo;
     private final SyncMappingRepository syncMappingRepo;
     private final OutboxRepository outboxRepo;
+    private final DomainChangeProcessor domainChangeProcessor;
     private final PayloadParser payloadParser;
     private final UUID defaultUserId;
 
     public CalendarEventHandler(
         CoreExecutableRepository executableRepo,
+        SyncSnapshotRepository snapshotRepo,
         SyncMappingRepository syncMappingRepo,
         OutboxRepository outboxRepo,
+        DomainChangeProcessor domainChangeProcessor,
         PayloadParser payloadParser,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
         this.executableRepo = executableRepo;
+        this.snapshotRepo = snapshotRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.outboxRepo = outboxRepo;
+        this.domainChangeProcessor = domainChangeProcessor;
         this.payloadParser = payloadParser;
         this.defaultUserId = defaultUserId;
     }
@@ -86,13 +97,17 @@ public class CalendarEventHandler implements IEventHandler {
         }
 
         UUID executableId = existing.map(SyncMapping::localId).orElseGet(UUID::randomUUID);
-        CoreExecutable executable = buildExecutable(executableId, payload);
+        ExecutableSnapshot current = existing.isPresent()
+            ? snapshotRepo.findExecutable(executableId).orElse(null)
+            : null;
+        ExecutableSnapshot merged =
+            SourceAwareMerge.mergeCalendarEvent(current, executableId, defaultUserId, payload);
+        ExecutableSnapshot processed = domainChangeProcessor.process(merged, ExternalSystem.APPLE);
+        executableRepo.upsert(processed);
 
         if (existing.isEmpty()) {
-            executableRepo.insert(executable);
             syncMappingRepo.insert(buildSyncMapping(executableId, event.entityId(), checksum));
         } else {
-            executableRepo.update(executable);
             syncMappingRepo.update(buildSyncMapping(executableId, event.entityId(), checksum));
         }
 
@@ -116,12 +131,6 @@ public class CalendarEventHandler implements IEventHandler {
         syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
         outboxRepo.append(buildOutboxEvent(event, executableId, "CalendarEventDeletedEvent"));
         log.info("CALENDAR_EVENT {} deleted (executable {})", event.entityId(), executableId);
-    }
-
-    private CoreExecutable buildExecutable(UUID id, CalendarEventPayload payload) {
-        return new CoreExecutable(
-            id, defaultUserId, payload.title(), payload.notes(), EXECUTABLE_TYPE, "TODO",
-            payload.startTime(), payload.endTime(), payload.calendarName());
     }
 
     private SyncMapping buildSyncMapping(UUID localId, String externalId, String checksum) {

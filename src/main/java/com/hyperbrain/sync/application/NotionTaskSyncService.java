@@ -1,6 +1,8 @@
 package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
@@ -10,8 +12,9 @@ import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
-import com.hyperbrain.sync.domain.service.NotionTaskInboundMapper;
+import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.domain.service.NotionTaskMapper;
+import com.hyperbrain.sync.domain.service.SourceAwareMerge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,17 +27,19 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Inbound half of the SyncServ for the Notion Tasks database (HU-14): persists one page state
- * as a {@code core_executable} (+ execution profile) upsert. Shares the idempotency design of
- * {@link NotionCycleSyncService} — CA-28 upsert by mapping existence, CA-29 monotonicity
- * guard on {@code last_edited_time}, CA-4 checksum discard over the canonical property map
- * regenerated with {@link NotionTaskMapper} (the HU-10 recipe, so outbound echoes match).
+ * Inbound half of the SyncServ for the Notion Tasks database (HU-14): applies one page state
+ * to the domain. Shares the idempotency design of {@link NotionCycleSyncService} — CA-28
+ * upsert by mapping existence, CA-29 monotonicity guard on {@code last_edited_time}, CA-4
+ * checksum discard over the canonical property map regenerated with {@link NotionTaskMapper}
+ * (the HU-10 recipe, so outbound echoes match).
  *
- * <p>Merge rules (CA-6, Notion is the planning authority): {@code cycle} and {@code parent}
- * are always accepted from Notion. An unmapped cycle is imported from the Cycles database
- * first (CA-5); an unmapped parent is left null with a warning — the next webhook or backfill
- * of that page repairs it once the parent is known. The legacy {@code Important} checkbox has
- * no counterpart in data-model v2.x and is ignored, mirroring the outbound mapping (#15).
+ * <p>Write semantics (ADR-012): the page is merged onto the current row with
+ * {@code SourceAwareMerge} (Notion authority fields + loss-aware projection — an untouched
+ * {@code Not started} never regresses {@code PLANNED}/{@code WAITING}), the
+ * {@code DomainChangeProcessor} applies derived business rules, and the final state is
+ * persisted once. {@code cycle} and {@code parent} are always accepted from Notion (CA-6):
+ * an unmapped cycle is imported from the Cycles database first (CA-5); an unmapped parent
+ * keeps the current link with a warning — the next webhook or backfill repairs it.
  *
  * <p>Every write appends to the Transactional Outbox with {@code source_system=NOTION}: the
  * Apple propagator picks it up for ACTIVITY/TASK write-back (HU-09c) while the Notion
@@ -52,24 +57,30 @@ public class NotionTaskSyncService {
     private static final String AGGREGATE_TYPE = "CORE_EXECUTABLE";
 
     private final CoreExecutableRepository executableRepo;
+    private final SyncSnapshotRepository snapshotRepo;
     private final SyncMappingRepository syncMappingRepo;
     private final OutboxRepository outboxRepo;
     private final NotionCycleSyncService cycleSyncService;
+    private final DomainChangeProcessor domainChangeProcessor;
     private final ObjectMapper objectMapper;
     private final UUID defaultUserId;
 
     public NotionTaskSyncService(
         CoreExecutableRepository executableRepo,
+        SyncSnapshotRepository snapshotRepo,
         SyncMappingRepository syncMappingRepo,
         OutboxRepository outboxRepo,
         NotionCycleSyncService cycleSyncService,
+        DomainChangeProcessor domainChangeProcessor,
         ObjectMapper objectMapper,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
         this.executableRepo = executableRepo;
+        this.snapshotRepo = snapshotRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.outboxRepo = outboxRepo;
         this.cycleSyncService = cycleSyncService;
+        this.domainChangeProcessor = domainChangeProcessor;
         this.objectMapper = objectMapper;
         this.defaultUserId = defaultUserId;
     }
@@ -93,10 +104,14 @@ public class NotionTaskSyncService {
         }
 
         UUID localId = mapping.map(SyncMapping::localId).orElseGet(UUID::randomUUID);
+        ExecutableSnapshot current = mapping.isPresent()
+            ? snapshotRepo.findExecutable(localId).orElse(null)
+            : null;
         UUID cycleId = cycleSyncService.resolveOrImport(page.cycleRelationId());
         UUID parentId = resolveParent(page.parentRelationId());
-        ExecutableSnapshot snapshot =
-            NotionTaskInboundMapper.toSnapshot(page, localId, defaultUserId, cycleId, parentId);
+        ExecutableSnapshot merged =
+            SourceAwareMerge.mergeNotionTask(current, page, localId, defaultUserId, cycleId, parentId);
+        ExecutableSnapshot snapshot = domainChangeProcessor.process(merged, ExternalSystem.NOTION);
         Map<String, Object> canonicalProps =
             NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId());
         if (mapping.isPresent()

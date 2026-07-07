@@ -44,20 +44,24 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
     private static final String UPSERT_SQL = """
         INSERT INTO core_executable
             (id, user_id, parent_id, cycle_id, name, description, type, status,
-             priority_score, urgency_score, effort_score, start_time, end_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             priority_score, urgency_score, effort_score, is_important, frequency,
+             start_time, end_time, source_calendar)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (id) DO UPDATE SET
-            parent_id      = EXCLUDED.parent_id,
-            cycle_id       = EXCLUDED.cycle_id,
-            name           = EXCLUDED.name,
-            description    = EXCLUDED.description,
-            type           = EXCLUDED.type,
-            status         = EXCLUDED.status,
-            priority_score = EXCLUDED.priority_score,
-            urgency_score  = EXCLUDED.urgency_score,
-            effort_score   = EXCLUDED.effort_score,
-            start_time     = EXCLUDED.start_time,
-            end_time       = EXCLUDED.end_time
+            parent_id       = EXCLUDED.parent_id,
+            cycle_id        = EXCLUDED.cycle_id,
+            name            = EXCLUDED.name,
+            description     = EXCLUDED.description,
+            type            = EXCLUDED.type,
+            status          = EXCLUDED.status,
+            priority_score  = EXCLUDED.priority_score,
+            urgency_score   = EXCLUDED.urgency_score,
+            effort_score    = EXCLUDED.effort_score,
+            is_important    = EXCLUDED.is_important,
+            frequency       = EXCLUDED.frequency,
+            start_time      = EXCLUDED.start_time,
+            end_time        = EXCLUDED.end_time,
+            source_calendar = EXCLUDED.source_calendar
         """;
 
     private static final String UPSERT_PROFILE_SQL = """
@@ -123,7 +127,8 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
         jdbcTemplate.update(UPSERT_SQL,
             s.id(), s.userId(), s.parentId(), s.cycleId(), s.name(), s.description(),
             s.type(), s.status(), s.priorityScore(), s.urgencyScore(), s.effortScore(),
-            toTimestamp(s.startTime()), toTimestamp(s.endTime()));
+            Boolean.TRUE.equals(s.isImportant()), s.frequency(),
+            toTimestamp(s.startTime()), toTimestamp(s.endTime()), s.sourceCalendar());
         jdbcTemplate.update(UPSERT_PROFILE_SQL,
             s.id(), s.energyDrain(), s.mentalLoad(), s.impact());
     }

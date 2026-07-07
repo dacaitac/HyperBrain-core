@@ -28,6 +28,8 @@ public final class NotionSchema {
     public static final String PROP_IMPACT = "Impact";
     public static final String PROP_ENERGY = "Energy";
     public static final String PROP_MENTAL_LOAD = "Mental Load";
+    public static final String PROP_IMPORTANT = "Important";
+    public static final String PROP_FREQUENCY = "Frequency";
     public static final String PROP_CYCLE = "Cycle";
     public static final String PROP_PARENT_TASK = "Parent Task";
 

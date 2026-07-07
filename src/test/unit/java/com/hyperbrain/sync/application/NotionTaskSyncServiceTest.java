@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.core.application.PassthroughDomainChangeProcessor;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
@@ -9,8 +10,10 @@ import com.hyperbrain.sync.domain.model.NotionTaskPage;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
+import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.domain.service.NotionTaskInboundMapper;
 import com.hyperbrain.sync.domain.service.NotionTaskMapper;
+import com.hyperbrain.sync.support.ExecutableSnapshotBuilder;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -44,6 +47,7 @@ class NotionTaskSyncServiceTest {
         OffsetDateTime.of(2026, 7, 7, 15, 0, 0, 0, ZoneOffset.UTC);
 
     @Mock private CoreExecutableRepository executableRepo;
+    @Mock private SyncSnapshotRepository snapshotRepo;
     @Mock private SyncMappingRepository syncMappingRepo;
     @Mock private OutboxRepository outboxRepo;
     @Mock private NotionCycleSyncService cycleSyncService;
@@ -53,8 +57,9 @@ class NotionTaskSyncServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new NotionTaskSyncService(executableRepo, syncMappingRepo, outboxRepo,
-            cycleSyncService, objectMapper, USER_ID);
+        service = new NotionTaskSyncService(executableRepo, snapshotRepo, syncMappingRepo,
+            outboxRepo, cycleSyncService, new PassthroughDomainChangeProcessor(),
+            objectMapper, USER_ID);
     }
 
     @Test
@@ -95,6 +100,10 @@ class NotionTaskSyncServiceTest {
         // Given
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
             .thenReturn(Optional.of(mapping("old-checksum", EDITED_AT.minusMinutes(5))));
+        when(snapshotRepo.findExecutable(LOCAL_ID)).thenReturn(Optional.of(
+            ExecutableSnapshotBuilder.snapshot().id(LOCAL_ID).userId(USER_ID)
+                .name("Write tests").build()));
+        when(cycleSyncService.resolveOrImport(CYCLE_PAGE_ID)).thenReturn(CYCLE_LOCAL_ID);
 
         // When
         SyncOutcome outcome = service.apply(page("Renamed", "Done", true, EDITED_AT));
@@ -136,6 +145,9 @@ class NotionTaskSyncServiceTest {
         // Given a mapping already synced at the exact same (minute-truncated) timestamp
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
             .thenReturn(Optional.of(mapping("previous-checksum", EDITED_AT)));
+        when(snapshotRepo.findExecutable(LOCAL_ID)).thenReturn(Optional.of(
+            ExecutableSnapshotBuilder.snapshot().id(LOCAL_ID).userId(USER_ID)
+                .name("Write tests").build()));
         when(cycleSyncService.resolveOrImport(CYCLE_PAGE_ID)).thenReturn(CYCLE_LOCAL_ID);
 
         // When the user edits again within the same minute (different content, same timestamp)
@@ -159,6 +171,7 @@ class NotionTaskSyncServiceTest {
         String storedChecksum = ChecksumSupport.compute(PAGE_ID, canonicalProps, objectMapper);
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
             .thenReturn(Optional.of(mapping(storedChecksum, EDITED_AT.minusMinutes(5))));
+        when(snapshotRepo.findExecutable(LOCAL_ID)).thenReturn(Optional.of(snapshot));
         when(cycleSyncService.resolveOrImport(CYCLE_PAGE_ID)).thenReturn(CYCLE_LOCAL_ID);
 
         // When
@@ -181,7 +194,8 @@ class NotionTaskSyncServiceTest {
 
         // When
         SyncOutcome outcome = service.apply(new NotionTaskPage(PAGE_ID, EDITED_AT, true,
-            null, null, null, null, null, null, null, null, null, null, null, null, null, null, null));
+            null, null, null, null, null, null, null, null, null, null, null, null,
+            null, null, null, null, null));
 
         // Then
         assertThat(outcome).isEqualTo(SyncOutcome.DELETED);
@@ -202,7 +216,8 @@ class NotionTaskSyncServiceTest {
 
         // When
         SyncOutcome outcome = service.apply(new NotionTaskPage(PAGE_ID, EDITED_AT, true,
-            null, null, null, null, null, null, null, null, null, null, null, null, null, null, null));
+            null, null, null, null, null, null, null, null, null, null, null, null,
+            null, null, null, null, null));
 
         // Then
         assertThat(outcome).isEqualTo(SyncOutcome.DELETED);
@@ -223,7 +238,7 @@ class NotionTaskSyncServiceTest {
         // When
         NotionTaskPage page = new NotionTaskPage(PAGE_ID, EDITED_AT, false,
             "Child task", null, null, false, null, null, null, null, null, null,
-            null, null, null, null, parentPageId);
+            null, null, null, null, null, null, parentPageId);
         SyncOutcome outcome = service.apply(page);
 
         // Then
@@ -237,7 +252,7 @@ class NotionTaskSyncServiceTest {
                                        OffsetDateTime editedAt) {
         return new NotionTaskPage(PAGE_ID, editedAt, false,
             name, "Detailed description", status, complete, "Task",
-            null, null, 0.8, 0.6, 2.5, "Alto", "Intenso", "Rutinario",
+            null, null, 0.8, 0.6, 2.5, null, null, "Alto", "Intenso", "Rutinario",
             CYCLE_PAGE_ID, null);
     }
 

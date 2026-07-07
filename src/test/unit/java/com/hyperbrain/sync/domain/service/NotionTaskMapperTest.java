@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.domain.service;
 
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
+import com.hyperbrain.sync.support.ExecutableSnapshotBuilder;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -11,19 +12,18 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
+import static java.util.Collections.singletonMap;
+import static com.hyperbrain.sync.support.ExecutableSnapshotBuilder.snapshot;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Attribute-by-attribute verification of the {@code core_executable} → Notion Tasks mapping
- * (HU-10 field mapping table, CA-10). Each nested block covers one domain attribute.
+ * (HU-10 field mapping table + ADR-012 D3 full-mirror clears). Each nested block covers one
+ * domain attribute.
  */
 @DisplayName("NotionTaskMapper — core_executable → Notion Tasks properties")
 class NotionTaskMapperTest {
-
-    private static final UUID ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
-    private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
 
     /** 2026-07-06 14:30 UTC = 09:30 in America/Bogota (UTC-5). */
     private static final OffsetDateTime START =
@@ -34,14 +34,17 @@ class NotionTaskMapperTest {
     private static final OffsetDateTime BOGOTA_MIDNIGHT =
         OffsetDateTime.of(2026, 7, 6, 5, 0, 0, 0, ZoneOffset.UTC);
 
-    private static ExecutableSnapshot snapshot() {
-        return new ExecutableSnapshot(ID, USER_ID, null, null, "Write tests", "A description",
-            "TASK", "TODO", 0.8, 0.5, 3.0, START, END, 3, 2, 4);
+    private static ExecutableSnapshot fullSnapshot() {
+        return snapshot().name("Write tests").description("A description")
+            .priorityScore(0.8).urgencyScore(0.5).effortScore(3.0)
+            .isImportant(true).frequency(2.0)
+            .startTime(START).endTime(END)
+            .energyDrain(3).mentalLoad(2).impact(4)
+            .build();
     }
 
     private static ExecutableSnapshot minimalSnapshot() {
-        return new ExecutableSnapshot(ID, USER_ID, null, null, "Bare task", null,
-            "TASK", "TODO", null, null, null, null, null, null, null, null);
+        return snapshot().name("Bare task").build();
     }
 
     private static Map<String, Object> map(ExecutableSnapshot snapshot) {
@@ -66,7 +69,7 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("maps the executable name as the title text")
         void maps_name_to_title() {
-            Map<String, Object> props = map(snapshot());
+            Map<String, Object> props = map(fullSnapshot());
 
             assertThat(props.get("Name")).isEqualTo(
                 Map.of("title", List.of(Map.of("text", Map.of("content", "Write tests")))));
@@ -75,11 +78,7 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("truncates names beyond Notion's 2000-character limit")
         void truncates_long_name() {
-            ExecutableSnapshot longName = new ExecutableSnapshot(ID, USER_ID, null, null,
-                "x".repeat(2500), null, "TASK", "TODO",
-                null, null, null, null, null, null, null, null);
-
-            Map<String, Object> props = map(longName);
+            Map<String, Object> props = map(snapshot().name("x".repeat(2500)).build());
 
             String content = extractTitle(props);
             assertThat(content).hasSize(2000);
@@ -100,16 +99,17 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("maps the description as rich text")
         void maps_description() {
-            Map<String, Object> props = map(snapshot());
+            Map<String, Object> props = map(fullSnapshot());
 
             assertThat(props.get("Description")).isEqualTo(
                 Map.of("rich_text", List.of(Map.of("text", Map.of("content", "A description")))));
         }
 
         @Test
-        @DisplayName("omits Description when the domain value is null or blank")
-        void omits_null_description() {
-            assertThat(map(minimalSnapshot())).doesNotContainKey("Description");
+        @DisplayName("clears Description explicitly when the domain value is null (full mirror, ADR-012 D3)")
+        void clears_null_description() {
+            assertThat(map(minimalSnapshot()).get("Description"))
+                .isEqualTo(Map.of("rich_text", List.of()));
         }
     }
 
@@ -128,7 +128,7 @@ class NotionTaskMapperTest {
         })
         @DisplayName("maps every domain status to its Notion status option")
         void maps_status(String domainStatus, String notionStatus) {
-            Map<String, Object> props = map(withStatus(domainStatus));
+            Map<String, Object> props = map(snapshot().status(domainStatus).build());
 
             assertThat(props.get("Status"))
                 .isEqualTo(Map.of("status", Map.of("name", notionStatus)));
@@ -137,7 +137,7 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("DONE sets Complete=true (closure scenario, CA on cierre)")
         void done_marks_complete() {
-            assertThat(map(withStatus("DONE")).get("Complete"))
+            assertThat(map(snapshot().status("DONE").build()).get("Complete"))
                 .isEqualTo(Map.of("checkbox", true));
         }
 
@@ -145,13 +145,8 @@ class NotionTaskMapperTest {
         @CsvSource({"TODO", "IN_PROGRESS", "FAILED", "PLANNED", "WAITING"})
         @DisplayName("any non-DONE status sets Complete=false")
         void non_done_not_complete(String domainStatus) {
-            assertThat(map(withStatus(domainStatus)).get("Complete"))
+            assertThat(map(snapshot().status(domainStatus).build()).get("Complete"))
                 .isEqualTo(Map.of("checkbox", false));
-        }
-
-        private ExecutableSnapshot withStatus(String status) {
-            return new ExecutableSnapshot(ID, USER_ID, null, null, "t", null, "TASK", status,
-                null, null, null, null, null, null, null, null);
         }
     }
 
@@ -170,19 +165,15 @@ class NotionTaskMapperTest {
         })
         @DisplayName("maps every domain type to its Notion select option")
         void maps_type(String domainType, String notionType) {
-            ExecutableSnapshot typed = new ExecutableSnapshot(ID, USER_ID, null, null, "t", null,
-                domainType, "TODO", null, null, null, null, null, null, null, null);
-
-            assertThat(selectName(map(typed), "Type")).isEqualTo(notionType);
+            assertThat(selectName(map(snapshot().type(domainType).build()), "Type"))
+                .isEqualTo(notionType);
         }
 
         @Test
         @DisplayName("AGENDA propagates to Notion (ADR-009 restriction is Apple-only)")
         void agenda_is_mapped_not_filtered() {
-            ExecutableSnapshot agenda = new ExecutableSnapshot(ID, USER_ID, null, null, "t", null,
-                "AGENDA", "TODO", null, null, null, null, null, null, null, null);
-
-            assertThat(selectName(map(agenda), "Type")).isEqualTo("Agenda");
+            assertThat(selectName(map(snapshot().type("AGENDA").build()), "Type"))
+                .isEqualTo("Agenda");
         }
     }
 
@@ -193,7 +184,7 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("maps start and end as an ISO datetime range in Bogota time")
         void maps_datetime_range() {
-            Map<String, Object> date = dateValue(map(snapshot()));
+            Map<String, Object> date = dateValue(map(fullSnapshot()));
 
             assertThat(date.get("start")).isEqualTo("2026-07-06T09:30:00-05:00");
             assertThat(date.get("end")).isEqualTo("2026-07-06T11:00:00-05:00");
@@ -202,10 +193,7 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("start without end produces a single-date value")
         void start_only_has_no_end() {
-            ExecutableSnapshot startOnly = new ExecutableSnapshot(ID, USER_ID, null, null, "t",
-                null, "TASK", "TODO", null, null, null, START, null, null, null, null);
-
-            Map<String, Object> date = dateValue(map(startOnly));
+            Map<String, Object> date = dateValue(map(snapshot().startTime(START).build()));
 
             assertThat(date.get("start")).isEqualTo("2026-07-06T09:30:00-05:00");
             assertThat(date).doesNotContainKey("end");
@@ -214,49 +202,77 @@ class NotionTaskMapperTest {
         @Test
         @DisplayName("local-midnight bounds degrade to date-only values (all-day)")
         void midnight_becomes_date_only() {
-            ExecutableSnapshot allDay = new ExecutableSnapshot(ID, USER_ID, null, null, "t",
-                null, "TASK", "TODO", null, null, null, BOGOTA_MIDNIGHT, null, null, null, null);
-
-            Map<String, Object> date = dateValue(map(allDay));
+            Map<String, Object> date =
+                dateValue(map(snapshot().startTime(BOGOTA_MIDNIGHT).build()));
 
             assertThat(date.get("start")).isEqualTo("2026-07-06");
         }
 
         @Test
-        @DisplayName("omits Date when the executable has no times")
-        void omits_date_when_null() {
-            assertThat(map(minimalSnapshot())).doesNotContainKey("Date");
+        @DisplayName("clears Date explicitly when the executable has no times (full mirror, ADR-012 D3)")
+        void clears_date_when_null() {
+            assertThat(map(minimalSnapshot()).get("Date"))
+                .isEqualTo(singletonMap("date", null));
         }
     }
 
     @Nested
-    @DisplayName("scores → Priority Score / Urgence / Effort (numbers)")
+    @DisplayName("scores → Priority Score / Urgence / Effort / Frequency (numbers)")
     class Scores {
 
         @Test
         @DisplayName("priority_score → Priority Score")
         void maps_priority_score() {
-            assertThat(map(snapshot()).get("Priority Score")).isEqualTo(Map.of("number", 0.8));
+            assertThat(map(fullSnapshot()).get("Priority Score")).isEqualTo(Map.of("number", 0.8));
         }
 
         @Test
         @DisplayName("urgency_score → Urgence")
         void maps_urgency_score() {
-            assertThat(map(snapshot()).get("Urgence")).isEqualTo(Map.of("number", 0.5));
+            assertThat(map(fullSnapshot()).get("Urgence")).isEqualTo(Map.of("number", 0.5));
         }
 
         @Test
         @DisplayName("effort_score → Effort")
         void maps_effort_score() {
-            assertThat(map(snapshot()).get("Effort")).isEqualTo(Map.of("number", 3.0));
+            assertThat(map(fullSnapshot()).get("Effort")).isEqualTo(Map.of("number", 3.0));
         }
 
         @Test
-        @DisplayName("null scores are omitted so a PATCH never clears them")
-        void omits_null_scores() {
+        @DisplayName("frequency → Frequency (ADR-012 D4)")
+        void maps_frequency() {
+            assertThat(map(fullSnapshot()).get("Frequency")).isEqualTo(Map.of("number", 2.0));
+        }
+
+        @Test
+        @DisplayName("null scores clear their numbers explicitly (full mirror, ADR-012 D3)")
+        void clears_null_scores() {
             Map<String, Object> props = map(minimalSnapshot());
 
-            assertThat(props).doesNotContainKeys("Priority Score", "Urgence", "Effort");
+            assertThat(props.get("Priority Score")).isEqualTo(singletonMap("number", null));
+            assertThat(props.get("Urgence")).isEqualTo(singletonMap("number", null));
+            assertThat(props.get("Effort")).isEqualTo(singletonMap("number", null));
+            assertThat(props.get("Frequency")).isEqualTo(singletonMap("number", null));
+        }
+    }
+
+    @Nested
+    @DisplayName("is_important → Important (checkbox, ADR-012 D4)")
+    class Important {
+
+        @Test
+        @DisplayName("true maps to a checked Important")
+        void maps_important_true() {
+            assertThat(map(fullSnapshot()).get("Important")).isEqualTo(Map.of("checkbox", true));
+        }
+
+        @Test
+        @DisplayName("false and null map to an unchecked Important")
+        void maps_important_false_and_null() {
+            assertThat(map(snapshot().isImportant(false).build()).get("Important"))
+                .isEqualTo(Map.of("checkbox", false));
+            assertThat(map(snapshot().isImportant(null).build()).get("Important"))
+                .isEqualTo(Map.of("checkbox", false));
         }
     }
 
@@ -274,21 +290,22 @@ class NotionTaskMapperTest {
         })
         @DisplayName("maps the 1–5 scale to its option")
         void maps_impact(int impact, String option) {
-            assertThat(selectName(map(withProfile(null, null, impact)), "Impact"))
+            assertThat(selectName(map(snapshot().impact(impact).build()), "Impact"))
                 .isEqualTo(option);
         }
 
         @Test
         @DisplayName("clamps the DDL upper bound (8) to Crítico")
         void clamps_overflow() {
-            assertThat(selectName(map(withProfile(null, null, 8)), "Impact"))
+            assertThat(selectName(map(snapshot().impact(8).build()), "Impact"))
                 .isEqualTo("Crítico");
         }
 
         @Test
-        @DisplayName("omits Impact when the profile has no value")
-        void omits_null_impact() {
-            assertThat(map(minimalSnapshot())).doesNotContainKey("Impact");
+        @DisplayName("clears Impact explicitly when the profile has no value (full mirror)")
+        void clears_null_impact() {
+            assertThat(map(minimalSnapshot()).get("Impact"))
+                .isEqualTo(singletonMap("select", null));
         }
     }
 
@@ -306,14 +323,15 @@ class NotionTaskMapperTest {
         })
         @DisplayName("maps the 1–5 scale to its option")
         void maps_energy(int energy, String option) {
-            assertThat(selectName(map(withProfile(energy, null, null)), "Energy"))
+            assertThat(selectName(map(snapshot().energyDrain(energy).build()), "Energy"))
                 .isEqualTo(option);
         }
 
         @Test
-        @DisplayName("omits Energy when the profile has no value")
-        void omits_null_energy() {
-            assertThat(map(minimalSnapshot())).doesNotContainKey("Energy");
+        @DisplayName("clears Energy explicitly when the profile has no value (full mirror)")
+        void clears_null_energy() {
+            assertThat(map(minimalSnapshot()).get("Energy"))
+                .isEqualTo(singletonMap("select", null));
         }
     }
 
@@ -331,14 +349,15 @@ class NotionTaskMapperTest {
         })
         @DisplayName("maps the 1–5 scale to its option")
         void maps_mental_load(int mentalLoad, String option) {
-            assertThat(selectName(map(withProfile(null, mentalLoad, null)), "Mental Load"))
+            assertThat(selectName(map(snapshot().mentalLoad(mentalLoad).build()), "Mental Load"))
                 .isEqualTo(option);
         }
 
         @Test
-        @DisplayName("omits Mental Load when the profile has no value")
-        void omits_null_mental_load() {
-            assertThat(map(minimalSnapshot())).doesNotContainKey("Mental Load");
+        @DisplayName("clears Mental Load explicitly when the profile has no value (full mirror)")
+        void clears_null_mental_load() {
+            assertThat(map(minimalSnapshot()).get("Mental Load"))
+                .isEqualTo(singletonMap("select", null));
         }
     }
 
@@ -350,7 +369,7 @@ class NotionTaskMapperTest {
         @DisplayName("writes the Cycle relation with the resolved page id (CA-6)")
         void maps_cycle_relation() {
             Map<String, Object> props =
-                NotionTaskMapper.map(snapshot(), "cyclepage123", null);
+                NotionTaskMapper.map(fullSnapshot(), "cyclepage123", null);
 
             assertThat(props.get("Cycle")).isEqualTo(
                 Map.of("relation", List.of(Map.of("id", "cyclepage123"))));
@@ -360,39 +379,45 @@ class NotionTaskMapperTest {
         @DisplayName("writes the Parent Task relation with the resolved page id")
         void maps_parent_relation() {
             Map<String, Object> props =
-                NotionTaskMapper.map(snapshot(), null, "parentpage456");
+                NotionTaskMapper.map(fullSnapshot(), null, "parentpage456");
 
             assertThat(props.get("Parent Task")).isEqualTo(
                 Map.of("relation", List.of(Map.of("id", "parentpage456"))));
         }
 
         @Test
-        @DisplayName("omits relations when the external ids are unresolved")
-        void omits_unresolved_relations() {
-            assertThat(map(snapshot())).doesNotContainKeys("Cycle", "Parent Task");
+        @DisplayName("clears relations explicitly when the external ids are unresolved (full mirror)")
+        void clears_unresolved_relations() {
+            Map<String, Object> props = map(fullSnapshot());
+
+            assertThat(props.get("Cycle")).isEqualTo(Map.of("relation", List.of()));
+            assertThat(props.get("Parent Task")).isEqualTo(Map.of("relation", List.of()));
         }
     }
 
     @Nested
-    @DisplayName("read-only properties (CA-9)")
+    @DisplayName("read-only properties (CA-9) + canonical shape")
     class ReadOnly {
 
         @Test
-        @DisplayName("the mapper never produces formula/rollup properties")
+        @DisplayName("the mapper never produces formula/rollup properties and always emits the full mirror")
         void never_emits_read_only_properties() {
             Map<String, Object> props =
-                NotionTaskMapper.map(snapshot(), "cycle1", "parent1");
+                NotionTaskMapper.map(fullSnapshot(), "cycle1", "parent1");
 
             assertThat(props.keySet())
                 .doesNotContainAnyElementsOf(NotionSchema.READ_ONLY_PROPERTIES)
                 .containsOnly("Name", "Description", "Status", "Complete", "Type", "Date",
-                    "Priority Score", "Urgence", "Effort", "Impact", "Energy", "Mental Load",
-                    "Cycle", "Parent Task");
+                    "Priority Score", "Urgence", "Effort", "Important", "Frequency",
+                    "Impact", "Energy", "Mental Load", "Cycle", "Parent Task");
         }
-    }
 
-    private static ExecutableSnapshot withProfile(Integer energy, Integer mental, Integer impact) {
-        return new ExecutableSnapshot(ID, USER_ID, null, null, "t", null, "TASK", "TODO",
-            null, null, null, null, null, energy, mental, impact);
+        @Test
+        @DisplayName("a minimal snapshot emits the same property set (canonical map, checksum-stable)")
+        void minimal_snapshot_emits_same_property_set() {
+            assertThat(map(minimalSnapshot()).keySet())
+                .containsExactlyInAnyOrderElementsOf(
+                    NotionTaskMapper.map(fullSnapshot(), "c", "p").keySet());
+        }
     }
 }

@@ -45,13 +45,13 @@ public final class NotionTaskInboundMapper {
 
     private static final ZoneId NOTION_ZONE = ZoneId.of("America/Bogota");
 
-    private static final Map<String, String> STATUS_FROM_NOTION = Map.of(
+    static final Map<String, String> STATUS_FROM_NOTION = Map.of(
         "Not started", "TODO",
         "In progress", "IN_PROGRESS",
         "Done", "DONE",
         "Failed", "FAILED");
 
-    private static final Map<String, String> TYPE_FROM_NOTION = Map.of(
+    static final Map<String, String> TYPE_FROM_NOTION = Map.of(
         "Task", "TASK",
         "Habit", "HABIT",
         "Lead Measure", "LEAD_MEASURE",
@@ -63,9 +63,12 @@ public final class NotionTaskInboundMapper {
     }
 
     /**
-     * Builds the executable snapshot for one Notion Tasks page. Relations arrive already
-     * resolved to local ids by the caller (Notion is the planning authority: {@code cycle}
-     * and {@code parent} are always accepted from Notion, CA-6).
+     * Builds the executable snapshot for one Notion Tasks page — the CREATE interpretation
+     * of the page (ADR-012: updates go through {@code SourceAwareMerge}, which reuses these
+     * rules field by field against the current row). Relations arrive already resolved to
+     * local ids by the caller (Notion is the planning authority: {@code cycle} and
+     * {@code parent} are always accepted from Notion, CA-6). {@code source_calendar} is
+     * Apple authority and always null here.
      *
      * @param page     the parsed page properties
      * @param id       local {@code core_executable} id (existing mapping or a fresh UUID)
@@ -88,8 +91,11 @@ public final class NotionTaskInboundMapper {
             clamp(page.priorityScore(), 0.0, 1.0),
             page.urgencyScore(),
             clamp(page.effortScore(), 0.0, 5.0),
+            Boolean.TRUE.equals(page.important()),
+            page.frequency(),
             parseNotionDate(page.dateStart()),
             parseNotionDate(page.dateEnd()),
+            null,
             scaleOf(page.energyName(), NotionSchema.ENERGY_OPTIONS),
             scaleOf(page.mentalLoadName(), NotionSchema.MENTAL_LOAD_OPTIONS),
             scaleOf(page.impactName(), NotionSchema.IMPACT_OPTIONS));
@@ -142,7 +148,7 @@ public final class NotionTaskInboundMapper {
         }
     }
 
-    private static Double clamp(Double value, double min, double max) {
+    static Double clamp(Double value, double min, double max) {
         if (value == null) {
             return null;
         }

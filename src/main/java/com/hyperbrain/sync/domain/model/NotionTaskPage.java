@@ -25,6 +25,8 @@ import java.time.OffsetDateTime;
  * @param priorityScore    {@code Priority Score} number, or null
  * @param urgencyScore     {@code Urgence} number, or null
  * @param effortScore      {@code Effort} number, or null
+ * @param important        {@code Important} checkbox, or null when the property is absent
+ * @param frequency        {@code Frequency} number, or null
  * @param impactName       {@code Impact} select option name, or null
  * @param energyName       {@code Energy} select option name, or null
  * @param mentalLoadName   {@code Mental Load} select option name, or null
@@ -45,6 +47,8 @@ public record NotionTaskPage(
     Double priorityScore,
     Double urgencyScore,
     Double effortScore,
+    Boolean important,
+    Double frequency,
     String impactName,
     String energyName,
     String mentalLoadName,

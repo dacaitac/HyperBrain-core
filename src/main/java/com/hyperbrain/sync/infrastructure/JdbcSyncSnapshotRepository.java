@@ -23,7 +23,8 @@ class JdbcSyncSnapshotRepository implements SyncSnapshotRepository {
 
     private static final String FIND_EXECUTABLE_SQL = """
         SELECT e.id, e.user_id, e.parent_id, e.cycle_id, e.name, e.description, e.type, e.status,
-               e.priority_score, e.urgency_score, e.effort_score, e.start_time, e.end_time,
+               e.priority_score, e.urgency_score, e.effort_score, e.is_important, e.frequency,
+               e.start_time, e.end_time, e.source_calendar,
                p.energy_drain, p.mental_load, p.impact
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
@@ -51,8 +52,11 @@ class JdbcSyncSnapshotRepository implements SyncSnapshotRepository {
             rs.getObject("priority_score", Double.class),
             rs.getObject("urgency_score", Double.class),
             rs.getObject("effort_score", Double.class),
+            rs.getBoolean("is_important"),
+            rs.getObject("frequency", Double.class),
             startTs != null ? startTs.toInstant().atOffset(ZoneOffset.UTC) : null,
             endTs != null ? endTs.toInstant().atOffset(ZoneOffset.UTC) : null,
+            rs.getString("source_calendar"),
             rs.getObject("energy_drain", Integer.class),
             rs.getObject("mental_load", Integer.class),
             rs.getObject("impact", Integer.class));

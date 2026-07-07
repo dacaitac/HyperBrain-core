@@ -89,10 +89,10 @@ class NotionCycleMapperTest {
         }
 
         @Test
-        @DisplayName("omits Date when the cycle has no dates")
-        void omits_date_when_null() {
-            assertThat(NotionCycleMapper.map(cycle("MCI", "ACTIVE", null, null)))
-                .doesNotContainKey("Date");
+        @DisplayName("clears Date explicitly when the cycle has no dates (full mirror, ADR-012 D3)")
+        void clears_date_when_null() {
+            assertThat(NotionCycleMapper.map(cycle("MCI", "ACTIVE", null, null)).get("Date"))
+                .isEqualTo(java.util.Collections.singletonMap("date", null));
         }
     }
 

@@ -1,9 +1,11 @@
 package com.hyperbrain.sync.application;
 
+import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
-import com.hyperbrain.sync.domain.model.CoreExecutable;
 import com.hyperbrain.sync.domain.model.EntityType;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.ReminderPayload;
 import com.hyperbrain.sync.domain.model.SentinelEvent;
@@ -11,6 +13,8 @@ import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.in.IEventHandler;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
+import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
+import com.hyperbrain.sync.domain.service.SourceAwareMerge;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,14 +28,15 @@ import java.util.UUID;
 /**
  * Handles inbound {@link EntityType#REMINDER} sync events from Apple EventKit.
  *
- * <p>Implements the full CRUD pipeline defined in HU-09:
+ * <p>Pipeline per HU-09 + ADR-012:
  * <ol>
  *   <li>Parse the JSON payload into a domain record.
  *   <li>Compute the SHA-256 checksum ({@code entityId + operation + payload}).
  *   <li>Look up the existing {@code sync_mappings} row.
  *   <li>On CREATED/UPDATED: if the checksum matches the stored one, discard silently;
- *       otherwise upsert {@code core_executable} and {@code sync_mappings}, then write
- *       to the Transactional Outbox.
+ *       otherwise merge the payload onto the current row ({@link SourceAwareMerge}, Apple
+ *       authority fields only), run the {@link DomainChangeProcessor} and persist the final
+ *       state once, then write to the Transactional Outbox.
  *   <li>On DELETED: remove both {@code core_executable} and {@code sync_mappings}, then
  *       append a deletion event to the Outbox.
  * </ol>
@@ -45,26 +50,31 @@ public class ReminderEventHandler implements IEventHandler {
     private static final Logger log = LoggerFactory.getLogger(ReminderEventHandler.class);
 
     private static final String EXTERNAL_SYSTEM = "APPLE";
-    private static final String EXECUTABLE_TYPE = "TASK";
     private static final String AGGREGATE_TYPE = "SYNC_APPLE";
     private static final String SYNC_STATUS = "SYNCED";
 
     private final CoreExecutableRepository executableRepo;
+    private final SyncSnapshotRepository snapshotRepo;
     private final SyncMappingRepository syncMappingRepo;
     private final OutboxRepository outboxRepo;
+    private final DomainChangeProcessor domainChangeProcessor;
     private final PayloadParser payloadParser;
     private final UUID defaultUserId;
 
     public ReminderEventHandler(
         CoreExecutableRepository executableRepo,
+        SyncSnapshotRepository snapshotRepo,
         SyncMappingRepository syncMappingRepo,
         OutboxRepository outboxRepo,
+        DomainChangeProcessor domainChangeProcessor,
         PayloadParser payloadParser,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
         this.executableRepo = executableRepo;
+        this.snapshotRepo = snapshotRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.outboxRepo = outboxRepo;
+        this.domainChangeProcessor = domainChangeProcessor;
         this.payloadParser = payloadParser;
         this.defaultUserId = defaultUserId;
     }
@@ -98,13 +108,17 @@ public class ReminderEventHandler implements IEventHandler {
         }
 
         UUID executableId = existing.map(SyncMapping::localId).orElseGet(UUID::randomUUID);
-        CoreExecutable executable = buildExecutable(executableId, payload);
+        ExecutableSnapshot current = existing.isPresent()
+            ? snapshotRepo.findExecutable(executableId).orElse(null)
+            : null;
+        ExecutableSnapshot merged =
+            SourceAwareMerge.mergeReminder(current, executableId, defaultUserId, payload);
+        ExecutableSnapshot processed = domainChangeProcessor.process(merged, ExternalSystem.APPLE);
+        executableRepo.upsert(processed);
 
         if (existing.isEmpty()) {
-            executableRepo.insert(executable);
             syncMappingRepo.insert(buildSyncMapping(executableId, event.entityId(), checksum));
         } else {
-            executableRepo.update(executable);
             syncMappingRepo.update(buildSyncMapping(executableId, event.entityId(), checksum));
         }
 
@@ -127,13 +141,6 @@ public class ReminderEventHandler implements IEventHandler {
         syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
         outboxRepo.append(buildOutboxEvent(event, executableId, "ReminderDeletedEvent"));
         log.info("REMINDER {} deleted (executable {})", event.entityId(), executableId);
-    }
-
-    private CoreExecutable buildExecutable(UUID id, ReminderPayload payload) {
-        String status = payload.completed() ? "DONE" : "TODO";
-        return new CoreExecutable(
-            id, defaultUserId, payload.title(), payload.notes(), EXECUTABLE_TYPE, status,
-            null, payload.dueDate(), payload.listName());
     }
 
     private SyncMapping buildSyncMapping(UUID localId, String externalId, String checksum) {

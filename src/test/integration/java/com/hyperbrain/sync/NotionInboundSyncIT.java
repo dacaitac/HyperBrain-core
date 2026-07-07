@@ -276,6 +276,34 @@ class NotionInboundSyncIT {
     }
 
     @Test
+    @DisplayName("ADR-012 D1 — renaming in Notion never regresses a richer domain status (loss-aware merge)")
+    void rename_does_not_regress_domain_status() {
+        // Given a synced task whose domain state is richer than what Notion can express:
+        // PLANNED projects to "Not started", priority was computed domain-side
+        String pageId = newPageId();
+        deliverAutomation(pageId, taskPage(pageId, "Original", "Not started", false, "Task",
+            "2026-07-07T15:00:00.000Z", null));
+        jdbcTemplate.update("""
+            UPDATE core_executable SET status = 'PLANNED', priority_score = 0.9
+            WHERE id = (SELECT local_id FROM sync_mappings WHERE external_id = ?)
+            """, pageId);
+
+        // When the user only renames the page (Status still projects as "Not started")
+        deliverAutomation(pageId, taskPage(pageId, "Renamed", "Not started", false, "Task",
+            "2026-07-07T15:01:00.000Z", null));
+
+        // Then the rename applies and the domain-owned state survives
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT e.name, e.status, e.priority_score
+            FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, pageId);
+        assertThat(row.get("name")).isEqualTo("Renamed");
+        assertThat(row.get("status")).isEqualTo("PLANNED");
+        assertThat(row.get("priority_score")).isEqualTo(0.9);
+    }
+
+    @Test
     @DisplayName("CA-20 — a webhook with state identical to the last synced one is discarded by checksum")
     void identical_state_is_discarded() {
         String pageId = newPageId();

@@ -41,6 +41,8 @@ public class NotionPageParser {
             number(props.path(NotionSchema.PROP_PRIORITY_SCORE)),
             number(props.path(NotionSchema.PROP_URGENCE)),
             number(props.path(NotionSchema.PROP_EFFORT)),
+            checkbox(props.path(NotionSchema.PROP_IMPORTANT)),
+            number(props.path(NotionSchema.PROP_FREQUENCY)),
             optionName(props.path(NotionSchema.PROP_IMPACT), "select"),
             optionName(props.path(NotionSchema.PROP_ENERGY), "select"),
             optionName(props.path(NotionSchema.PROP_MENTAL_LOAD), "select"),

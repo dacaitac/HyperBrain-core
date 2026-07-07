@@ -38,6 +38,8 @@ class NotionPageParserTest {
                 "Priority Score": { "type": "number", "number": 0.8 },
                 "Urgence": { "type": "number", "number": 0.6 },
                 "Effort": { "type": "number", "number": 2.5 },
+                "Important": { "type": "checkbox", "checkbox": true },
+                "Frequency": { "type": "number", "number": 3.0 },
                 "Impact": { "type": "select", "select": { "name": "Alto" } },
                 "Energy": { "type": "select", "select": { "name": "Intenso" } },
                 "Mental Load": { "type": "select", "select": { "name": "Rutinario" } },
@@ -59,6 +61,7 @@ class NotionPageParserTest {
             "In progress", false, "Activity",
             "2026-07-07T10:00:00.000-05:00", "2026-07-07T11:30:00.000-05:00",
             0.8, 0.6, 2.5,
+            true, 3.0,
             "Alto", "Intenso", "Rutinario",
             "1bf8bc9c5d9181d882cfe1f4aa38f295", null));
     }
@@ -85,6 +88,8 @@ class NotionPageParserTest {
         assertThat(page.statusName()).isNull();
         assertThat(page.complete()).isNull();
         assertThat(page.priorityScore()).isNull();
+        assertThat(page.important()).isNull();
+        assertThat(page.frequency()).isNull();
         assertThat(page.dateStart()).isNull();
         assertThat(page.cycleRelationId()).isNull();
         assertThat(page.lastEditedTime()).isNull();

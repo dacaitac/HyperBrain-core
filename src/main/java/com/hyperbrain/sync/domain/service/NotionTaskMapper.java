@@ -9,6 +9,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static java.util.Collections.singletonMap;
+
 /*
  * Design pattern: Translator (a.k.a. Data Mapper)
  * Reason: isolates the domain → Notion representation rules in one pure, side-effect-free
@@ -19,26 +21,30 @@ import java.util.Map;
 /**
  * Maps an {@link ExecutableSnapshot} to the Notion Tasks property map (HU-10).
  *
- * <p>Mapping contract (issue #15, adjusted to data-model v2.x — {@code urgency_score} and
- * {@code effort_score} are the domain names; {@code is_important} / {@code frequency} have no
- * domain counterpart and are never written):
+ * <p>Mapping contract (issue #15 + ADR-012 D3 — the page is a full mirror of the row, so a
+ * null domain value travels as an <b>explicit clear</b>, never as an omission):
  * <ul>
  *   <li>{@code name} → {@code Name} (title)</li>
- *   <li>{@code description} → {@code Description} (rich_text, omitted when blank)</li>
+ *   <li>{@code description} → {@code Description} (rich_text; blank → empty rich_text)</li>
  *   <li>{@code status} → {@code Status} (status) and {@code Complete} (checkbox, true iff DONE)</li>
  *   <li>{@code start_time}/{@code end_time} → {@code Date} (range, America/Bogota; date-only
- *       when the whole range falls on local midnight)</li>
+ *       when the whole range falls on local midnight; both null → {@code date: null})</li>
  *   <li>{@code type} → {@code Type} (select)</li>
  *   <li>{@code priority_score} → {@code Priority Score}, {@code urgency_score} → {@code Urgence},
- *       {@code effort_score} → {@code Effort} (numbers)</li>
+ *       {@code effort_score} → {@code Effort}, {@code frequency} → {@code Frequency}
+ *       (numbers; null → {@code number: null})</li>
+ *   <li>{@code is_important} → {@code Important} (checkbox)</li>
  *   <li>{@code impact}/{@code energy_drain}/{@code mental_load} (execution profile) →
- *       {@code Impact}/{@code Energy}/{@code Mental Load} (selects, Spanish canonical options)</li>
- *   <li>{@code cycle_id} → {@code Cycle}, {@code parent_id} → {@code Parent Task} (relations,
- *       written only when the caller resolved the external page id via {@code sync_mappings})</li>
+ *       {@code Impact}/{@code Energy}/{@code Mental Load} (selects, Spanish canonical options;
+ *       null → {@code select: null})</li>
+ *   <li>{@code cycle_id} → {@code Cycle}, {@code parent_id} → {@code Parent Task} (relations;
+ *       unresolved or absent → empty relation list)</li>
  * </ul>
  *
- * <p>Read-only formula/rollup properties are never produced; {@link NotionSchema#assertWritable}
- * guards the output (CA-9). Thread-safe: stateless, static methods only.
+ * <p>The property map is canonical: it always contains every writable property in a fixed
+ * order, which keeps the HU-14 echo checksums projection-invariant. Read-only formula/rollup
+ * properties are never produced; {@link NotionSchema#assertWritable} guards the output (CA-9).
+ * Thread-safe: stateless, static methods only.
  */
 public final class NotionTaskMapper {
 
@@ -67,8 +73,10 @@ public final class NotionTaskMapper {
     }
 
     /**
-     * Builds the Notion Tasks property map for one executable. Optional attributes with a null
-     * domain value are omitted so a PATCH never clears data the Core does not own.
+     * Builds the Notion Tasks property map for one executable. The map is a full mirror of
+     * the row (ADR-012 D3): a null domain value produces an explicit clear (empty rich_text,
+     * {@code date: null}, {@code number: null}, {@code select: null}, empty relation list),
+     * so the page never keeps data the source of truth no longer has.
      *
      * @param snapshot         the executable state to propagate
      * @param cycleExternalId  Notion page id of the owning cycle, or null when unmapped
@@ -80,52 +88,63 @@ public final class NotionTaskMapper {
                                           String parentExternalId) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(NotionSchema.PROP_NAME, title(snapshot.name()));
-        if (snapshot.description() != null && !snapshot.description().isBlank()) {
-            props.put(NotionSchema.PROP_DESCRIPTION, richText(snapshot.description()));
-        }
+        props.put(NotionSchema.PROP_DESCRIPTION,
+            snapshot.description() != null && !snapshot.description().isBlank()
+                ? richText(snapshot.description())
+                : Map.of("rich_text", List.of()));
         props.put(NotionSchema.PROP_STATUS, status(mapStatus(snapshot.status())));
         props.put(NotionSchema.PROP_COMPLETE, checkbox("DONE".equals(snapshot.status())));
         props.put(NotionSchema.PROP_TYPE, select(mapType(snapshot.type())));
         Map<String, Object> date = dateRange(snapshot.startTime(), snapshot.endTime());
-        if (date != null) {
-            props.put(NotionSchema.PROP_DATE, date);
-        }
+        props.put(NotionSchema.PROP_DATE, date != null ? date : singletonMap("date", null));
         putNumber(props, NotionSchema.PROP_PRIORITY_SCORE, snapshot.priorityScore());
         putNumber(props, NotionSchema.PROP_URGENCE, snapshot.urgencyScore());
         putNumber(props, NotionSchema.PROP_EFFORT, snapshot.effortScore());
+        props.put(NotionSchema.PROP_IMPORTANT, checkbox(Boolean.TRUE.equals(snapshot.isImportant())));
+        putNumber(props, NotionSchema.PROP_FREQUENCY, snapshot.frequency());
         putScale(props, NotionSchema.PROP_IMPACT, snapshot.impact(), NotionSchema.IMPACT_OPTIONS);
         putScale(props, NotionSchema.PROP_ENERGY, snapshot.energyDrain(), NotionSchema.ENERGY_OPTIONS);
         putScale(props, NotionSchema.PROP_MENTAL_LOAD, snapshot.mentalLoad(), NotionSchema.MENTAL_LOAD_OPTIONS);
-        if (cycleExternalId != null) {
-            props.put(NotionSchema.PROP_CYCLE, relation(cycleExternalId));
-        }
-        if (parentExternalId != null) {
-            props.put(NotionSchema.PROP_PARENT_TASK, relation(parentExternalId));
-        }
+        props.put(NotionSchema.PROP_CYCLE,
+            cycleExternalId != null ? relation(cycleExternalId) : Map.of("relation", List.of()));
+        props.put(NotionSchema.PROP_PARENT_TASK,
+            parentExternalId != null ? relation(parentExternalId) : Map.of("relation", List.of()));
         NotionSchema.assertWritable(props);
         return props;
     }
 
-    private static String mapStatus(String domainStatus) {
+    /** Projects a domain status to its Notion option name (lossy; shared with the merge). */
+    static String mapStatus(String domainStatus) {
         String notionStatus = domainStatus != null ? STATUS_TO_NOTION.get(domainStatus) : null;
         return notionStatus != null ? notionStatus : "Not started";
     }
 
-    private static String mapType(String domainType) {
+    /** Projects a domain type to its Notion option name (shared with the merge). */
+    static String mapType(String domainType) {
         String notionType = domainType != null ? TYPE_TO_NOTION.get(domainType) : null;
         return notionType != null ? notionType : "Task";
     }
 
-    private static void putNumber(Map<String, Object> props, String name, Double value) {
-        if (value != null) {
-            props.put(name, Map.of("number", value));
+    /** Truncates to the Notion 2000-char content limit — the text projection for the merge. */
+    static String projectText(String content) {
+        if (content == null) {
+            return null;
         }
+        return content.length() > MAX_TEXT_LENGTH ? content.substring(0, MAX_TEXT_LENGTH) : content;
     }
 
-    /** Maps a 1-based numeric scale onto its select options, clamping overflow to the top option. */
+    private static void putNumber(Map<String, Object> props, String name, Double value) {
+        props.put(name, value != null ? Map.of("number", value) : singletonMap("number", null));
+    }
+
+    /**
+     * Maps a 1-based numeric scale onto its select options, clamping overflow to the top
+     * option; a null scale clears the select (full-mirror contract, ADR-012 D3).
+     */
     private static void putScale(Map<String, Object> props, String name, Integer value,
                                  List<String> options) {
         if (value == null) {
+            props.put(name, singletonMap("select", null));
             return;
         }
         int index = Math.min(Math.max(value, 1), options.size()) - 1;

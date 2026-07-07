@@ -1,15 +1,18 @@
 package com.hyperbrain.sync.application;
 
+import com.hyperbrain.core.application.PassthroughDomainChangeProcessor;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
-import com.hyperbrain.sync.domain.model.CoreExecutable;
 import com.hyperbrain.sync.domain.model.EntityType;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SentinelEvent;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
+import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
+import com.hyperbrain.sync.support.ExecutableSnapshotBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +33,7 @@ import static org.mockito.Mockito.*;
 class CalendarEventHandlerTest {
 
     private CoreExecutableRepository executableRepo;
+    private SyncSnapshotRepository snapshotRepo;
     private SyncMappingRepository syncMappingRepo;
     private OutboxRepository outboxRepo;
     private CalendarEventHandler handler;
@@ -40,22 +44,24 @@ class CalendarEventHandlerTest {
     @BeforeEach
     void setUp() {
         executableRepo = mock(CoreExecutableRepository.class);
+        snapshotRepo = mock(SyncSnapshotRepository.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
         outboxRepo = mock(OutboxRepository.class);
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
-        handler = new CalendarEventHandler(executableRepo, syncMappingRepo, outboxRepo, parser, USER_ID);
+        handler = new CalendarEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
+            outboxRepo, new PassthroughDomainChangeProcessor(), parser, USER_ID);
     }
 
     @Test
-    @DisplayName("CREATED: inserts executable with type=ACTIVITY and correct calendar name")
+    @DisplayName("CREATED: persists executable with type=ACTIVITY and correct calendar name")
     void created_maps_to_activity() {
         when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-1"))
             .thenReturn(Optional.empty());
-        ArgumentCaptor<CoreExecutable> captor = ArgumentCaptor.forClass(CoreExecutable.class);
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
 
         handler.handle(calendarEvent("EKEvent-1", Operation.CREATED, calendarPayload("Work")));
 
-        verify(executableRepo).insert(captor.capture());
+        verify(executableRepo).upsert(captor.capture());
         assertThat(captor.getValue().type()).isEqualTo("ACTIVITY");
         assertThat(captor.getValue().name()).isEqualTo("Team meeting");
         assertThat(captor.getValue().sourceCalendar()).isEqualTo("Work");
@@ -67,11 +73,11 @@ class CalendarEventHandlerTest {
     void created_maps_times() {
         when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-2"))
             .thenReturn(Optional.empty());
-        ArgumentCaptor<CoreExecutable> captor = ArgumentCaptor.forClass(CoreExecutable.class);
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
 
         handler.handle(calendarEvent("EKEvent-2", Operation.CREATED, calendarPayload("Personal")));
 
-        verify(executableRepo).insert(captor.capture());
+        verify(executableRepo).upsert(captor.capture());
         assertThat(captor.getValue().startTime()).isNotNull();
         assertThat(captor.getValue().endTime()).isNotNull();
     }
@@ -87,23 +93,29 @@ class CalendarEventHandlerTest {
 
         handler.handle(calendarEvent("EKEvent-3", Operation.UPDATED, payload));
 
-        verifyNoInteractions(executableRepo, outboxRepo);
+        verifyNoInteractions(executableRepo, snapshotRepo, outboxRepo);
     }
 
     @Test
-    @DisplayName("UPDATED with different checksum: updates executable (calendar change is reflected)")
-    void updated_different_checksum_updates_calendar() {
+    @DisplayName("UPDATED with different checksum: merges onto the current row — status and type are kept (ADR-012 D1)")
+    void updated_different_checksum_merges() {
         UUID localId = UUID.randomUUID();
         SyncMapping existing = syncMapping("EKEvent-4", localId, "stale");
         when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-4"))
             .thenReturn(Optional.of(existing));
-        ArgumentCaptor<CoreExecutable> captor = ArgumentCaptor.forClass(CoreExecutable.class);
+        // Current row is an AGENDA entity in progress: Apple must not reset either field.
+        when(snapshotRepo.findExecutable(localId)).thenReturn(Optional.of(
+            ExecutableSnapshotBuilder.snapshot().id(localId).userId(USER_ID)
+                .type("AGENDA").status("IN_PROGRESS").build()));
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
 
         handler.handle(calendarEvent("EKEvent-4", Operation.UPDATED, calendarPayload("Personal")));
 
-        verify(executableRepo).update(captor.capture());
+        verify(executableRepo).upsert(captor.capture());
         assertThat(captor.getValue().sourceCalendar()).isEqualTo("Personal");
         assertThat(captor.getValue().id()).isEqualTo(localId);
+        assertThat(captor.getValue().type()).isEqualTo("AGENDA");
+        assertThat(captor.getValue().status()).isEqualTo("IN_PROGRESS");
     }
 
     @Test
