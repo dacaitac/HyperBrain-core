@@ -93,6 +93,23 @@ class NotionCycleSyncServiceTest {
     }
 
     @Test
+    @DisplayName("CA-29: an edit in the same minute is applied — Notion truncates last_edited_time, so an equal timestamp is not stale")
+    void same_minute_edit_is_applied() {
+        // Given a mapping already synced at the exact same (minute-truncated) timestamp
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
+            .thenReturn(Optional.of(mapping("previous-checksum", EDITED_AT)));
+
+        // When the user edits again within the same minute (different content, same timestamp)
+        SyncOutcome outcome = service.apply(page("Sprint 2 renamed", false, EDITED_AT));
+
+        // Then the edit is applied instead of being discarded as stale
+        assertThat(outcome).isEqualTo(SyncOutcome.UPDATED);
+        ArgumentCaptor<CycleSnapshot> snapshot = ArgumentCaptor.forClass(CycleSnapshot.class);
+        verify(cycleRepo).upsert(snapshot.capture());
+        assertThat(snapshot.getValue().name()).isEqualTo("Sprint 2 renamed");
+    }
+
+    @Test
     @DisplayName("CA-7: an archived Cycles page deletes the cycle and its mapping")
     void archived_page_resolves_to_delete() {
         // Given

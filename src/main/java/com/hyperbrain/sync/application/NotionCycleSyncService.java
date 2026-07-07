@@ -96,7 +96,7 @@ public class NotionCycleSyncService {
             return deleteMapped(page.pageId(), mapping);
         }
         if (isStale(page.lastEditedTime(), mapping)) {
-            log.info("CYCLE page {} is stale (last_edited_time <= last_synced_at); discarded (CA-29)",
+            log.info("CYCLE page {} is stale (last_edited_time < last_synced_at); discarded (CA-29)",
                 page.pageId());
             return SyncOutcome.SKIPPED_STALE;
         }
@@ -197,10 +197,15 @@ public class NotionCycleSyncService {
             eventType, payload, EXTERNAL_SYSTEM, OffsetDateTime.now()));
     }
 
+    /**
+     * CA-29 monotonicity guard. Strictly-older only: Notion truncates {@code last_edited_time}
+     * to the minute, so successive edits within the same minute share one timestamp — an equal
+     * timestamp must fall through to the checksum discard (CA-4), or those edits are lost.
+     */
     private static boolean isStale(OffsetDateTime lastEditedTime, Optional<SyncMapping> mapping) {
         return mapping.isPresent()
             && lastEditedTime != null
             && mapping.get().lastSyncedAt() != null
-            && !lastEditedTime.isAfter(mapping.get().lastSyncedAt());
+            && lastEditedTime.isBefore(mapping.get().lastSyncedAt());
     }
 }

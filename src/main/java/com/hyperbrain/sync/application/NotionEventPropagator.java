@@ -25,6 +25,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -241,7 +242,7 @@ public class NotionEventPropagator implements IEventPropagator {
         String checksum = checksum(externalId, Operation.UPDATED, props);
         syncMappingRepo.update(new SyncMapping(
             mapping.get().id(), mapping.get().userId(), localId, EXTERNAL_SYSTEM,
-            externalId, checksum, STATUS_SYNCED, OffsetDateTime.now()));
+            externalId, checksum, STATUS_SYNCED, notionClockNow()));
         recordWrite(Operation.UPDATED);
         log.info("Notion page {} updated for entity {}", externalId, localId);
     }
@@ -252,7 +253,7 @@ public class NotionEventPropagator implements IEventPropagator {
         String checksum = checksum(externalId, Operation.CREATED, props);
         syncMappingRepo.insert(new SyncMapping(
             UUID.randomUUID(), userId, localId, EXTERNAL_SYSTEM,
-            externalId, checksum, STATUS_SYNCED, OffsetDateTime.now()));
+            externalId, checksum, STATUS_SYNCED, notionClockNow()));
         recordWrite(Operation.CREATED);
         log.info("Notion page {} created for entity {}", externalId, localId);
     }
@@ -300,7 +301,7 @@ public class NotionEventPropagator implements IEventPropagator {
         syncMappingRepo.insert(new SyncMapping(
             UUID.randomUUID(), cycle.get().userId(), cycleId, EXTERNAL_SYSTEM,
             externalId, checksum(externalId, Operation.CREATED, props), STATUS_SYNCED,
-            OffsetDateTime.now()));
+            notionClockNow()));
         recordWrite(Operation.CREATED);
         log.info("Notion cycle page {} created on demand for cycle {} (CA-6)", externalId, cycleId);
         return externalId;
@@ -347,6 +348,16 @@ public class NotionEventPropagator implements IEventPropagator {
 
     private static String normalizePageId(String pageId) {
         return pageId.replace("-", "");
+    }
+
+    /**
+     * {@code last_synced_at} stored after an outbound write, truncated to the minute because
+     * Notion truncates {@code last_edited_time} the same way: the CA-29 guard compares the two,
+     * and an untruncated wall clock would out-date (and silently drop) user edits made in the
+     * same minute as the write-back.
+     */
+    private static OffsetDateTime notionClockNow() {
+        return OffsetDateTime.now().truncatedTo(ChronoUnit.MINUTES);
     }
 
     private static UUID parseLocalId(String aggregateId) {

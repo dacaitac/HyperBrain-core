@@ -243,20 +243,23 @@ class NotionInboundSyncIT {
     void burst_converges_to_latest_state() {
         String pageId = newPageId();
 
-        // Five rapid edits, one webhook each, delivered in FIFO order (MessageGroupId = page id)
+        // Five rapid edits, one webhook each, delivered in FIFO order (MessageGroupId = page id).
+        // Notion truncates last_edited_time to the minute, so all five share one timestamp —
+        // convergence relies on the checksum discard, never on sub-minute ordering (CA-29).
         for (int edit = 1; edit <= 5; edit++) {
             deliver(automationEnvelope("burst-" + edit, pageId,
                 taskPage(pageId, "Edit " + edit, "In progress", false, "Task",
-                    "2026-07-07T15:00:0%d.000Z".formatted(edit), null)));
+                    "2026-07-07T15:00:00.000Z", null)));
         }
         // A redelivery of the third webhook (same message_id) — consumer dedup must absorb it
         deliver(automationEnvelope("burst-3", pageId,
             taskPage(pageId, "Edit 3", "In progress", false, "Task",
-                "2026-07-07T15:00:03.000Z", null)));
-        // An out-of-order delivery carrying an older state (new message_id, stale last_edited_time)
+                "2026-07-07T15:00:00.000Z", null)));
+        // An out-of-order delivery from an earlier minute (new message_id, strictly older
+        // last_edited_time) — the only case the monotonicity guard can and must discard
         deliver(automationEnvelope("burst-late", pageId,
             taskPage(pageId, "Edit 2", "In progress", false, "Task",
-                "2026-07-07T15:00:02.000Z", null)));
+                "2026-07-07T14:59:00.000Z", null)));
 
         // Then: one executable, final state = the most recent edit, no duplicates, no regression
         assertThat(countExecutables()).isEqualTo(1);

@@ -131,6 +131,24 @@ class NotionTaskSyncServiceTest {
     }
 
     @Test
+    @DisplayName("CA-29: an edit in the same minute is applied — Notion truncates last_edited_time, so an equal timestamp is not stale")
+    void same_minute_edit_is_applied() {
+        // Given a mapping already synced at the exact same (minute-truncated) timestamp
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
+            .thenReturn(Optional.of(mapping("previous-checksum", EDITED_AT)));
+        when(cycleSyncService.resolveOrImport(CYCLE_PAGE_ID)).thenReturn(CYCLE_LOCAL_ID);
+
+        // When the user edits again within the same minute (different content, same timestamp)
+        SyncOutcome outcome = service.apply(page("Renamed within the minute", "In progress", false, EDITED_AT));
+
+        // Then the edit is applied instead of being discarded as stale
+        assertThat(outcome).isEqualTo(SyncOutcome.UPDATED);
+        ArgumentCaptor<ExecutableSnapshot> snapshot = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(executableRepo).upsert(snapshot.capture());
+        assertThat(snapshot.getValue().name()).isEqualTo("Renamed within the minute");
+    }
+
+    @Test
     @DisplayName("CA-4/CA-20: identical state (checksum match) is discarded silently — the HU-10 echo does not bounce")
     void identical_state_is_discarded_by_checksum() {
         // Given a mapping whose checksum equals the canonical props of the incoming state

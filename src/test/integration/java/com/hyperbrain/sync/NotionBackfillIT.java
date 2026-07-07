@@ -103,7 +103,7 @@ class NotionBackfillIT {
     }
 
     @Test
-    @DisplayName("CA-8/CA-28: re-running the backfill is idempotent — unchanged pages are discarded by the monotonicity guard")
+    @DisplayName("CA-8/CA-28: re-running the backfill is idempotent — unchanged pages are discarded by checksum")
     void rerun_is_idempotent() {
         // Given a completed first run
         backfillService.backfill();
@@ -114,10 +114,10 @@ class NotionBackfillIT {
         NotionBackfillService.BackfillSummary second = backfillService.backfill();
 
         // Then nothing was created or updated again: the pages carry the same last_edited_time
-        // that the first run stored in last_synced_at, so CA-29 discards them before the
-        // checksum even runs (either guard yields the same convergence)
-        assertThat(second.cycles()).containsEntry(SyncOutcome.SKIPPED_STALE, 1);
-        assertThat(second.tasks()).containsEntry(SyncOutcome.SKIPPED_STALE, 2);
+        // that the first run stored in last_synced_at — an equal timestamp passes the CA-29
+        // guard (Notion truncates to the minute) and the checksum discards the echo (CA-4)
+        assertThat(second.cycles()).containsEntry(SyncOutcome.SKIPPED_ECHO, 1);
+        assertThat(second.tasks()).containsEntry(SyncOutcome.SKIPPED_ECHO, 2);
         Integer executables = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM core_executable", Integer.class);
         assertThat(executables).isEqualTo(2);
