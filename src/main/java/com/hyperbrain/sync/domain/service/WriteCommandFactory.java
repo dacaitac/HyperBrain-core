@@ -91,7 +91,7 @@ public final class WriteCommandFactory {
     private static ReminderPayload reminderPayload(CoreExecutable executable) {
         return new ReminderPayload(
             executable.name(),
-            null,
+            executable.description(),
             executable.endTime(),
             STATUS_DONE.equals(executable.status()),
             0,
@@ -105,7 +105,7 @@ public final class WriteCommandFactory {
             executable.startTime(),
             executable.endTime(),
             false,
-            null,
+            executable.description(),
             "",
             executable.sourceCalendar() != null ? executable.sourceCalendar() : "",
             null);

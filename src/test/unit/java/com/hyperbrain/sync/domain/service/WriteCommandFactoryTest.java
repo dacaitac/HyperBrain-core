@@ -38,7 +38,7 @@ class WriteCommandFactoryTest {
         assertThat(command).isPresent();
         assertThat(command.get()).usingRecursiveComparison().isEqualTo(new WriteCommand(
             COMMAND_ID, CommandType.REMINDER, Operation.UPDATED, "EK-1",
-            new ReminderPayload("Buy groceries", null, END, true, 0, "", "HyperBrain")));
+            new ReminderPayload("Buy groceries", "2L milk", END, true, 0, "", "HyperBrain")));
     }
 
     @Test
@@ -73,7 +73,7 @@ class WriteCommandFactoryTest {
         assertThat(command).isPresent();
         assertThat(command.get()).usingRecursiveComparison().isEqualTo(new WriteCommand(
             COMMAND_ID, CommandType.CALENDAR_EVENT, Operation.CREATED, null,
-            new CalendarEventPayload("Buy groceries", START, END, false, null, "", "Personal", null)));
+            new CalendarEventPayload("Buy groceries", START, END, false, "2L milk", "", "Personal", null)));
     }
 
     @Test
@@ -130,6 +130,6 @@ class WriteCommandFactoryTest {
     private static CoreExecutable executable(
         String type, String status, OffsetDateTime start, OffsetDateTime end, String sourceCalendar) {
         return new CoreExecutable(
-            UUID.randomUUID(), USER_ID, "Buy groceries", type, status, start, end, sourceCalendar);
+            UUID.randomUUID(), USER_ID, "Buy groceries", "2L milk", type, status, start, end, sourceCalendar);
     }
 }

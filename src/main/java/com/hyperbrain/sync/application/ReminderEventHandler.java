@@ -132,7 +132,7 @@ public class ReminderEventHandler implements IEventHandler {
     private CoreExecutable buildExecutable(UUID id, ReminderPayload payload) {
         String status = payload.completed() ? "DONE" : "TODO";
         return new CoreExecutable(
-            id, defaultUserId, payload.title(), EXECUTABLE_TYPE, status,
+            id, defaultUserId, payload.title(), payload.notes(), EXECUTABLE_TYPE, status,
             null, payload.dueDate(), payload.listName());
     }
 

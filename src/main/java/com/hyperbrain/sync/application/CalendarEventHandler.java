@@ -120,7 +120,7 @@ public class CalendarEventHandler implements IEventHandler {
 
     private CoreExecutable buildExecutable(UUID id, CalendarEventPayload payload) {
         return new CoreExecutable(
-            id, defaultUserId, payload.title(), EXECUTABLE_TYPE, "TODO",
+            id, defaultUserId, payload.title(), payload.notes(), EXECUTABLE_TYPE, "TODO",
             payload.startTime(), payload.endTime(), payload.calendarName());
     }
 

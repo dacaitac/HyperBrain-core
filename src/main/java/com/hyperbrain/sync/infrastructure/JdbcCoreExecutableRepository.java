@@ -21,18 +21,18 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
 
     private static final String INSERT_SQL = """
         INSERT INTO core_executable
-            (id, user_id, name, type, status, start_time, end_time, source_calendar)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, user_id, name, description, type, status, start_time, end_time, source_calendar)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """;
 
     private static final String UPDATE_SQL = """
         UPDATE core_executable
-        SET name = ?, status = ?, start_time = ?, end_time = ?, source_calendar = ?
+        SET name = ?, description = ?, status = ?, start_time = ?, end_time = ?, source_calendar = ?
         WHERE id = ?
         """;
 
     private static final String FIND_BY_ID_SQL = """
-        SELECT id, user_id, name, type, status, start_time, end_time, source_calendar
+        SELECT id, user_id, name, description, type, status, start_time, end_time, source_calendar
         FROM core_executable
         WHERE id = ?
         """;
@@ -47,6 +47,7 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
             rs.getObject("id", UUID.class),
             rs.getObject("user_id", UUID.class),
             rs.getString("name"),
+            rs.getString("description"),
             rs.getString("type"),
             rs.getString("status"),
             startTs != null ? startTs.toInstant().atOffset(java.time.ZoneOffset.UTC) : null,
@@ -63,7 +64,7 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
     @Override
     public void insert(CoreExecutable e) {
         jdbcTemplate.update(INSERT_SQL,
-            e.id(), e.userId(), e.name(), e.type(), e.status(),
+            e.id(), e.userId(), e.name(), e.description(), e.type(), e.status(),
             toTimestamp(e.startTime()), toTimestamp(e.endTime()),
             e.sourceCalendar());
     }
@@ -71,7 +72,7 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
     @Override
     public void update(CoreExecutable e) {
         jdbcTemplate.update(UPDATE_SQL,
-            e.name(), e.status(),
+            e.name(), e.description(), e.status(),
             toTimestamp(e.startTime()), toTimestamp(e.endTime()),
             e.sourceCalendar(),
             e.id());

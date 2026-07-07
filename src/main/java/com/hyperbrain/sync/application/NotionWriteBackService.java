@@ -67,11 +67,24 @@ public class NotionWriteBackService implements IEventPropagator {
     private static final Set<String> EXECUTABLE_AGGREGATES = Set.of("CORE_EXECUTABLE", "TASK");
     private static final String CYCLE_AGGREGATE = "CORE_CYCLE";
 
+    /**
+     * Inbound Apple sync events (HU-09 handlers) also describe {@code core_executable} changes,
+     * but carry the EventKit id in {@code aggregate_id}; the local UUID travels in the payload
+     * as {@code local_id}.
+     */
+    private static final String SYNC_APPLE_AGGREGATE = "SYNC_APPLE";
+
     private static final Map<String, Operation> EXECUTABLE_EVENT_OPERATIONS = Map.of(
         "ExecutableCreatedEvent", Operation.CREATED,
         "ExecutableUpdatedEvent", Operation.UPDATED,
         "TaskCompletedEvent", Operation.UPDATED,
         "ExecutableDeletedEvent", Operation.DELETED);
+
+    private static final Map<String, Operation> SYNC_APPLE_EVENT_OPERATIONS = Map.of(
+        "ReminderSyncedEvent", Operation.UPDATED,
+        "CalendarEventSyncedEvent", Operation.UPDATED,
+        "ReminderDeletedEvent", Operation.DELETED,
+        "CalendarEventDeletedEvent", Operation.DELETED);
 
     private static final Map<String, Operation> CYCLE_EVENT_OPERATIONS = Map.of(
         "CycleCreatedEvent", Operation.CREATED,
@@ -105,13 +118,19 @@ public class NotionWriteBackService implements IEventPropagator {
     @Override
     public void propagate(OutboxEvent event) {
         boolean isExecutable = EXECUTABLE_AGGREGATES.contains(event.aggregateType());
+        boolean isAppleSync = SYNC_APPLE_AGGREGATE.equals(event.aggregateType());
         boolean isCycle = CYCLE_AGGREGATE.equals(event.aggregateType());
-        if (!isExecutable && !isCycle) {
+        if (!isExecutable && !isAppleSync && !isCycle) {
             return;
         }
-        Operation operation = isExecutable
-            ? EXECUTABLE_EVENT_OPERATIONS.get(event.eventType())
-            : CYCLE_EVENT_OPERATIONS.get(event.eventType());
+        Operation operation;
+        if (isExecutable) {
+            operation = EXECUTABLE_EVENT_OPERATIONS.get(event.eventType());
+        } else if (isAppleSync) {
+            operation = SYNC_APPLE_EVENT_OPERATIONS.get(event.eventType());
+        } else {
+            operation = CYCLE_EVENT_OPERATIONS.get(event.eventType());
+        }
         if (operation == null) {
             return;
         }
@@ -120,24 +139,41 @@ public class NotionWriteBackService implements IEventPropagator {
                 event.id(), event.sourceSystem());
             return;
         }
-        UUID localId = parseLocalId(event.aggregateId());
+        UUID localId = isAppleSync
+            ? extractPayloadLocalId(event)
+            : parseLocalId(event.aggregateId());
         if (localId == null) {
-            log.warn("Outbox event {} has non-UUID aggregate_id '{}'; skipping Notion write-back",
-                event.id(), event.aggregateId());
+            log.warn("Outbox event {} carries no usable local id (aggregate_id '{}'); "
+                + "skipping Notion write-back", event.id(), event.aggregateId());
             return;
         }
 
         try {
             if (operation == Operation.DELETED) {
                 propagateDelete(localId);
-            } else if (isExecutable) {
-                propagateExecutableUpsert(event, localId);
-            } else {
+            } else if (isCycle) {
                 propagateCycleUpsert(event, localId);
+            } else {
+                propagateExecutableUpsert(event, localId);
             }
         } catch (NotionApiException ex) {
             onPersistentFailure(localId, ex);
             throw ex;
+        }
+    }
+
+    /** Reads the {@code local_id} field the HU-09 handlers embed in the outbox payload. */
+    private UUID extractPayloadLocalId(OutboxEvent event) {
+        if (event.payload() == null) {
+            return null;
+        }
+        try {
+            String localId = objectMapper.readTree(event.payload()).path("local_id").asText(null);
+            return localId != null ? parseLocalId(localId) : null;
+        } catch (JsonProcessingException ex) {
+            log.warn("Outbox event {} has unparseable payload; skipping Notion write-back",
+                event.id(), ex);
+            return null;
         }
     }
 

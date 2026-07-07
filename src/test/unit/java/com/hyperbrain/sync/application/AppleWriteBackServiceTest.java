@@ -274,7 +274,7 @@ class AppleWriteBackServiceTest {
     }
 
     private static CoreExecutable executable(String type, String status) {
-        return new CoreExecutable(LOCAL_ID, USER_ID, "Buy groceries", type, status, START, null, "HyperBrain");
+        return new CoreExecutable(LOCAL_ID, USER_ID, "Buy groceries", null, type, status, START, null, "HyperBrain");
     }
 
     private static SyncMapping mapping(String externalId) {

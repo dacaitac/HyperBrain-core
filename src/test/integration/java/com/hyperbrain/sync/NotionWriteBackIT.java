@@ -236,6 +236,37 @@ class NotionWriteBackIT {
     }
 
     @Test
+    @DisplayName("inbound Apple reminder (SYNC_APPLE aggregate) propagates to Notion with title/notes/date (CA-2)")
+    void inbound_apple_reminder_propagates_to_notion() throws Exception {
+        // Given an executable ingested by the HU-09 reminder handler and its inbound-shaped event
+        UUID localId = insertExecutable("TASK", "TODO");
+        String entityId = "EKReminder-" + UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, source_system, occurred_at)
+            VALUES (?, 'SYNC_APPLE', ?, 'ReminderSyncedEvent', ?::jsonb, 'APPLE', now())
+            """, UUID.randomUUID(), entityId,
+            "{\"local_id\":\"" + localId + "\",\"entity_id\":\"" + entityId + "\",\"operation\":\"CREATED\"}");
+        stubCreatePage(TASKS_DS, "7f000000000000000000000000000000");
+
+        // When
+        outboxWorker.drainBatch();
+
+        // Then the page carries the reminder attributes and the mapping closes on the local id
+        LoggedRequest request = singleRequest(postRequestedFor(urlEqualTo("/v1/pages")));
+        JsonNode props = objectMapper.readTree(request.getBodyAsString()).path("properties");
+        assertThat(props.path("Name").path("title").get(0).path("text").path("content").asText())
+            .isEqualTo("Write tests");
+        assertThat(props.path("Description").path("rich_text").get(0).path("text").path("content").asText())
+            .isEqualTo("Detailed description");
+        assertThat(props.path("Type").path("select").path("name").asText()).isEqualTo("Task");
+        assertThat(props.path("Complete").path("checkbox").asBoolean()).isFalse();
+        UUID mappedLocal = jdbcTemplate.queryForObject(
+            "SELECT local_id FROM sync_mappings WHERE external_system = 'NOTION'", UUID.class);
+        assertThat(mappedLocal).isEqualTo(localId);
+        assertThat(unprocessedEvents()).isZero();
+    }
+
+    @Test
     @DisplayName("loop protection: source_system=NOTION never calls the Notion API (CA-2, CA-11)")
     void notion_sourced_change_is_not_written_back() {
         // Given a Notion-originated change

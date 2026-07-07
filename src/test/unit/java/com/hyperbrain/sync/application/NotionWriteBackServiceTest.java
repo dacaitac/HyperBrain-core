@@ -119,6 +119,63 @@ class NotionWriteBackServiceTest {
         verifyNoInteractions(snapshotRepo, syncMappingRepo, notion);
     }
 
+    // ── Inbound Apple sync events (SYNC_APPLE aggregate, HU-09 handlers) ─────
+
+    @Test
+    @DisplayName("SYNC_APPLE ReminderSyncedEvent propagates using the payload local_id (CA-2)")
+    void apple_sync_event_propagates_via_payload_local_id() {
+        // Given an inbound reminder ingested by HU-09 (aggregate_id = EventKit id)
+        givenUnmappedExecutable(taskSnapshot("TODO"));
+        when(notion.createPage(eq(TASKS_DS), anyMap())).thenReturn("applepage");
+        OutboxEvent event = new OutboxEvent(UUID.randomUUID(), "SYNC_APPLE",
+            "EKReminder-ABC123",
+            "ReminderSyncedEvent",
+            "{\"local_id\":\"" + LOCAL_ID + "\",\"entity_id\":\"EKReminder-ABC123\",\"operation\":\"CREATED\"}",
+            "APPLE", OffsetDateTime.now());
+
+        // When
+        service.propagate(event);
+
+        // Then the page is created for the executable referenced by payload.local_id
+        verify(notion).createPage(eq(TASKS_DS), anyMap());
+        ArgumentCaptor<SyncMapping> captor = ArgumentCaptor.forClass(SyncMapping.class);
+        verify(syncMappingRepo).insert(captor.capture());
+        assertThat(captor.getValue().localId()).isEqualTo(LOCAL_ID);
+    }
+
+    @Test
+    @DisplayName("SYNC_APPLE ReminderDeletedEvent archives the mapped page")
+    void apple_sync_delete_event_archives_page() {
+        // Given
+        when(syncMappingRepo.findByExternalSystemAndLocalId("NOTION", LOCAL_ID))
+            .thenReturn(Optional.of(mapping(LOCAL_ID, "applepage", null)));
+        OutboxEvent event = new OutboxEvent(UUID.randomUUID(), "SYNC_APPLE",
+            "EKReminder-ABC123",
+            "ReminderDeletedEvent",
+            "{\"local_id\":\"" + LOCAL_ID + "\",\"entity_id\":\"EKReminder-ABC123\",\"operation\":\"DELETED\"}",
+            "APPLE", OffsetDateTime.now());
+
+        // When
+        service.propagate(event);
+
+        // Then
+        verify(notion).archivePage("applepage");
+        verify(syncMappingRepo).deleteByExternalSystemAndId("NOTION", "applepage");
+    }
+
+    @Test
+    @DisplayName("SYNC_APPLE event without a usable local_id is skipped")
+    void apple_sync_event_without_local_id_is_skipped() {
+        // When
+        service.propagate(new OutboxEvent(UUID.randomUUID(), "SYNC_APPLE", "EKReminder-X",
+            "ReminderSyncedEvent", "{\"entity_id\":\"EKReminder-X\"}", "APPLE", OffsetDateTime.now()));
+        service.propagate(new OutboxEvent(UUID.randomUUID(), "SYNC_APPLE", "EKReminder-X",
+            "ReminderSyncedEvent", "not-json", "APPLE", OffsetDateTime.now()));
+
+        // Then
+        verifyNoInteractions(notion, snapshotRepo);
+    }
+
     // ── CREATE (CA-3) ─────────────────────────────────────────────────────────
 
     @Test
