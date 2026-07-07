@@ -54,6 +54,13 @@ app:
     # Single-user MVP: every inbound Apple event is owned by this user.
     # Override via SYNC_DEFAULT_USER_ID env var in production.
     default-user-id: ${SYNC_DEFAULT_USER_ID:00000000-0000-0000-0000-000000000001}
+    # Notion write-back (HU-10). Disabled unless a token is provisioned (SOPS in Infra, CA-12);
+    # the data source ids are the Tasks/Cycles collections verified in issue #15.
+    notion:
+      enabled: ${NOTION_SYNC_ENABLED:false}
+      token: ${NOTION_TOKEN:}
+      tasks-data-source-id: ${NOTION_TASKS_DATA_SOURCE_ID:1bf8bc9c5d918171b7ea000b7e326082}
+      cycles-data-source-id: ${NOTION_CYCLES_DATA_SOURCE_ID:1bf8bc9c5d9181e78737000b45812f45}
   outbox:
     poll-interval-ms:   2000
     batch-size:         50

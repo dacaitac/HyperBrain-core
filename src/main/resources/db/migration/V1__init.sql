@@ -29,7 +29,9 @@ CREATE TABLE sync_credential (
     provider       TEXT NOT NULL CHECK (provider IN ('NOTION', 'APPLE', 'N8N')),
     access_token   TEXT,
     refresh_token  TEXT,
-    expires_at     TIMESTAMPTZ
+    expires_at     TIMESTAMPTZ,
+    -- Mirrors HyperBrain-Infra migration 20260706150000 (S0-07): idempotent token upsert (HU-10).
+    UNIQUE (user_id, provider)
 );
 
 CREATE INDEX idx_sync_credential_user ON sync_credential (user_id);

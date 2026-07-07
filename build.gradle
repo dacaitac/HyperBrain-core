@@ -84,6 +84,9 @@ dependencies {
     integrationTestImplementation 'org.testcontainers:junit-jupiter'
     integrationTestImplementation 'org.testcontainers:postgresql'
     integrationTestImplementation 'org.testcontainers:localstack'
+    // Stub of the Notion REST API for the HU-10 write-back ITs (standalone: shaded Jetty,
+    // no conflict with Spring Boot's servlet stack).
+    integrationTestImplementation 'org.wiremock:wiremock-standalone:3.10.0'
     integrationTestRuntimeOnly    'org.postgresql:postgresql'
 }
 
