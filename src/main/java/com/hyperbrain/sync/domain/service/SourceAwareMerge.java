@@ -50,10 +50,13 @@ public final class SourceAwareMerge {
 
     /**
      * Merges an Apple REMINDER state onto the current row. Apple authority: name, notes,
-     * due date, completed flag, containing list. Reminders carry no start time, so
-     * {@code start_time} is never touched; the due date is compared against the outbound
-     * projection {@code end_time ?? start_time} (the {@code WriteCommandFactory} rule), so
-     * an untouched due date never clobbers the Notion-owned schedule.
+     * due date (stored as {@code start_time} — DR-01 forbids {@code end_time} on TASK),
+     * completed flag, containing list.
+     *
+     * <p>The due date is compared against the outbound projection {@code end_time ?? start_time}
+     * so that an untouched due date never writes to the DB. When the due date changes, Apple
+     * takes authority over {@code start_time}; when it is unchanged, the existing
+     * {@code start_time} is preserved (protecting any Notion-owned value set by the user).
      *
      * @param current the current row joined with its profile, or null when unmapped
      * @param id      local executable id (existing mapping or a fresh UUID)
@@ -67,19 +70,19 @@ public final class SourceAwareMerge {
             return new ExecutableSnapshot(id, userId, null, null,
                 p.title(), p.notes(), "TASK", p.completed() ? STATUS_DONE : STATUS_TODO,
                 null, null, null, false, null,
-                null, p.dueDate(), p.listName(), null, null, null);
+                p.dueDate(), null, p.listName(), null, null, null);
         }
         OffsetDateTime dueProjection = current.endTime() != null
             ? current.endTime()
             : current.startTime();
-        OffsetDateTime endTime = sameInstant(p.dueDate(), dueProjection)
-            ? current.endTime()
-            : p.dueDate();
+        OffsetDateTime newStartTime = sameInstant(p.dueDate(), dueProjection)
+            ? current.startTime()  // due date unchanged: preserve existing startTime
+            : p.dueDate();         // due date changed: Apple takes authority over startTime
         return new ExecutableSnapshot(id, userId, current.parentId(), current.cycleId(),
             p.title(), p.notes(), current.type(), mergeCompletedFlag(current.status(), p.completed()),
             current.priorityScore(), current.urgencyScore(), current.effortScore(),
             current.isImportant(), current.frequency(),
-            current.startTime(), endTime, p.listName(),
+            newStartTime, null, p.listName(),
             current.energyDrain(), current.mentalLoad(), current.impact());
     }
 

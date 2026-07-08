@@ -132,7 +132,9 @@ class ReminderEventHandlerTest {
         assertThat(merged.name()).isEqualTo("Buy groceries");
         assertThat(merged.status()).isEqualTo("IN_PROGRESS");
         assertThat(merged.priorityScore()).isEqualTo(0.7);
-        assertThat(merged.startTime()).isEqualTo(OffsetDateTime.parse("2026-07-05T08:00:00-05:00"));
+        // Apple due date (09:00) differs from stored startTime (08:00) → Apple takes authority over startTime (DR-01)
+        assertThat(merged.startTime()).isEqualTo(OffsetDateTime.parse("2026-07-05T09:00:00-05:00"));
+        assertThat(merged.endTime()).isNull();
         verify(syncMappingRepo).update(any(SyncMapping.class));
         verify(outboxRepo).append(any(OutboxEvent.class));
         verify(syncMappingRepo, never()).insert(any());

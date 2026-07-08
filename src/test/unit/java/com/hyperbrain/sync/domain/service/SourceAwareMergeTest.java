@@ -36,8 +36,9 @@ class SourceAwareMergeTest {
     class MergeReminder {
 
         @Test
-        @DisplayName("a rename in Apple keeps the Notion-owned schedule, scores and status")
+        @DisplayName("a rename in Apple keeps scores and status; unchanged due date preserves startTime")
         void rename_keeps_planning_fields() {
+            // current.endTime = DUE (pre-DR-01 state); Apple sends same dueDate = DUE → unchanged
             ExecutableSnapshot current = snapshot().id(ID).userId(USER_ID)
                 .name("Old name").status("IN_PROGRESS").priorityScore(0.7)
                 .cycleId(CYCLE_ID).parentId(PARENT_ID).isImportant(true)
@@ -47,9 +48,10 @@ class SourceAwareMergeTest {
             ExecutableSnapshot merged = SourceAwareMerge.mergeReminder(current, ID, USER_ID,
                 reminder("New name", null, DUE, false, "HyperBrain"));
 
+            // Due date unchanged (DUE == dueProjection) → startTime preserved; endTime always null (DR-01)
             assertThat(merged).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
                 ID, USER_ID, PARENT_ID, CYCLE_ID, "New name", null, "TASK", "IN_PROGRESS",
-                0.7, null, null, true, null, START, DUE, "HyperBrain", 3, null, null));
+                0.7, null, null, true, null, START, null, "HyperBrain", 3, null, null));
         }
 
         @Test
@@ -63,9 +65,9 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("an unchanged due date (projected as end ?? start) never touches the times")
+        @DisplayName("an unchanged due date (projected as end ?? start) never touches startTime")
         void unchanged_due_date_keeps_times() {
-            // The row only has start_time (single-date Notion task): due projects from it.
+            // Post-DR-01 state: startTime IS the Apple due date; endTime = null.
             ExecutableSnapshot current = snapshot().id(ID).startTime(START).build();
 
             ExecutableSnapshot merged = SourceAwareMerge.mergeReminder(current, ID, USER_ID,
@@ -76,37 +78,54 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("a real due date change lands on end_time and keeps start_time")
-        void due_date_change_lands_on_end_time() {
+        @DisplayName("a due date change updates startTime; endTime stays null (DR-01)")
+        void due_date_change_lands_on_start_time() {
+            // Simulates Daniel changing the reminder time — startTime must update in Notion.
             ExecutableSnapshot current = snapshot().id(ID).startTime(START).build();
 
             ExecutableSnapshot merged = SourceAwareMerge.mergeReminder(current, ID, USER_ID,
                 reminder("t", null, DUE, false, "L"));
 
-            assertThat(merged.startTime()).isEqualTo(START);
-            assertThat(merged.endTime()).isEqualTo(DUE);
+            assertThat(merged.startTime()).isEqualTo(DUE);
+            assertThat(merged.endTime()).isNull();
         }
 
         @Test
-        @DisplayName("clearing the due date in Apple clears end_time")
-        void cleared_due_date_clears_end_time() {
+        @DisplayName("a due date change from a stale Notion startTime updates startTime (regression DR-01)")
+        void due_date_change_from_stale_notion_start_updates_start_time() {
+            // Reproduces the bug: startTime was a Notion-owned value from 2025; Apple sends a
+            // new due date → startTime must update to the new due date so Notion reflects the change.
+            OffsetDateTime stale = OffsetDateTime.parse("2025-05-22T15:00:00+00:00");
+            ExecutableSnapshot current = snapshot().id(ID).startTime(stale).build();
+
+            ExecutableSnapshot merged = SourceAwareMerge.mergeReminder(current, ID, USER_ID,
+                reminder("t", null, DUE, false, "L"));
+
+            assertThat(merged.startTime()).isEqualTo(DUE);
+            assertThat(merged.endTime()).isNull();
+        }
+
+        @Test
+        @DisplayName("clearing the due date in Apple clears startTime")
+        void cleared_due_date_clears_start_time() {
             ExecutableSnapshot current = snapshot().id(ID).endTime(DUE).build();
 
             ExecutableSnapshot merged = SourceAwareMerge.mergeReminder(current, ID, USER_ID,
                 reminder("t", null, null, false, "L"));
 
+            assertThat(merged.startTime()).isNull();
             assertThat(merged.endTime()).isNull();
         }
 
         @Test
-        @DisplayName("without a current row the payload creates a plain TASK")
+        @DisplayName("without a current row the payload creates a plain TASK with dueDate as startTime")
         void creates_task_when_unmapped() {
             ExecutableSnapshot merged = SourceAwareMerge.mergeReminder(null, ID, USER_ID,
                 reminder("Buy milk", "notes", DUE, true, "Groceries"));
 
             assertThat(merged).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
                 ID, USER_ID, null, null, "Buy milk", "notes", "TASK", "DONE",
-                null, null, null, false, null, null, DUE, "Groceries", null, null, null));
+                null, null, null, false, null, DUE, null, "Groceries", null, null, null));
         }
     }
 
