@@ -40,6 +40,9 @@ jobs:
           docker compose -f ~/hyperbrain-deploy/docker-compose.yml --env-file ~/hyperbrain-deploy/.env up -d --no-deps hyperbrain-core
 
       - name: Health check
+        # Published ports bind to BIND_ADDRESS (Tailscale IP in production,
+        # HyperBrain-Infra hardening), so localhost is not listening.
         run: |
           sleep 10
-          curl -f http://localhost:8080/actuator/health || exit 1
+          BIND=$(grep -oP '^BIND_ADDRESS=\K.*' ~/hyperbrain-deploy/.env || echo 127.0.0.1)
+          curl -f "http://${BIND}:8080/actuator/health" || exit 1
