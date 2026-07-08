@@ -111,7 +111,8 @@ public class NotionTaskSyncService {
         UUID parentId = resolveParent(page.parentRelationId());
         ExecutableSnapshot merged =
             SourceAwareMerge.mergeNotionTask(current, page, localId, defaultUserId, cycleId, parentId);
-        ExecutableSnapshot snapshot = domainChangeProcessor.process(merged, ExternalSystem.NOTION);
+        ExecutableSnapshot snapshot =
+            domainChangeProcessor.process(current, merged, ExternalSystem.NOTION);
         Map<String, Object> canonicalProps =
             NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId());
         if (mapping.isPresent()

@@ -88,6 +88,11 @@ app:
     retention-days:     7
     scheduling-enabled: true
     notify-listen-enabled: true
+  timeblock:
+    # DR-08 expiry sweep (ADR-013): open blocks whose date_end passed settle as EXPIRED.
+    # One-minute cadence is enough — settlement is idempotent and race-safe.
+    expiry-poll-ms:     60000
+    scheduling-enabled: true
 
 management:
   endpoints:

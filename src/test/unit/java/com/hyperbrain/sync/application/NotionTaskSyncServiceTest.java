@@ -1,7 +1,7 @@
 package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.hyperbrain.core.application.PassthroughDomainChangeProcessor;
+import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
@@ -58,7 +58,7 @@ class NotionTaskSyncServiceTest {
     @BeforeEach
     void setUp() {
         service = new NotionTaskSyncService(executableRepo, snapshotRepo, syncMappingRepo,
-            outboxRepo, cycleSyncService, new PassthroughDomainChangeProcessor(),
+            outboxRepo, cycleSyncService, new EndTimeInvariantRule()::apply,
             objectMapper, USER_ID);
     }
 

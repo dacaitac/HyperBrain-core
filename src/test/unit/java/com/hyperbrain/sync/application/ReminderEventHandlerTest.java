@@ -1,6 +1,6 @@
 package com.hyperbrain.sync.application;
 
-import com.hyperbrain.core.application.PassthroughDomainChangeProcessor;
+import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.EntityType;
@@ -49,7 +49,7 @@ class ReminderEventHandlerTest {
         outboxRepo = mock(OutboxRepository.class);
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
         handler = new ReminderEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
-            outboxRepo, new PassthroughDomainChangeProcessor(), parser, USER_ID);
+            outboxRepo, new EndTimeInvariantRule()::apply, parser, USER_ID);
     }
 
     @Test

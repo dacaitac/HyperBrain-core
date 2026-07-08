@@ -31,3 +31,6 @@ app:
     # OutboxListenConnection is off so OutboxWorkerIT can drive drainBatch() manually without
     # async interference from the background listener thread.
     notify-listen-enabled: false
+  timeblock:
+    # Tests drive expireDueBlocks() deterministically (TimeBlockExpiryIT).
+    scheduling-enabled: false

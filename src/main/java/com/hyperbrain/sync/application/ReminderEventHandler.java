@@ -113,7 +113,8 @@ public class ReminderEventHandler implements IEventHandler {
             : null;
         ExecutableSnapshot merged =
             SourceAwareMerge.mergeReminder(current, executableId, defaultUserId, payload);
-        ExecutableSnapshot processed = domainChangeProcessor.process(merged, ExternalSystem.APPLE);
+        ExecutableSnapshot processed =
+            domainChangeProcessor.process(current, merged, ExternalSystem.APPLE);
         executableRepo.upsert(processed);
 
         if (existing.isEmpty()) {

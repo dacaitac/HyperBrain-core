@@ -112,15 +112,39 @@ CREATE TABLE core_execution_profile (
                                       context_location IN ('CASA', 'OFICINA', 'RECADOS', 'ANY'))
 );
 
+-- Mirrors HyperBrain-Infra/supabase/migrations/20260708180000_planner_time_blocks.sql (ADR-013)
 CREATE TABLE core_time_block (
     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     executable_id            UUID NOT NULL REFERENCES core_executable (id) ON DELETE CASCADE,
     date_start               TIMESTAMPTZ NOT NULL,
     date_end                 TIMESTAMPTZ,
-    actual_duration_minutes  INTEGER
+    actual_duration_minutes  INTEGER,
+    status                   TEXT NOT NULL DEFAULT 'PLANNED'
+                                 CHECK (status IN ('PLANNED', 'ACTIVE', 'SETTLED', 'EXPIRED')),
+    origin                   TEXT NOT NULL DEFAULT 'PLANNER'
+                                 CHECK (origin IN ('PLANNER', 'FOCUS', 'USER')),
+    planned_minutes          INTEGER,
+    settled_at               TIMESTAMPTZ,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_core_time_block_executable ON core_time_block (executable_id);
+CREATE INDEX idx_core_time_block_open
+    ON core_time_block (status, date_end)
+    WHERE status IN ('PLANNED', 'ACTIVE');
+
+-- Mirrors HyperBrain-Infra/supabase/migrations/20260708180000_planner_time_blocks.sql (ADR-013):
+-- SYSTEM-owned focus & progress accounting on core_executable. The FK to core_time_block must be
+-- added after that table exists.
+ALTER TABLE core_executable
+    ADD COLUMN progress             DOUBLE PRECISION
+        CHECK (progress IS NULL OR progress BETWEEN 0 AND 1),
+    ADD COLUMN system_generated     BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN pending_reestimation BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN imputed_time_block_id UUID REFERENCES core_time_block (id) ON DELETE SET NULL;
+
+CREATE INDEX idx_core_executable_imputed_block
+    ON core_executable (imputed_time_block_id);
 
 -- ─── Finance ─────────────────────────────────────────────────────────────────
 
