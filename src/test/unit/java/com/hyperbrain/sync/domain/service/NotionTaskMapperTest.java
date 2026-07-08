@@ -209,6 +209,25 @@ class NotionTaskMapperTest {
         }
 
         @Test
+        @DisplayName("end ≤ start (Apple due date before Notion start_time) drops end to avoid Notion 400")
+        void inverted_range_drops_end() {
+            OffsetDateTime invertedEnd = START.minusHours(1);
+            Map<String, Object> date = dateValue(map(snapshot().startTime(START).endTime(invertedEnd).build()));
+
+            assertThat(date.get("start")).isEqualTo("2026-07-06T09:30:00-05:00");
+            assertThat(date).doesNotContainKey("end");
+        }
+
+        @Test
+        @DisplayName("equal start and end drops end to avoid Notion 400")
+        void equal_start_end_drops_end() {
+            Map<String, Object> date = dateValue(map(snapshot().startTime(START).endTime(START).build()));
+
+            assertThat(date.get("start")).isEqualTo("2026-07-06T09:30:00-05:00");
+            assertThat(date).doesNotContainKey("end");
+        }
+
+        @Test
         @DisplayName("clears Date explicitly when the executable has no times (full mirror, ADR-012 D3)")
         void clears_date_when_null() {
             assertThat(map(minimalSnapshot()).get("Date"))

@@ -208,6 +208,10 @@ public final class NotionTaskMapper {
         OffsetDateTime localEnd = (start != null && end != null)
             ? end.atZoneSameInstant(NOTION_ZONE).toOffsetDateTime()
             : null;
+        // Notion rejects ranges where end ≤ start; drop the end rather than failing the write-back
+        if (localEnd != null && !localEnd.isAfter(localStart)) {
+            localEnd = null;
+        }
         boolean dateOnly = isMidnight(localStart) && (localEnd == null || isMidnight(localEnd));
         if (dateOnly) {
             return dateValue(localStart.toLocalDate().toString(),
