@@ -30,6 +30,7 @@ public final class ExecutableSnapshotBuilder {
     private Integer energyDrain;
     private Integer mentalLoad;
     private Integer impact;
+    private boolean systemGenerated = false;
 
     public static ExecutableSnapshotBuilder snapshot() {
         return new ExecutableSnapshotBuilder();
@@ -130,9 +131,14 @@ public final class ExecutableSnapshotBuilder {
         return this;
     }
 
+    public ExecutableSnapshotBuilder systemGenerated(boolean value) {
+        this.systemGenerated = value;
+        return this;
+    }
+
     public ExecutableSnapshot build() {
         return new ExecutableSnapshot(id, userId, parentId, cycleId, name, description, type,
             status, priorityScore, urgencyScore, effortScore, isImportant, frequency,
-            startTime, endTime, sourceCalendar, energyDrain, mentalLoad, impact);
+            startTime, endTime, sourceCalendar, energyDrain, mentalLoad, impact, systemGenerated);
     }
 }

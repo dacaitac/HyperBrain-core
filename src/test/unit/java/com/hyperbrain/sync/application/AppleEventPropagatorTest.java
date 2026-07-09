@@ -214,6 +214,23 @@ class AppleEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("system-generated executable is internal accounting and is never written back to Apple")
+    void system_generated_executable_is_not_written_back() {
+        // Given a focus-switch snapshot subtask (ADR-013 DR-06): the flag short-circuits before
+        // the mapping is even consulted, so neither CREATE nor UPDATE is ever considered
+        when(executableRepo.findById(LOCAL_ID))
+            .thenReturn(Optional.of(executable("TASK", "DONE", true)));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableCreatedEvent", "SYSTEM"));
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
+
+        // Then no command is ever emitted or logged pending, and no mapping is looked up
+        verify(commandPublisher, never()).publish(any(), anyString());
+        verifyNoInteractions(commandLogRepo, syncMappingRepo);
+    }
+
+    @Test
     @DisplayName("CREATE already in flight for the executable: a different event does not emit a second CREATE")
     void pending_create_blocks_second_create() {
         // Given
@@ -320,7 +337,12 @@ class AppleEventPropagatorTest {
     }
 
     private static CoreExecutable executable(String type, String status) {
-        return new CoreExecutable(LOCAL_ID, USER_ID, "Buy groceries", null, type, status, START, null, "HyperBrain");
+        return executable(type, status, false);
+    }
+
+    private static CoreExecutable executable(String type, String status, boolean systemGenerated) {
+        return new CoreExecutable(LOCAL_ID, USER_ID, "Buy groceries", null, type, status, START, null,
+            "HyperBrain", systemGenerated);
     }
 
     private static SyncMapping mapping(String externalId) {

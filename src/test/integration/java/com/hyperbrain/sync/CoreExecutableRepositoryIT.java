@@ -79,7 +79,7 @@ class CoreExecutableRepositoryIT {
 
         CoreExecutable updated = new CoreExecutable(
             original.id(), original.userId(), "New title", "updated notes", original.type(), "DONE",
-            null, null, "List B");
+            null, null, "List B", original.systemGenerated());
         repository.update(updated);
 
         CoreExecutable found = repository.findById(original.id()).orElseThrow();
@@ -98,7 +98,8 @@ class CoreExecutableRepositoryIT {
         OffsetDateTime newEnd = OffsetDateTime.parse("2026-07-07T11:00:00-05:00");
         CoreExecutable updated = new CoreExecutable(
             original.id(), original.userId(), original.name(), original.description(), original.type(),
-            original.status(), original.startTime(), newEnd, original.sourceCalendar());
+            original.status(), original.startTime(), newEnd, original.sourceCalendar(),
+            original.systemGenerated());
         repository.update(updated);
 
         CoreExecutable found = repository.findById(original.id()).orElseThrow();
@@ -130,12 +131,12 @@ class CoreExecutableRepositoryIT {
                                        OffsetDateTime startTime, OffsetDateTime endTime,
                                        String sourceCalendar) {
         return new CoreExecutable(UUID.randomUUID(), DataFixture.SYSTEM_USER_ID,
-            name, "some notes", "TASK", status, startTime, endTime, sourceCalendar);
+            name, "some notes", "TASK", status, startTime, endTime, sourceCalendar, false);
     }
 
     private static CoreExecutable activity(String name, OffsetDateTime startTime,
                                             OffsetDateTime endTime, String calendar) {
         return new CoreExecutable(UUID.randomUUID(), DataFixture.SYSTEM_USER_ID,
-            name, null, "ACTIVITY", "TODO", startTime, endTime, calendar);
+            name, null, "ACTIVITY", "TODO", startTime, endTime, calendar, false);
     }
 }

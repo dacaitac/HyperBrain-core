@@ -24,7 +24,7 @@ class JdbcSyncSnapshotRepository implements SyncSnapshotRepository {
     private static final String FIND_EXECUTABLE_SQL = """
         SELECT e.id, e.user_id, e.parent_id, e.cycle_id, e.name, e.description, e.type, e.status,
                e.priority_score, e.urgency_score, e.effort_score, e.is_important, e.frequency,
-               e.start_time, e.end_time, e.source_calendar,
+               e.start_time, e.end_time, e.source_calendar, e.system_generated,
                p.energy_drain, p.mental_load, p.impact
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
@@ -59,7 +59,8 @@ class JdbcSyncSnapshotRepository implements SyncSnapshotRepository {
             rs.getString("source_calendar"),
             rs.getObject("energy_drain", Integer.class),
             rs.getObject("mental_load", Integer.class),
-            rs.getObject("impact", Integer.class));
+            rs.getObject("impact", Integer.class),
+            rs.getBoolean("system_generated"));
     };
 
     private static final RowMapper<CycleSnapshot> CYCLE_MAPPER = (rs, rowNum) -> {

@@ -128,6 +128,11 @@ public class AppleEventPropagator implements IEventPropagator {
                 localId, event.id());
             return;
         }
+        if (executable.get().systemGenerated()) {
+            log.debug("System-generated executable {}; internal accounting, not written back",
+                localId);
+            return;
+        }
         if (!WriteCommandFactory.isWritable(executable.get().type())) {
             log.info("Executable {} has type {} (read-only or unsupported for Apple, ADR-009); "
                 + "no WriteCommand emitted", localId, executable.get().type());

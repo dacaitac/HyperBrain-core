@@ -98,7 +98,8 @@ public final class NotionTaskInboundMapper {
             null,
             scaleOf(page.energyName(), NotionSchema.ENERGY_OPTIONS),
             scaleOf(page.mentalLoadName(), NotionSchema.MENTAL_LOAD_OPTIONS),
-            scaleOf(page.impactName(), NotionSchema.IMPACT_OPTIONS));
+            scaleOf(page.impactName(), NotionSchema.IMPACT_OPTIONS),
+            false);
     }
 
     /** Resolves the domain status; the {@code Complete} checkbox wins over {@code Status}. */

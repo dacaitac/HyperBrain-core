@@ -70,7 +70,7 @@ public final class SourceAwareMerge {
             return new ExecutableSnapshot(id, userId, null, null,
                 p.title(), p.notes(), "TASK", p.completed() ? STATUS_DONE : STATUS_TODO,
                 null, null, null, false, null,
-                p.dueDate(), null, p.listName(), null, null, null);
+                p.dueDate(), null, p.listName(), null, null, null, false);
         }
         OffsetDateTime dueProjection = current.endTime() != null
             ? current.endTime()
@@ -83,7 +83,8 @@ public final class SourceAwareMerge {
             current.priorityScore(), current.urgencyScore(), current.effortScore(),
             current.isImportant(), current.frequency(),
             newStartTime, null, p.listName(),
-            current.energyDrain(), current.mentalLoad(), current.impact());
+            current.energyDrain(), current.mentalLoad(), current.impact(),
+            current.systemGenerated());
     }
 
     /**
@@ -104,14 +105,15 @@ public final class SourceAwareMerge {
             return new ExecutableSnapshot(id, userId, null, null,
                 p.title(), p.notes(), "ACTIVITY", STATUS_TODO,
                 null, null, null, false, null,
-                p.startTime(), p.endTime(), p.calendarName(), null, null, null);
+                p.startTime(), p.endTime(), p.calendarName(), null, null, null, false);
         }
         return new ExecutableSnapshot(id, userId, current.parentId(), current.cycleId(),
             p.title(), p.notes(), current.type(), current.status(),
             current.priorityScore(), current.urgencyScore(), current.effortScore(),
             current.isImportant(), current.frequency(),
             p.startTime(), p.endTime(), p.calendarName(),
-            current.energyDrain(), current.mentalLoad(), current.impact());
+            current.energyDrain(), current.mentalLoad(), current.impact(),
+            current.systemGenerated());
     }
 
     /**
@@ -158,7 +160,8 @@ public final class SourceAwareMerge {
             current.sourceCalendar(),
             mergeScale(current.energyDrain(), page.energyName(), NotionSchema.ENERGY_OPTIONS),
             mergeScale(current.mentalLoad(), page.mentalLoadName(), NotionSchema.MENTAL_LOAD_OPTIONS),
-            mergeScale(current.impact(), page.impactName(), NotionSchema.IMPACT_OPTIONS));
+            mergeScale(current.impact(), page.impactName(), NotionSchema.IMPACT_OPTIONS),
+            current.systemGenerated());
     }
 
     /**

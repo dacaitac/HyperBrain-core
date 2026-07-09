@@ -199,6 +199,11 @@ public class NotionEventPropagator implements IEventPropagator {
                 localId, event.id());
             return;
         }
+        if (snapshot.get().systemGenerated()) {
+            log.debug("System-generated executable {}; internal accounting, not written back",
+                localId);
+            return;
+        }
         String cycleExternalId = resolveCycleRelation(snapshot.get().cycleId());
         String parentExternalId = resolveMappedExternalId(snapshot.get().parentId());
         Map<String, Object> props =

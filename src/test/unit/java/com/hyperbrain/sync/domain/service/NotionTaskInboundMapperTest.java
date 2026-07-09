@@ -50,7 +50,7 @@ class NotionTaskInboundMapperTest {
             OffsetDateTime.parse("2026-07-07T10:00:00-05:00"),
             OffsetDateTime.parse("2026-07-07T11:30:00-05:00"),
             null,
-            5, 1, 4));
+            5, 1, 4, false));
     }
 
     @Test
@@ -133,7 +133,7 @@ class NotionTaskInboundMapperTest {
         // Then
         assertThat(snapshot).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
             ID, USER_ID, null, null, "", null, "TASK", "TODO",
-            null, null, null, false, null, null, null, null, null, null, null));
+            null, null, null, false, null, null, null, null, null, null, null, false));
     }
 
     private static NotionTaskPage minimalPage(Double priority, Double effort) {

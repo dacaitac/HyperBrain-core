@@ -28,9 +28,11 @@ import java.util.UUID;
  * @param startTime      optional start timestamp
  * @param endTime        optional end / due timestamp
  * @param sourceCalendar EventKit list or calendar name (Apple authority; never written by Notion)
- * @param energyDrain    execution profile energy drain in [1, 5]
- * @param mentalLoad     execution profile mental load in [1, 5]
- * @param impact         execution profile impact in [1, 8]
+ * @param energyDrain     execution profile energy drain in [1, 5]
+ * @param mentalLoad      execution profile mental load in [1, 5]
+ * @param impact          execution profile impact in [1, 8]
+ * @param systemGenerated true for internal accounting rows (e.g. focus-switch snapshot subtasks,
+ *                        ADR-013 DR-06); such rows are never written back to external systems
  */
 public record ExecutableSnapshot(
     UUID id,
@@ -51,6 +53,7 @@ public record ExecutableSnapshot(
     String sourceCalendar,
     Integer energyDrain,
     Integer mentalLoad,
-    Integer impact
+    Integer impact,
+    boolean systemGenerated
 ) {
 }

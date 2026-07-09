@@ -51,7 +51,7 @@ class SourceAwareMergeTest {
             // Due date unchanged (DUE == dueProjection) → startTime preserved; endTime always null (DR-01)
             assertThat(merged).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
                 ID, USER_ID, PARENT_ID, CYCLE_ID, "New name", null, "TASK", "IN_PROGRESS",
-                0.7, null, null, true, null, START, null, "HyperBrain", 3, null, null));
+                0.7, null, null, true, null, START, null, "HyperBrain", 3, null, null, false));
         }
 
         @Test
@@ -125,7 +125,7 @@ class SourceAwareMergeTest {
 
             assertThat(merged).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
                 ID, USER_ID, null, null, "Buy milk", "notes", "TASK", "DONE",
-                null, null, null, false, null, DUE, null, "Groceries", null, null, null));
+                null, null, null, false, null, DUE, null, "Groceries", null, null, null, false));
         }
     }
 

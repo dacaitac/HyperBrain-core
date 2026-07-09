@@ -13,9 +13,11 @@ import java.util.UUID;
  * @param description    optional free text; carries the EventKit {@code notes} field
  * @param type           executable type: {@code TASK} for reminders, {@code ACTIVITY} for events
  * @param status         lifecycle status: {@code DONE} if completed, {@code TODO} otherwise
- * @param startTime      optional start timestamp (calendar events)
- * @param endTime        optional end / due timestamp
- * @param sourceCalendar list or calendar name the entity came from
+ * @param startTime       optional start timestamp (calendar events)
+ * @param endTime         optional end / due timestamp
+ * @param sourceCalendar  list or calendar name the entity came from
+ * @param systemGenerated true for internal accounting rows (e.g. focus-switch snapshot subtasks,
+ *                        ADR-013 DR-06); such rows are never written back to external systems
  */
 public record CoreExecutable(
     UUID id,
@@ -26,6 +28,7 @@ public record CoreExecutable(
     String status,
     OffsetDateTime startTime,
     OffsetDateTime endTime,
-    String sourceCalendar
+    String sourceCalendar,
+    boolean systemGenerated
 ) {
 }

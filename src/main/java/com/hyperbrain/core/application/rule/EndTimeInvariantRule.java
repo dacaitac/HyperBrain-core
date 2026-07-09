@@ -30,6 +30,7 @@ public class EndTimeInvariantRule implements DomainRule {
             merged.priorityScore(), merged.urgencyScore(), merged.effortScore(),
             merged.isImportant(), merged.frequency(),
             merged.startTime(), null, merged.sourceCalendar(),
-            merged.energyDrain(), merged.mentalLoad(), merged.impact());
+            merged.energyDrain(), merged.mentalLoad(), merged.impact(),
+            merged.systemGenerated());
     }
 }

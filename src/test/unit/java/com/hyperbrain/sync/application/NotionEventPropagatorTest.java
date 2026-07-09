@@ -198,6 +198,21 @@ class NotionEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("system-generated executable is internal accounting and is never written back to Notion")
+    void system_generated_executable_is_not_written_back() {
+        // Given a focus-switch snapshot subtask (ADR-013 DR-06)
+        when(snapshotRepo.findExecutable(LOCAL_ID))
+            .thenReturn(Optional.of(systemGeneratedSnapshot()));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableCreatedEvent", "SYSTEM"));
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
+
+        // Then no page is created or patched and no mapping is touched
+        verifyNoInteractions(notion, syncMappingRepo);
+    }
+
+    @Test
     @DisplayName("CREATE: missing executable row is skipped without calling Notion")
     void create_skips_missing_executable() {
         // Given
@@ -440,12 +455,17 @@ class NotionEventPropagatorTest {
 
     private static ExecutableSnapshot taskSnapshot(String status) {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", null,
-            "TASK", status, null, null, null, false, null, START, null, null, null, null, null);
+            "TASK", status, null, null, null, false, null, START, null, null, null, null, null, false);
+    }
+
+    private static ExecutableSnapshot systemGeneratedSnapshot() {
+        return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", "[focus] ...",
+            "TASK", "DONE", null, null, null, false, null, START, START, null, null, null, null, true);
     }
 
     private static ExecutableSnapshot taskSnapshotWithCycle() {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, CYCLE_ID, "Write tests", null,
-            "TASK", "TODO", null, null, null, false, null, null, null, null, null, null, null);
+            "TASK", "TODO", null, null, null, false, null, null, null, null, null, null, null, false);
     }
 
     private static CycleSnapshot cycleSnapshot(UUID id) {
