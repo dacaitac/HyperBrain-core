@@ -9,6 +9,7 @@ import com.hyperbrain.sync.domain.model.WriteCommand;
 import com.hyperbrain.sync.domain.model.WritePayload;
 
 import java.time.OffsetDateTime;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -17,9 +18,16 @@ import java.util.UUID;
  * HU-09 inbound mapping (CA-5, HU-09c). Pure domain logic; the caller supplies identifiers
  * and decides the effective operation.
  *
- * <p>Type mapping: {@code TASK} → {@code REMINDER}; {@code ACTIVITY} → {@code CALENDAR_EVENT}.
- * {@code AGENDA} executables are read-only by contract (ADR-009) and never produce a command;
- * any other type has no Apple counterpart and is skipped.
+ * <p>Write-back type mapping (single source of truth: {@link #APPLE_COMMAND_TYPES}):
+ * {@code TASK}, {@code HABIT}, {@code LEAD_MEASURE} → {@code REMINDER};
+ * {@code ACTIVITY}, {@code LEARNING_SESSION} → {@code CALENDAR_EVENT}.
+ * {@code AGENDA} is read-only by contract (ADR-009) and any other type has no Apple
+ * counterpart — both are skipped.
+ *
+ * <p>The reminder due date is the executable {@code start_time} (a reminder is due at its start;
+ * {@code end_time} is cleared for reminder types upstream by DR-01). Whether a due/start is
+ * all-day or timed is <em>not</em> carried explicitly: SentinelAPI derives it at the Apple
+ * boundary from whether the instant falls on local midnight (no time-of-day ⇒ all-day).
  *
  * <p>The Core does not persist EventKit list/calendar identifiers, so {@code list_id} /
  * {@code calendar_id} travel empty and {@code list_name} / {@code calendar_name} carry
@@ -28,12 +36,28 @@ import java.util.UUID;
  */
 public final class WriteCommandFactory {
 
-    private static final String TYPE_TASK = "TASK";
-    private static final String TYPE_ACTIVITY = "ACTIVITY";
-    private static final String TYPE_AGENDA = "AGENDA";
+    /** Executable type → Apple entity kind. Absent types are not written back to Apple. */
+    private static final Map<String, CommandType> APPLE_COMMAND_TYPES = Map.of(
+        "TASK", CommandType.REMINDER,
+        "HABIT", CommandType.REMINDER,
+        "LEAD_MEASURE", CommandType.REMINDER,
+        "ACTIVITY", CommandType.CALENDAR_EVENT,
+        "LEARNING_SESSION", CommandType.CALENDAR_EVENT);
+
     private static final String STATUS_DONE = "DONE";
 
     private WriteCommandFactory() {}
+
+    /**
+     * Resolves the Apple entity kind an executable type writes back to.
+     *
+     * @param executableType the {@code core_executable.type} value (may be null)
+     * @return the command type, or empty when the type is read-only (AGENDA) or has no
+     *         Apple counterpart
+     */
+    public static Optional<CommandType> commandTypeForExecutableType(String executableType) {
+        return Optional.ofNullable(executableType).map(APPLE_COMMAND_TYPES::get);
+    }
 
     /**
      * Builds a CREATED/UPDATED command for an executable, or empty when the executable is not
@@ -66,35 +90,35 @@ public final class WriteCommandFactory {
 
     /**
      * Returns whether an executable type is eligible for write-back at all. {@code AGENDA} is
-     * explicitly blocked (ADR-009); types without an Apple counterpart are simply not writable.
+     * read-only (ADR-009) and types without an Apple counterpart are simply not writable.
      *
      * @param executableType the {@code core_executable.type} value
-     * @return true only for {@code TASK} and {@code ACTIVITY}
+     * @return true for the reminder types (TASK, HABIT, LEAD_MEASURE) and event types
+     *         (ACTIVITY, LEARNING_SESSION)
      */
     public static boolean isWritable(String executableType) {
-        return TYPE_TASK.equals(executableType) || TYPE_ACTIVITY.equals(executableType);
+        return commandTypeForExecutableType(executableType).isPresent();
     }
 
     private static Optional<WritePayload> payloadFor(CoreExecutable executable) {
-        if (TYPE_TASK.equals(executable.type())) {
+        Optional<CommandType> commandType = commandTypeForExecutableType(executable.type());
+        if (commandType.isEmpty()) {
+            return Optional.empty();
+        }
+        if (commandType.get() == CommandType.REMINDER) {
             return Optional.of(reminderPayload(executable));
         }
-        if (TYPE_ACTIVITY.equals(executable.type())) {
-            // start_time is mandatory in the CalendarEventPayload contract (TD-03).
-            if (executable.startTime() == null) {
-                return Optional.empty();
-            }
-            return Optional.of(calendarEventPayload(executable));
+        // CALENDAR_EVENT: start_time is mandatory in the CalendarEventPayload contract (TD-03).
+        if (executable.startTime() == null) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        return Optional.of(calendarEventPayload(executable));
     }
 
     private static ReminderPayload reminderPayload(CoreExecutable executable) {
-        // Due date projection (ADR-012 D3): end_time ?? start_time, so a Notion single-date
-        // task (which only fills start_time) still reaches Reminders with a due date.
-        OffsetDateTime dueDate = executable.endTime() != null
-            ? executable.endTime()
-            : executable.startTime();
+        // A reminder is due at its start_time (HU-09c); end_time is cleared for reminder types
+        // upstream (DR-01). All-day vs timed is derived downstream by SentinelAPI.
+        OffsetDateTime dueDate = executable.startTime();
         return new ReminderPayload(
             executable.name(),
             executable.description(),
@@ -106,6 +130,8 @@ public final class WriteCommandFactory {
     }
 
     private static CalendarEventPayload calendarEventPayload(CoreExecutable executable) {
+        // all_day is left false here: SentinelAPI derives it at the Apple boundary from whether
+        // start/end fall on local midnight (no time-of-day ⇒ all-day), the same rule reminders use.
         return new CalendarEventPayload(
             executable.name(),
             executable.startTime(),

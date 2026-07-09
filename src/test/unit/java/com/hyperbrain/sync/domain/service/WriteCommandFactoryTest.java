@@ -25,10 +25,10 @@ class WriteCommandFactoryTest {
     private static final OffsetDateTime END = OffsetDateTime.of(2026, 7, 6, 10, 0, 0, 0, ZoneOffset.UTC);
 
     @Test
-    @DisplayName("TASK maps to a REMINDER command with the inverse HU-09 field mapping")
+    @DisplayName("TASK maps to a REMINDER whose due date is the start_time (not end_time)")
     void task_maps_to_reminder_command() {
-        // Given
-        CoreExecutable task = executable("TASK", "DONE", null, END, "HyperBrain");
+        // Given a TASK with both bounds set: the reminder due date must be the start.
+        CoreExecutable task = executable("TASK", "DONE", START, END, "HyperBrain");
 
         // When
         Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
@@ -38,7 +38,35 @@ class WriteCommandFactoryTest {
         assertThat(command).isPresent();
         assertThat(command.get()).usingRecursiveComparison().isEqualTo(new WriteCommand(
             COMMAND_ID, CommandType.REMINDER, Operation.UPDATED, "EK-1",
-            new ReminderPayload("Buy groceries", "2L milk", END, true, 0, "", "HyperBrain")));
+            new ReminderPayload("Buy groceries", "2L milk", START, true, 0, "", "HyperBrain")));
+    }
+
+    @Test
+    @DisplayName("HABIT and LEAD_MEASURE also map to REMINDER commands")
+    void habit_and_lead_measure_map_to_reminder() {
+        for (String type : new String[] {"HABIT", "LEAD_MEASURE"}) {
+            CoreExecutable executable = executable(type, "TODO", START, null, "HyperBrain");
+            Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+                COMMAND_ID, executable, Operation.CREATED, null);
+            assertThat(command).as("type %s", type).isPresent();
+            assertThat(command.get().commandType()).as("type %s", type).isEqualTo(CommandType.REMINDER);
+            assertThat(((ReminderPayload) command.get().payload()).dueDate()).isEqualTo(START);
+        }
+    }
+
+    @Test
+    @DisplayName("LEARNING_SESSION maps to a CALENDAR_EVENT command")
+    void learning_session_maps_to_calendar_event() {
+        CoreExecutable session = executable("LEARNING_SESSION", "TODO", START, END, "Study");
+
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, session, Operation.CREATED, null);
+
+        assertThat(command).isPresent();
+        assertThat(command.get().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        CalendarEventPayload payload = (CalendarEventPayload) command.get().payload();
+        assertThat(payload.startTime()).isEqualTo(START);
+        assertThat(payload.endTime()).isEqualTo(END);
     }
 
     @Test
@@ -100,7 +128,7 @@ class WriteCommandFactoryTest {
     @Test
     @DisplayName("types without an Apple counterpart produce no command")
     void unsupported_types_are_rejected() {
-        for (String type : new String[] {"HABIT", "LEAD_MEASURE", "LEARNING_SESSION"}) {
+        for (String type : new String[] {"PROJECT", "CYCLE", "UNKNOWN"}) {
             CoreExecutable executable = executable(type, "TODO", START, END, null);
             assertThat(WriteCommandFactory.forUpsert(COMMAND_ID, executable, Operation.CREATED, null))
                 .as("type %s", type)
@@ -110,10 +138,25 @@ class WriteCommandFactoryTest {
     }
 
     @Test
-    @DisplayName("only TASK and ACTIVITY are writable")
+    @DisplayName("reminder types and event types are writable; AGENDA and unknown are not")
     void writable_types() {
-        assertThat(WriteCommandFactory.isWritable("TASK")).isTrue();
-        assertThat(WriteCommandFactory.isWritable("ACTIVITY")).isTrue();
+        for (String type : new String[] {"TASK", "HABIT", "LEAD_MEASURE", "ACTIVITY", "LEARNING_SESSION"}) {
+            assertThat(WriteCommandFactory.isWritable(type)).as("writable %s", type).isTrue();
+        }
+        assertThat(WriteCommandFactory.isWritable("AGENDA")).isFalse();
+        assertThat(WriteCommandFactory.isWritable(null)).isFalse();
+    }
+
+    @Test
+    @DisplayName("commandTypeForExecutableType resolves the Apple entity kind per type")
+    void command_type_for_executable_type() {
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("TASK")).contains(CommandType.REMINDER);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("HABIT")).contains(CommandType.REMINDER);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("LEAD_MEASURE")).contains(CommandType.REMINDER);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("ACTIVITY")).contains(CommandType.CALENDAR_EVENT);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("LEARNING_SESSION")).contains(CommandType.CALENDAR_EVENT);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("AGENDA")).isEmpty();
+        assertThat(WriteCommandFactory.commandTypeForExecutableType(null)).isEmpty();
     }
 
     @Test

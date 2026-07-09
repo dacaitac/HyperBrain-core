@@ -24,8 +24,8 @@ class EndTimeInvariantRuleTest {
     private final EndTimeInvariantRule rule = new EndTimeInvariantRule();
 
     @ParameterizedTest(name = "type={0}")
-    @ValueSource(strings = {"ACTIVITY", "AGENDA"})
-    @DisplayName("preserves end_time for fixed time-block types")
+    @ValueSource(strings = {"ACTIVITY", "AGENDA", "LEARNING_SESSION"})
+    @DisplayName("preserves end_time for fixed time-block (event) types")
     void preserves_end_time_for_time_block_types(String type) {
         ExecutableSnapshot result =
             rule.apply(null, snapshot(type, START, END), ExternalSystem.APPLE);
@@ -34,8 +34,8 @@ class EndTimeInvariantRuleTest {
     }
 
     @ParameterizedTest(name = "type={0}")
-    @ValueSource(strings = {"TASK", "HABIT", "LEAD_MEASURE", "LEARNING_SESSION"})
-    @DisplayName("clears end_time for non-time-block types")
+    @ValueSource(strings = {"TASK", "HABIT", "LEAD_MEASURE"})
+    @DisplayName("clears end_time for reminder types")
     void clears_end_time_for_non_time_block_types(String type) {
         ExecutableSnapshot result =
             rule.apply(null, snapshot(type, START, END), ExternalSystem.APPLE);

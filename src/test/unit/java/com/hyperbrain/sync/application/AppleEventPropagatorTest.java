@@ -148,6 +148,58 @@ class AppleEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("type transition reminder->event: deletes the old reminder and creates a new event")
+    void kind_transition_deletes_old_and_creates_new() {
+        // Given an executable now typed ACTIVITY but previously written back as a REMINDER
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("ACTIVITY", "TODO")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.REMINDER));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then a DELETE of the old reminder (grouped by its EventKit id) ...
+        ArgumentCaptor<WriteCommand> deleteCaptor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(deleteCaptor.capture(), eq("EK-1"));
+        assertThat(deleteCaptor.getValue().operation()).isEqualTo(Operation.DELETED);
+        assertThat(deleteCaptor.getValue().commandType()).isEqualTo(CommandType.REMINDER);
+        assertThat(deleteCaptor.getValue().entityId()).isEqualTo("EK-1");
+
+        // ... and a CREATE of the new event (grouped by local id, null entity id)
+        ArgumentCaptor<WriteCommand> createCaptor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(createCaptor.capture(), eq(LOCAL_ID.toString()));
+        assertThat(createCaptor.getValue().operation()).isEqualTo(Operation.CREATED);
+        assertThat(createCaptor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(createCaptor.getValue().entityId()).isNull();
+
+        // Distinct deterministic command ids, both logged pending
+        assertThat(deleteCaptor.getValue().commandId()).isNotEqualTo(createCaptor.getValue().commandId());
+        verify(commandLogRepo, org.mockito.Mockito.times(2)).upsertPending(any());
+    }
+
+    @Test
+    @DisplayName("same kind as last written: a normal UPDATE is emitted (no transition)")
+    void same_kind_emits_plain_update() {
+        // Given a TASK still mapped and last written as a REMINDER
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(task("TODO")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.REMINDER));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then a single UPDATE against the existing id, no delete
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
+        verify(commandLogRepo, org.mockito.Mockito.times(1)).upsertPending(any());
+    }
+
+    @Test
     @DisplayName("AGENDA executable is rejected before emitting (CA-1, CA-19)")
     void agenda_executable_is_rejected() {
         // Given

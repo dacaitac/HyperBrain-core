@@ -44,6 +44,14 @@ class JdbcWriteCommandLogRepository implements WriteCommandLogRepository {
         LIMIT 1
         """;
 
+    private static final String FIND_LAST_WRITTEN_TYPE_SQL = """
+        SELECT command_type
+        FROM sync_write_commands
+        WHERE local_id = ? AND operation <> 'DELETED'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """;
+
     private static final String MARK_APPLIED_SQL = """
         UPDATE sync_write_commands
         SET status = 'APPLIED', entity_id = ?, error = NULL, resolved_at = ?
@@ -89,6 +97,13 @@ class JdbcWriteCommandLogRepository implements WriteCommandLogRepository {
     @Override
     public Optional<PendingWriteCommand> findPendingCreateByLocalId(UUID localId) {
         List<PendingWriteCommand> rows = jdbcTemplate.query(FIND_PENDING_CREATE_SQL, ROW_MAPPER, localId);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    @Override
+    public Optional<CommandType> findLastWrittenCommandTypeByLocalId(UUID localId) {
+        List<CommandType> rows = jdbcTemplate.query(FIND_LAST_WRITTEN_TYPE_SQL,
+            (rs, rowNum) -> CommandType.valueOf(rs.getString("command_type")), localId);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 

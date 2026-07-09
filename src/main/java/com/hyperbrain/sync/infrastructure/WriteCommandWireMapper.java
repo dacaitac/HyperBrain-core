@@ -10,6 +10,7 @@ import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.ReminderPayload;
 import com.hyperbrain.sync.domain.model.WriteCommand;
 import com.hyperbrain.sync.domain.model.WritePayload;
+import com.hyperbrain.sync.domain.service.WriteCommandFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.OffsetDateTime;
@@ -88,11 +89,7 @@ public class WriteCommandWireMapper {
             if (!type.isTextual()) {
                 return Optional.empty();
             }
-            return switch (type.asText()) {
-                case "TASK" -> Optional.of(CommandType.REMINDER);
-                case "ACTIVITY" -> Optional.of(CommandType.CALENDAR_EVENT);
-                default -> Optional.empty();
-            };
+            return WriteCommandFactory.commandTypeForExecutableType(type.asText());
         } catch (JsonProcessingException ex) {
             return Optional.empty();
         }

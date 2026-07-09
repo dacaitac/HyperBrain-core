@@ -135,10 +135,10 @@ public class AppleEventPropagator implements IEventPropagator {
         }
 
         Optional<SyncMapping> mapping = syncMappingRepo.findByExternalSystemAndLocalId(EXTERNAL_SYSTEM, localId);
-        UUID commandId = deterministicCommandId(event.id());
-
         UUID userId = executable.get().userId();
+
         if (mapping.isEmpty()) {
+            UUID commandId = deterministicCommandId(event.id());
             Optional<PendingWriteCommand> inFlight = commandLogRepo.findPendingCreateByLocalId(localId);
             if (inFlight.isPresent() && !inFlight.get().commandId().equals(commandId)) {
                 log.warn("CREATE already in flight for executable {} (command {}); skipping event {}",
@@ -147,11 +147,44 @@ public class AppleEventPropagator implements IEventPropagator {
             }
             emit(WriteCommandFactory.forUpsert(commandId, executable.get(), Operation.CREATED, null),
                 event, userId, localId, localId.toString());
-        } else {
-            String externalId = mapping.get().externalId();
-            emit(WriteCommandFactory.forUpsert(commandId, executable.get(), Operation.UPDATED, externalId),
-                event, userId, localId, externalId);
+            return;
         }
+
+        CommandType desiredKind =
+            WriteCommandFactory.commandTypeForExecutableType(executable.get().type()).orElseThrow();
+        Optional<CommandType> mappedKind = commandLogRepo.findLastWrittenCommandTypeByLocalId(localId);
+        if (mappedKind.isPresent() && mappedKind.get() != desiredKind) {
+            propagateKindTransition(event, executable.get(), userId, localId, mapping.get(),
+                mappedKind.get(), desiredKind);
+            return;
+        }
+
+        String externalId = mapping.get().externalId();
+        emit(WriteCommandFactory.forUpsert(deterministicCommandId(event.id()), executable.get(),
+                Operation.UPDATED, externalId),
+            event, userId, localId, externalId);
+    }
+
+    /**
+     * Handles an executable whose type crossed the reminder↔event boundary (e.g. TASK → ACTIVITY):
+     * the mapped Apple entity is the wrong kind, so it is deleted and a fresh entity of the new
+     * kind is created. The two commands carry distinct deterministic ids (idempotent under drain
+     * retries) and are grouped by {@code localId} so SentinelAPI applies them in order. The mapping
+     * transition is race-free: the DELETE result clears the old row (keyed by its {@code external_id})
+     * and the CREATE result inserts the new one, in any order (ADR-010).
+     */
+    private void propagateKindTransition(OutboxEvent event, CoreExecutable executable, UUID userId,
+                                         UUID localId, SyncMapping mapping,
+                                         CommandType oldKind, CommandType newKind) {
+        WriteCommand deleteCommand = WriteCommandFactory.forDelete(
+            deterministicCommandId(event.id(), "delete"), oldKind, mapping.externalId());
+        emit(Optional.of(deleteCommand), event, userId, localId, mapping.externalId());
+
+        emit(WriteCommandFactory.forUpsert(deterministicCommandId(event.id(), "create"),
+                executable, Operation.CREATED, null),
+            event, userId, localId, localId.toString());
+        log.info("Executable {} changed Apple kind {} -> {}; deleted entity {} and re-created",
+            localId, oldKind, newKind, mapping.externalId());
     }
 
     private void propagateDelete(OutboxEvent event, UUID localId) {
@@ -198,5 +231,15 @@ public class AppleEventPropagator implements IEventPropagator {
     private static UUID deterministicCommandId(UUID outboxEventId) {
         return UUID.nameUUIDFromBytes(
             (COMMAND_ID_NAMESPACE + outboxEventId).getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Deterministic command id disambiguated by a discriminator, so a single outbox event can
+     * emit more than one command (the DELETE + CREATE of a kind transition) without collision,
+     * while staying stable across drain retries.
+     */
+    private static UUID deterministicCommandId(UUID outboxEventId, String discriminator) {
+        return UUID.nameUUIDFromBytes(
+            (COMMAND_ID_NAMESPACE + outboxEventId + ":" + discriminator).getBytes(StandardCharsets.UTF_8));
     }
 }

@@ -1,5 +1,6 @@
 package com.hyperbrain.sync.domain.port.out;
 
+import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.PendingWriteCommand;
 
 import java.time.OffsetDateTime;
@@ -38,6 +39,18 @@ public interface WriteCommandLogRepository {
      * @return the pending CREATED record, or empty
      */
     Optional<PendingWriteCommand> findPendingCreateByLocalId(UUID localId);
+
+    /**
+     * Returns the Apple entity kind of the most recent non-delete command written for a local
+     * executable (any status) — i.e. the kind the mapped EventKit entity is, or is becoming.
+     * Used to detect a reminder↔event transition when the executable type crosses that boundary;
+     * looking at the latest written kind (not only APPLIED) prevents re-triggering the transition
+     * on the burst of updates that follows before its results land.
+     *
+     * @param localId the {@code core_executable} id
+     * @return the last written command type, or empty when there is no write history
+     */
+    Optional<CommandType> findLastWrittenCommandTypeByLocalId(UUID localId);
 
     /**
      * Marks a command as successfully applied, recording the EventKit identifier it resolved to.
