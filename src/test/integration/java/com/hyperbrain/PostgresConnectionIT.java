@@ -61,11 +61,11 @@ class PostgresConnectionIT {
     }
 
     @Test
-    @DisplayName("All 24 domain tables from V1 DDL exist in public schema")
+    @DisplayName("All 23 domain tables from V1 DDL exist in public schema")
     void allDomainTablesExist() throws Exception {
         List<String> expected = List.of(
                 "sys_user", "sync_credential",
-                "core_project", "core_cycle", "core_executable",
+                "core_cycle", "core_executable",
                 "core_execution_profile", "core_time_block",
                 "fin_account", "fin_category", "fin_budget_template",
                 "fin_budget", "fin_goal", "fin_transaction", "fin_networth_snapshot",

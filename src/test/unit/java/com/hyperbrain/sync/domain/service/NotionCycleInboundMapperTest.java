@@ -51,7 +51,8 @@ class NotionCycleInboundMapperTest {
     }
 
     @ParameterizedTest(name = "Type \"{0}\" → {1}")
-    @CsvSource({"MCI, MCI", "Routine, ROUTINE", "Phase, PHASE", "Whatever, PHASE", ", PHASE"})
+    @CsvSource({"MCI, MCI", "Goal, GOAL", "Objective, OBJECTIVE", "Project, PROJECT",
+                "Phase, PHASE", "Routine, ROUTINE", "Whatever, PHASE", ", PHASE"})
     @DisplayName("maps the Type select, degrading unknown options to PHASE")
     void maps_type_select(String notionType, String domainType) {
         assertThat(NotionCycleInboundMapper.mapType(notionType)).isEqualTo(domainType);

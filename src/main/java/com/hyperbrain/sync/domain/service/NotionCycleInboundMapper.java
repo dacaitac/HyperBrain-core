@@ -28,10 +28,14 @@ import java.util.UUID;
  */
 public final class NotionCycleInboundMapper {
 
+    // ADR-015: horizon ladder — CORE_CYCLE absorbs the former CORE_PROJECT (type PROJECT).
     private static final Map<String, String> TYPE_FROM_NOTION = Map.of(
         "MCI", "MCI",
-        "Routine", "ROUTINE",
-        "Phase", "PHASE");
+        "Goal", "GOAL",
+        "Objective", "OBJECTIVE",
+        "Project", "PROJECT",
+        "Phase", "PHASE",
+        "Routine", "ROUTINE");
 
     private NotionCycleInboundMapper() {
     }

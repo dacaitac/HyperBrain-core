@@ -51,8 +51,11 @@ class NotionCycleMapperTest {
         @ParameterizedTest(name = "{0} → {1}")
         @CsvSource({
             "MCI, MCI",
-            "ROUTINE, Routine",
-            "PHASE, Phase"
+            "GOAL, Goal",
+            "OBJECTIVE, Objective",
+            "PROJECT, Project",
+            "PHASE, Phase",
+            "ROUTINE, Routine"
         })
         @DisplayName("maps every domain cycle type to its Notion select option")
         void maps_type(String domainType, String notionType) {

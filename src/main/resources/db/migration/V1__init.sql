@@ -38,29 +38,28 @@ CREATE INDEX idx_sync_credential_user ON sync_credential (user_id);
 
 -- ─── Core ────────────────────────────────────────────────────────────────────
 
-CREATE TABLE core_project (
-    id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id  UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
-    name     TEXT NOT NULL,
-    status   TEXT NOT NULL DEFAULT 'ACTIVE'
-);
-
-CREATE INDEX idx_core_project_user ON core_project (user_id);
+-- Mirrors HyperBrain-Infra/supabase/migrations/20260708190000_adr015_cycle_unifies_project.sql
+-- ADR-015: CORE_PROJECT is absorbed into CORE_CYCLE (type = PROJECT); the entity no longer exists.
 
 CREATE TABLE core_cycle (
-    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id        UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
-    name           TEXT NOT NULL,
-    start_date     DATE,
-    end_date       DATE,
-    type           TEXT NOT NULL CHECK (type IN ('MCI', 'ROUTINE', 'PHASE')),
-    status         TEXT NOT NULL DEFAULT 'ACTIVE'
-                       CHECK (status IN ('ACTIVE', 'COMPLETED')),
-    woop_obstacle  TEXT,
-    woop_plan      TEXT
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
+    -- ADR-015: free-form self-nesting models the GTD horizon ladder; parent type is not constrained
+    parent_cycle_id  UUID REFERENCES core_cycle (id) ON DELETE SET NULL,
+    name             TEXT NOT NULL,
+    start_date       DATE,
+    end_date         DATE,
+    -- ADR-015: type absorbs the former CORE_PROJECT (PROJECT) and horizon levels (GOAL, OBJECTIVE)
+    type             TEXT NOT NULL
+                         CHECK (type IN ('MCI', 'GOAL', 'OBJECTIVE', 'PROJECT', 'PHASE', 'ROUTINE')),
+    status           TEXT NOT NULL DEFAULT 'ACTIVE'
+                         CHECK (status IN ('ACTIVE', 'COMPLETED')),
+    woop_obstacle    TEXT,
+    woop_plan        TEXT
 );
 
-CREATE INDEX idx_core_cycle_user ON core_cycle (user_id);
+CREATE INDEX idx_core_cycle_user   ON core_cycle (user_id);
+CREATE INDEX idx_core_cycle_parent ON core_cycle (parent_cycle_id);
 
 CREATE TABLE core_executable (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -68,7 +67,6 @@ CREATE TABLE core_executable (
     parent_id          UUID REFERENCES core_executable (id) ON DELETE CASCADE,
     blocked_by         UUID REFERENCES core_executable (id) ON DELETE SET NULL,
     cycle_id           UUID REFERENCES core_cycle (id) ON DELETE SET NULL,
-    project_id         UUID REFERENCES core_project (id) ON DELETE SET NULL,
     name               TEXT NOT NULL,
     description        TEXT,
     type               TEXT NOT NULL
@@ -99,7 +97,6 @@ CREATE TABLE core_executable (
 CREATE INDEX idx_core_executable_user    ON core_executable (user_id);
 CREATE INDEX idx_core_executable_parent  ON core_executable (parent_id);
 CREATE INDEX idx_core_executable_cycle   ON core_executable (cycle_id);
-CREATE INDEX idx_core_executable_project ON core_executable (project_id);
 CREATE INDEX idx_core_executable_status  ON core_executable (status);
 
 CREATE TABLE core_execution_profile (
@@ -207,7 +204,6 @@ CREATE TABLE fin_goal (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id             UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
     cycle_id            UUID REFERENCES core_cycle (id) ON DELETE SET NULL,
-    project_id          UUID REFERENCES core_project (id) ON DELETE SET NULL,
     name                TEXT NOT NULL,
     goal_type           TEXT NOT NULL DEFAULT 'STANDARD'
                             CHECK (goal_type IN ('STANDARD', 'GENERAL_POOL')),
@@ -220,7 +216,6 @@ CREATE TABLE fin_goal (
 
 CREATE INDEX idx_fin_goal_user    ON fin_goal (user_id);
 CREATE INDEX idx_fin_goal_cycle   ON fin_goal (cycle_id);
-CREATE INDEX idx_fin_goal_project ON fin_goal (project_id);
 
 CREATE TABLE fin_transaction (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),

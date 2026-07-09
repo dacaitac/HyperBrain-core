@@ -19,7 +19,7 @@ import static java.util.Collections.singletonMap;
  * <p>Mapping contract (issue #15):
  * <ul>
  *   <li>{@code name} → {@code Name} (title)</li>
- *   <li>{@code type} ({@code MCI}/{@code ROUTINE}/{@code PHASE}) → {@code Type} (select)</li>
+ *   <li>{@code type} ({@code MCI}/{@code GOAL}/{@code OBJECTIVE}/{@code PROJECT}/{@code PHASE}/{@code ROUTINE}) → {@code Type} (select)</li>
  *   <li>{@code start_date}/{@code end_date} → {@code Date} (date-only range)</li>
  *   <li>{@code status} → {@code Inactive} (checkbox, inverted: true iff COMPLETED)</li>
  * </ul>
@@ -32,10 +32,14 @@ import static java.util.Collections.singletonMap;
  */
 public final class NotionCycleMapper {
 
+    // ADR-015: horizon ladder — CORE_CYCLE absorbs the former CORE_PROJECT (type PROJECT).
     private static final Map<String, String> TYPE_TO_NOTION = Map.of(
         "MCI", "MCI",
-        "ROUTINE", "Routine",
-        "PHASE", "Phase");
+        "GOAL", "Goal",
+        "OBJECTIVE", "Objective",
+        "PROJECT", "Project",
+        "PHASE", "Phase",
+        "ROUTINE", "Routine");
 
     private NotionCycleMapper() {
     }
