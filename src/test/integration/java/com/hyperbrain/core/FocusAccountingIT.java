@@ -1,9 +1,13 @@
 package com.hyperbrain.core;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.client.WireMock;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
+import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import com.hyperbrain.core.application.TimeBlockSettlementService;
+import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
 import com.hyperbrain.sync.application.SyncEventIngestionService;
@@ -23,6 +27,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -40,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class FocusAccountingIT {
 
     private static final String TASKS_DB = "1bf8bc9c5d91812b8c97e5e6450858aa";
+    private static final String TASKS_DS = "tasksds0000000000000000000000001";
 
     private static final WireMockServer NOTION = new WireMockServer(
         WireMockConfiguration.options().dynamicPort());
@@ -50,6 +59,7 @@ class FocusAccountingIT {
         registry.add("app.sync.notion.enabled", () -> "true");
         registry.add("app.sync.notion.base-url", NOTION::baseUrl);
         registry.add("app.sync.notion.token", () -> "test-token");
+        registry.add("app.sync.notion.tasks-data-source-id", () -> TASKS_DS);
         registry.add("app.sync.notion.min-request-interval-ms", () -> "0");
         registry.add("app.sync.notion.backoff-base-ms", () -> "10");
         registry.add("app.sync.notion.max-attempts", () -> "2");
@@ -65,6 +75,7 @@ class FocusAccountingIT {
     @Autowired private SyncEventIngestionService ingestionService;
     @Autowired private NotionEnvelopeNormalizer normalizer;
     @Autowired private TimeBlockSettlementService settlementService;
+    @Autowired private OutboxWorker outboxWorker;
 
     private SqsConsumer consumer;
 
@@ -99,12 +110,14 @@ class FocusAccountingIT {
     }
 
     @Test
-    @DisplayName("DR-05 + DR-06: activating B cuts A — settled block, frozen snapshot, emptied effort, mirrored events")
+    @DisplayName("DR-05 + DR-06: activating B cuts A — settled block, frozen snapshot, preserved effort, mirrored events")
     void focus_switch_cuts_previous_focus() {
         String pageA = newPageId();
         String pageB = newPageId();
         activate(pageA, "Deep work", 3.5, "2026-07-08T10:00:00.000Z");
         UUID taskA = localId(pageA);
+        // A carries a full execution profile — the cut must preserve every effort label
+        seedProfile(taskA, 4, 3, 5);
 
         activate(pageB, "Urgent fix", 1.0, "2026-07-08T11:00:00.000Z");
         UUID taskB = localId(pageB);
@@ -129,19 +142,27 @@ class FocusAccountingIT {
         assertThat((String) snapshot.get("description")).startsWith("[focus] ");
         assertThat(snapshot.get("last_completed_at")).isNotNull();
 
-        // A stays IN_PROGRESS with emptied effort, pending re-estimation
+        // A stays IN_PROGRESS with its effort preserved as last known value, flagged for re-estimation
         Map<String, Object> cutA = jdbcTemplate.queryForMap(
             "SELECT status, effort_score, pending_reestimation FROM core_executable WHERE id = ?", taskA);
         assertThat(cutA.get("status")).isEqualTo("IN_PROGRESS");
-        assertThat(cutA.get("effort_score")).isNull();
+        assertThat(cutA.get("effort_score")).isEqualTo(3.5);
         assertThat(cutA.get("pending_reestimation")).isEqualTo(true);
+
+        // And the execution profile of the cut task is untouched (no data loss on the labels)
+        Map<String, Object> profileA = jdbcTemplate.queryForMap(
+            "SELECT energy_drain, mental_load, impact FROM core_execution_profile WHERE executable_id = ?",
+            taskA);
+        assertThat(profileA.get("energy_drain")).isEqualTo(4);
+        assertThat(profileA.get("mental_load")).isEqualTo(3);
+        assertThat(profileA.get("impact")).isEqualTo(5);
 
         // B took the focus with its own ACTIVE/FOCUS block
         String blockBStatus = jdbcTemplate.queryForObject(
             "SELECT status FROM core_time_block WHERE executable_id = ?", String.class, taskB);
         assertThat(blockBStatus).isEqualTo("ACTIVE");
 
-        // Outbox: SYSTEM-originated snapshot mirror, emptied-state mirror, focus event, settlement
+        // Outbox: SYSTEM-originated snapshot mirror, preserved-state mirror, focus event, settlement
         List<Map<String, Object>> systemEvents = jdbcTemplate.queryForList(
             "SELECT event_type, aggregate_id FROM outbox_events WHERE source_system = 'SYSTEM'");
         assertThat(systemEvents).extracting(row -> row.get("event_type"))
@@ -151,6 +172,35 @@ class FocusAccountingIT {
             .filteredOn(row -> row.get("event_type").equals("ExecutableCreatedEvent"))
             .extracting(row -> row.get("aggregate_id"))
             .containsExactly(snapshot.get("id").toString());
+    }
+
+    @Test
+    @DisplayName("DR-06 no-regression: the cut mirror carries the preserved effort to Notion, not a clear")
+    void cut_mirror_preserves_effort_towards_notion() throws Exception {
+        String pageA = newPageId();
+        String pageB = newPageId();
+        activate(pageA, "Deep work", 3.5, "2026-07-08T10:00:00.000Z");
+        UUID taskA = localId(pageA);
+        seedProfile(taskA, 4, 3, 5);
+        // Drain the activation events so A is already mapped in Notion before the cut
+        stubCreatePage();
+        outboxWorker.drainBatch();
+        NOTION.resetAll();
+        stubPatchAnyPage();
+
+        // Activating B cuts A, which appends the preserved-state mirror event for A
+        activate(pageB, "Urgent fix", 1.0, "2026-07-08T11:00:00.000Z");
+        stubCreatePage();
+        outboxWorker.drainBatch();
+
+        // The Notion write-back for A must carry the preserved labels, never a clear
+        LoggedRequest patchA = singlePatchFor(taskA);
+        JsonNode props = objectMapper.readTree(patchA.getBodyAsString()).path("properties");
+        assertThat(props.path("Effort").path("number").asDouble()).isEqualTo(3.5);
+        assertThat(props.path("Effort").path("number").isNull()).isFalse();
+        assertThat(props.path("Energy").path("select").path("name").asText()).isEqualTo("Exigente");
+        assertThat(props.path("Mental Load").path("select").path("name").asText()).isEqualTo("Análisis");
+        assertThat(props.path("Impact").path("select").path("name").asText()).isEqualTo("Crítico");
     }
 
     @Test
@@ -332,6 +382,43 @@ class FocusAccountingIT {
         return jdbcTemplate.queryForObject(
             "SELECT local_id FROM sync_mappings WHERE external_system = 'NOTION' AND external_id = ?",
             UUID.class, pageId);
+    }
+
+    private void seedProfile(UUID executableId, int energyDrain, int mentalLoad, int impact) {
+        jdbcTemplate.update("""
+            INSERT INTO core_execution_profile (executable_id, energy_drain, mental_load, impact)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (executable_id) DO UPDATE
+              SET energy_drain = EXCLUDED.energy_drain,
+                  mental_load = EXCLUDED.mental_load,
+                  impact = EXCLUDED.impact
+            """, executableId, energyDrain, mentalLoad, impact);
+    }
+
+    /** Stubs the Notion page creation with a deterministic page id derived from the request. */
+    private void stubCreatePage() {
+        NOTION.stubFor(post(urlPathEqualTo("/v1/pages"))
+            .willReturn(aResponse().withStatus(200)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"object\":\"page\",\"id\":\"" + newPageId() + "\"}")));
+    }
+
+    private void stubPatchAnyPage() {
+        NOTION.stubFor(WireMock.patch(WireMock.urlPathMatching("/v1/pages/.*"))
+            .willReturn(aResponse().withStatus(200)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"object\":\"page\"}")));
+    }
+
+    /** Returns the single PATCH request Notion received for the given local entity's mapped page. */
+    private LoggedRequest singlePatchFor(UUID localId) {
+        String externalId = jdbcTemplate.queryForObject(
+            "SELECT external_id FROM sync_mappings WHERE external_system = 'NOTION' AND local_id = ?",
+            String.class, localId);
+        List<LoggedRequest> requests = NOTION.findAll(
+            WireMock.patchRequestedFor(urlEqualTo("/v1/pages/" + externalId)));
+        assertThat(requests).hasSize(1);
+        return requests.get(0);
     }
 
     private boolean pendingReestimation(UUID executableId) {

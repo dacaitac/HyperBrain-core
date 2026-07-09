@@ -8,11 +8,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * DR-06 confirmation half (ADR-013 D3): after a focus switch emptied a task's effort values,
- * any non-null effort value arriving from a human source (Notion today; Appsmith/TD-05 when it
- * exists) <b>is</b> the re-estimation confirmation — the mirrors were emptied, so a fresh value
- * can only come from a person. Clears {@code pending_reestimation}; a no-op for tasks not
- * awaiting re-estimation (conditional update, no read).
+ * DR-06 confirmation half (ADR-013 D3): after a focus switch flagged a task
+ * {@code pending_reestimation}, an effort value arriving from a human source (Notion today;
+ * Appsmith/TD-05 when it exists) <b>is</b> the re-estimation confirmation and clears the flag.
+ *
+ * <p>The cut now preserves the last known effort instead of emptying it, so the propagators
+ * keep the satellites in sync with those preserved values. The machine echo of that write is
+ * discarded by checksum before it ever reaches this chain (NotionEventPropagator CA-7), so this
+ * rule only fires on a genuine human edit that changes the value — the confirmation semantics
+ * hold without relying on the effort having been emptied. A no-op for tasks not awaiting
+ * re-estimation (conditional update, no read).
  */
 @Component
 public class ReestimationConfirmationRule implements DomainRule {

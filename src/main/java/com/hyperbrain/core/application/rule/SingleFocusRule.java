@@ -34,8 +34,9 @@ import java.util.UUID;
  *   <li>settles its block (DR-08, gross minutes; AGENDA clock suspension deferred to HU-02),
  *   <li>freezes the executed stretch as a completed {@code system_generated} snapshot subtask
  *       carrying the original effort labels and window,
- *   <li>empties the cut task's effort values and flags it {@code pending_reestimation}
- *       (mirrors receive the emptied state — the echo-free option of ADR-013), and
+ *   <li>flags the cut task {@code pending_reestimation} while preserving its last known effort
+ *       values (mirrors keep echoing those values — the cut is a soft hint to re-estimate, never
+ *       a data-destroying clear that the full-mirror propagators would push to the satellites), and
  *   <li>emits {@code FocusSwitchedEvent} plus the mirroring events through the outbox.
  * </ol>
  * Finally it auto-opens an {@code ACTIVE/FOCUS} block for the new focus so imputation has a
@@ -114,7 +115,7 @@ public class SingleFocusRule implements DomainRule {
 
         SnapshotSubtask snapshot = buildSnapshot(candidate, windowStart, now);
         stateRepo.insertSystemSnapshot(snapshot);
-        stateRepo.clearEffortForReestimation(candidate.id());
+        stateRepo.flagPendingReestimation(candidate.id());
 
         appendMirrorEvent(snapshot.id(), "ExecutableCreatedEvent", "CREATED", now);
         appendMirrorEvent(candidate.id(), "ExecutableUpdatedEvent", "UPDATED", now);

@@ -29,8 +29,12 @@ public interface ExecutableStateRepository {
     /**
      * Finds the user's controllable {@code IN_PROGRESS} executables that pre-date the block
      * model entirely (no {@code core_time_block} rows at all) and are not already awaiting
-     * re-estimation. Legacy fallback of DR-05: consulted only when {@link #findActiveFocus}
-     * returns nothing; their snapshot window is the punctual {@code [now, now]}.
+     * re-estimation ({@code pending_reestimation = false}) — a task already flagged was cut once
+     * and must not be re-cut into a redundant zero-duration snapshot. The flag stays a soft
+     * exclusion here, not a hard degradation: it only prevents a second cut, never hides or
+     * downranks the task elsewhere. Legacy fallback of DR-05: consulted only when
+     * {@link #findActiveFocus} returns nothing; their snapshot window is the punctual
+     * {@code [now, now]}.
      *
      * @param userId      owning user
      * @param excludingId the executable taking the focus
@@ -66,14 +70,16 @@ public interface ExecutableStateRepository {
     void insertSystemSnapshot(SnapshotSubtask snapshot);
 
     /**
-     * Empties the effort values of a cut task (executable {@code effort_score} plus profile
-     * {@code energy_drain}, {@code mental_load}, {@code impact}, {@code estimated_minutes})
-     * and flags it {@code pending_reestimation}: the remaining work is no longer the one that
-     * was estimated (DR-06).
+     * Flags a cut task {@code pending_reestimation} without touching its effort values: the
+     * remaining work is no longer the one that was estimated (DR-06), but the last known effort
+     * (executable {@code effort_score} plus profile {@code energy_drain}, {@code mental_load},
+     * {@code impact}, {@code estimated_minutes}) is preserved. The flag is a soft hint for the
+     * user to re-estimate, never a data-destroying operation: the full-mirror propagators keep
+     * echoing the preserved values to the satellites, so a cut never erases the user's labels.
      *
      * @param executableId the cut task
      */
-    void clearEffortForReestimation(UUID executableId);
+    void flagPendingReestimation(UUID executableId);
 
     /**
      * Clears the {@code pending_reestimation} flag once a human source supplies fresh effort

@@ -76,16 +76,10 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         VALUES (?, ?, ?, ?, ?)
         """;
 
-    private static final String CLEAR_EFFORT_SQL = """
+    private static final String FLAG_PENDING_REESTIMATION_SQL = """
         UPDATE core_executable
-        SET effort_score = NULL, pending_reestimation = true
+        SET pending_reestimation = true
         WHERE id = ?
-        """;
-
-    private static final String CLEAR_PROFILE_EFFORT_SQL = """
-        UPDATE core_execution_profile
-        SET estimated_minutes = NULL, energy_drain = NULL, mental_load = NULL, impact = NULL
-        WHERE executable_id = ?
         """;
 
     private static final String CLEAR_PENDING_SQL = """
@@ -169,9 +163,8 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     }
 
     @Override
-    public void clearEffortForReestimation(UUID executableId) {
-        jdbcTemplate.update(CLEAR_EFFORT_SQL, executableId);
-        jdbcTemplate.update(CLEAR_PROFILE_EFFORT_SQL, executableId);
+    public void flagPendingReestimation(UUID executableId) {
+        jdbcTemplate.update(FLAG_PENDING_REESTIMATION_SQL, executableId);
     }
 
     @Override

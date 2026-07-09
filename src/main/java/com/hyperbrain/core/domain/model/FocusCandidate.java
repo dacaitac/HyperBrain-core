@@ -4,8 +4,9 @@ import java.util.UUID;
 
 /**
  * A controllable {@code IN_PROGRESS} executable eligible to be cut by a focus switch
- * (DR-05/DR-06, ADR-013 D3), carrying the original effort labels the snapshot subtask must
- * freeze before they are emptied for re-estimation.
+ * (DR-05/DR-06, ADR-013 D3), carrying the original effort labels the snapshot subtask freezes.
+ * The cut preserves these labels on the live task as its last known values and only flags it
+ * {@code pending_reestimation}, so a focus switch never destroys the user's effort data.
  *
  * @param id               executable to cut
  * @param userId           owning user

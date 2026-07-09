@@ -59,7 +59,7 @@ class SingleFocusRuleTest {
     }
 
     @Test
-    @DisplayName("cuts the executing focus: settles its block, freezes a snapshot with the original labels and empties the effort")
+    @DisplayName("cuts the executing focus: settles its block, freezes a snapshot with the original labels and flags re-estimation without emptying the effort")
     void cuts_executing_focus() {
         ExecutableSnapshot merged = inProgress("TASK");
         FocusCandidate candidate = new FocusCandidate(
@@ -90,7 +90,7 @@ class SingleFocusRuleTest {
         assertThat(snapshot.estimatedMinutes()).isEqualTo(120);
         assertThat(snapshot.windowStart()).isEqualTo(activeBlock.dateStart());
         assertThat(snapshot.description()).startsWith("[focus] ");
-        verify(stateRepo).clearEffortForReestimation(CUT_ID);
+        verify(stateRepo).flagPendingReestimation(CUT_ID);
 
         ArgumentCaptor<OutboxEvent> outboxCaptor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo, org.mockito.Mockito.times(3)).append(outboxCaptor.capture());
