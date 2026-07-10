@@ -238,6 +238,35 @@ class SourceAwareMergeTest {
         }
 
         @Test
+        @DisplayName("score authority (#66a): inbound priority/urgency are ignored (SYSTEM-owned); effort keeps Notion authority")
+        void score_authority_pins_priority_and_urgency() {
+            // The domain owns the computed scores; the user typed different values into Notion.
+            ExecutableSnapshot current = snapshot().id(ID)
+                .priorityScore(0.7).urgencyScore(4.0).effortScore(2.0).build();
+
+            ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(current,
+                pageWithScores("t", 0.1, 1.0, 5.0), ID, USER_ID, null, null);
+
+            // priority/urgency are pinned to the current domain value; effort takes the Notion value
+            assertThat(merged.priorityScore()).isEqualTo(0.7);
+            assertThat(merged.urgencyScore()).isEqualTo(4.0);
+            assertThat(merged.effortScore()).isEqualTo(5.0);
+        }
+
+        @Test
+        @DisplayName("score authority: a Notion page omitting the scores never wipes the domain-computed values")
+        void score_authority_survives_missing_inbound() {
+            ExecutableSnapshot current = snapshot().id(ID)
+                .priorityScore(0.55).urgencyScore(3.0).build();
+
+            ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(current,
+                pageBuilderDefaults("t", "Not started", false), ID, USER_ID, null, null);
+
+            assertThat(merged.priorityScore()).isEqualTo(0.55);
+            assertThat(merged.urgencyScore()).isEqualTo(3.0);
+        }
+
+        @Test
         @DisplayName("scale selects: null clears, unknown keeps, known maps")
         void scale_merge_rules() {
             assertThat(SourceAwareMerge.mergeScale(3, null, NotionSchema.ENERGY_OPTIONS)).isNull();
@@ -308,5 +337,14 @@ class SourceAwareMergeTest {
             name, null, status, complete, null,
             null, null, null, null, null, null, null,
             null, null, null, null, parentRelationId);
+    }
+
+    private static NotionTaskPage pageWithScores(String name, Double priority, Double urgency,
+                                                 Double effort) {
+        return new NotionTaskPage("page0000000000000000000000000001",
+            OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
+            name, null, "Not started", false, null,
+            null, null, priority, urgency, effort, null, null,
+            null, null, null, null, null);
     }
 }

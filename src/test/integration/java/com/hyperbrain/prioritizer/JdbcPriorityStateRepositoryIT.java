@@ -3,6 +3,7 @@ package com.hyperbrain.prioritizer;
 import com.hyperbrain.prioritizer.domain.model.CycleAlignmentContext;
 import com.hyperbrain.prioritizer.domain.model.CycleType;
 import com.hyperbrain.prioritizer.domain.model.ExecutableFactors;
+import com.hyperbrain.prioritizer.domain.model.PriorityScore;
 import com.hyperbrain.prioritizer.domain.port.out.PriorityStateRepository;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -13,7 +14,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -160,6 +163,85 @@ class JdbcPriorityStateRepositoryIT {
         double urgency = urgencyOf(task);
 
         assertThat(urgency).isCloseTo(0.0, within(1e-6));
+    }
+
+    @Test
+    @DisplayName("saveScores persists priority_score, raw urgency_score and priority_computed_at")
+    void save_scores_persists_all_three_columns() {
+        UUID task = insertTask("Scored", null);
+
+        Set<UUID> changed = repository.saveScores(List.of(new PriorityScore(task, 0.73, 4.5, 0.6)));
+
+        assertThat(changed).containsExactly(task);
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+            "SELECT priority_score, urgency_score, priority_computed_at FROM core_executable WHERE id = ?",
+            task);
+        assertThat((Double) row.get("priority_score")).isCloseTo(0.73, within(1e-9));
+        assertThat((Double) row.get("urgency_score")).isCloseTo(4.5, within(1e-9)); // raw 0-6, not normalized
+        assertThat(row.get("priority_computed_at")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("saveScores diffs against the persisted score: an unchanged row is not rewritten and not reported")
+    void save_scores_skips_unchanged_rows() {
+        UUID task = insertTask("Stable", null);
+        repository.saveScores(List.of(new PriorityScore(task, 0.50, 3.0, 0.4)));
+        OffsetDateTime firstStamp = computedAt(task);
+
+        // Same score within epsilon -> no change reported, clock not bumped
+        Set<UUID> unchanged = repository.saveScores(List.of(new PriorityScore(task, 0.50, 3.0, 0.4)));
+        assertThat(unchanged).isEmpty();
+        assertThat(computedAt(task)).isEqualTo(firstStamp);
+
+        // A real move -> reported and re-stamped
+        Set<UUID> moved = repository.saveScores(List.of(new PriorityScore(task, 0.80, 3.0, 0.4)));
+        assertThat(moved).containsExactly(task);
+        assertThat(computedAt(task)).isAfterOrEqualTo(firstStamp);
+    }
+
+    @Test
+    @DisplayName("saveScores of a non-existent row is a no-op (nothing to update, nothing reported)")
+    void save_scores_absent_row_is_noop() {
+        Set<UUID> changed = repository.saveScores(
+            List.of(new PriorityScore(UUID.randomUUID(), 0.9, 5.0, 0.5)));
+
+        assertThat(changed).isEmpty();
+    }
+
+    @Test
+    @DisplayName("findFactors returns one executable's factors; a system-generated row carries no priority")
+    void find_factors_single_row() {
+        UUID task = insertTask("One", OffsetDateTime.now().plusSeconds(2));
+
+        assertThat(repository.findFactors(task)).hasValueSatisfying(f -> {
+            assertThat(f.executableId()).isEqualTo(task);
+            assertThat(f.urgencyRaw()).isCloseTo(5.0, within(0.05));
+        });
+
+        jdbcTemplate.update("UPDATE core_executable SET system_generated = true WHERE id = ?", task);
+        assertThat(repository.findFactors(task)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("findAlignmentContext resolves a single cycle's active ancestors")
+    void find_alignment_context_single_cycle() {
+        UUID mci = insertCycle("MCI", "ACTIVE", null);
+        UUID project = insertCycle("PROJECT", "ACTIVE", mci);
+
+        assertThat(repository.findAlignmentContext(project)).hasValueSatisfying(ctx -> {
+            assertThat(ctx.ownType()).isEqualTo(CycleType.PROJECT);
+            assertThat(ctx.activeAncestors())
+                .anySatisfy(link -> {
+                    assertThat(link.ancestorType()).isEqualTo(CycleType.MCI);
+                    assertThat(link.distance()).isEqualTo(1);
+                });
+        });
+    }
+
+    private OffsetDateTime computedAt(UUID taskId) {
+        return jdbcTemplate.queryForObject(
+            "SELECT priority_computed_at FROM core_executable WHERE id = ?",
+            OffsetDateTime.class, taskId);
     }
 
     private double urgencyOf(UUID taskId) {

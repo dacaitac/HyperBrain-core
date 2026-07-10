@@ -124,6 +124,12 @@ public final class SourceAwareMerge {
      * projection of the current one; a known relation that is not mapped yet keeps the
      * current link instead of destroying it (the next webhook repairs it).
      *
+     * <p><b>Score authority (ADR-012 D1, #66a).</b> {@code priority_score} and {@code urgency_score}
+     * are SYSTEM-owned computed quantities: the inbound Notion values are ignored and the current
+     * domain values are pinned, so a manual edit in Notion never poisons the score (the Prioritizer is
+     * the sole writer, and the outbound mirror re-asserts the domain value on the next propagation).
+     * {@code effort_score} keeps its Notion authority — it has a genuine external producer.
+     *
      * @param current          the current row joined with its profile, or null when unmapped
      * @param page             the parsed page
      * @param id               local executable id (existing mapping or a fresh UUID)
@@ -150,8 +156,8 @@ public final class SourceAwareMerge {
             mergeText(current.description(), page.description()),
             mergeType(current.type(), page.typeName()),
             mergeStatus(current.status(), page.statusName(), page.complete()),
-            mergeNumber(current.priorityScore(), NotionTaskInboundMapper.clamp(page.priorityScore(), 0.0, 1.0)),
-            mergeNumber(current.urgencyScore(), page.urgencyScore()),
+            current.priorityScore(),
+            current.urgencyScore(),
             mergeNumber(current.effortScore(), NotionTaskInboundMapper.clamp(page.effortScore(), 0.0, 5.0)),
             page.important() != null ? page.important() : current.isImportant(),
             mergeNumber(current.frequency(), page.frequency()),
@@ -223,10 +229,10 @@ public final class SourceAwareMerge {
     }
 
     /**
-     * Applies a Notion number: a null carries no information and keeps the current value.
-     * Automation payloads may omit empty properties, and the scores are domain-computed
-     * quantities mirrored into Notion — an absent number must never wipe them (the outbound
-     * mirror re-asserts the domain value on the next propagation anyway).
+     * Applies a Notion number (effort, frequency): a null carries no information and keeps the
+     * current value. Automation payloads may omit empty properties, so an absent number must never
+     * wipe a Notion-authored value the user still has. (The SYSTEM-owned scores no longer go through
+     * this path — they are pinned to the current domain value; see {@link #mergeNotionTask}.)
      */
     static Double mergeNumber(Double current, Double incoming) {
         return incoming != null ? incoming : current;

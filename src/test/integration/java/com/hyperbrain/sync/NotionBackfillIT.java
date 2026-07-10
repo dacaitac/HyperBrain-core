@@ -103,27 +103,30 @@ class NotionBackfillIT {
     }
 
     @Test
-    @DisplayName("CA-8/CA-28: re-running the backfill is idempotent — unchanged pages are discarded by checksum")
+    @DisplayName("CA-8/CA-28: re-running the backfill converges — once the score settles, unchanged pages are echoes")
     void rerun_is_idempotent() {
-        // Given a completed first run
+        // Given a completed first run. CREATE persists the row after the domain rules, so the
+        // Prioritizer scores each task lazily on the FIRST re-ingest (#66a): that one re-run turns
+        // null scores into their computed values (a real change, not an echo). From then on the score
+        // is stable and the backfill is a pure echo.
         backfillService.backfill();
-        Integer outboxAfterFirst = jdbcTemplate.queryForObject(
+        backfillService.backfill(); // settles the lazily-computed scores
+        Integer outboxAfterSettle = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events", Integer.class);
 
-        // When
-        NotionBackfillService.BackfillSummary second = backfillService.backfill();
+        // When re-running against the now-stable state
+        NotionBackfillService.BackfillSummary settled = backfillService.backfill();
 
-        // Then nothing was created or updated again: the pages carry the same last_edited_time
-        // that the first run stored in last_synced_at — an equal timestamp passes the CA-29
-        // guard (Notion truncates to the minute) and the checksum discards the echo (CA-4)
-        assertThat(second.cycles()).containsEntry(SyncOutcome.SKIPPED_ECHO, 1);
-        assertThat(second.tasks()).containsEntry(SyncOutcome.SKIPPED_ECHO, 2);
+        // Then nothing is created or updated: equal last_edited_time passes CA-29 and the checksum
+        // (now including the settled score) discards the echo (CA-4)
+        assertThat(settled.cycles()).containsEntry(SyncOutcome.SKIPPED_ECHO, 1);
+        assertThat(settled.tasks()).containsEntry(SyncOutcome.SKIPPED_ECHO, 2);
         Integer executables = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM core_executable", Integer.class);
         assertThat(executables).isEqualTo(2);
-        Integer outboxAfterSecond = jdbcTemplate.queryForObject(
+        Integer outboxAfterSettled = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events", Integer.class);
-        assertThat(outboxAfterSecond).isEqualTo(outboxAfterFirst);
+        assertThat(outboxAfterSettled).isEqualTo(outboxAfterSettle);
     }
 
     private void stubQueries() {

@@ -12,18 +12,20 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * Application service that drives the deterministic floor of the daily agenda (#6a / HU-01a): it
- * reads the user's day and active WIGs from the domain aggregates, computes the normalized Priority
- * Score (v2) for every executable, ranks them, and persists the scores.
+ * Application service that drives the deterministic floor of the daily agenda (#6a / HU-01a) and the
+ * on-event priority reflection to the satellites (#66a): it reads the domain aggregates, computes the
+ * normalized Priority Score (v2), and persists the scores.
  *
- * <p>The read and the write run in one transaction so the persisted scores reflect a single,
- * consistent snapshot of the state.
+ * <p>The read and the write of each operation run in one transaction so the persisted scores reflect
+ * a single, consistent snapshot of the state.
  */
 @Service
-public class PrioritizationService {
+public class PrioritizationService implements PrioritizerService {
 
     private static final Logger log = LoggerFactory.getLogger(PrioritizationService.class);
 
@@ -35,22 +37,48 @@ public class PrioritizationService {
         this.calculator = calculator;
     }
 
-    /**
-     * Reprioritizes the user's day: scores and ranks every pending executable and persists the
-     * result into {@code core_executable.priority_score}.
-     *
-     * @param userId the user whose day to reprioritize
-     * @return the executables ranked by Priority Score, highest first; never null
-     */
+    @Override
     @Transactional
-    public List<PriorityScore> reprioritizeToday(UUID userId) {
+    public Optional<PriorityScore> rescore(UUID executableId) {
+        Optional<ExecutableFactors> factors = repository.findFactors(executableId);
+        if (factors.isEmpty()) {
+            return Optional.empty();
+        }
+        double alignment = resolveAlignment(factors.get().cycleId());
+        PriorityScore score = calculator.score(factors.get(), alignment);
+        Set<UUID> changed = repository.saveScores(List.of(score));
+        if (log.isDebugEnabled()) {
+            log.debug("Rescored executable {} -> priority {}, urgency {} (changed: {})",
+                executableId, score.score(), score.urgency(), changed.contains(executableId));
+        }
+        return Optional.of(score);
+    }
+
+    @Override
+    @Transactional
+    public Set<UUID> reprioritizeToday(UUID userId) {
         List<ExecutableFactors> factors = repository.findTodaysFactors(userId);
         Map<UUID, CycleAlignmentContext> alignmentContexts = repository.findAlignmentContexts(userId);
 
         List<PriorityScore> ranked = calculator.rank(factors, alignmentContexts);
 
-        repository.saveScores(ranked);
-        log.info("Reprioritized {} executables for user {}", ranked.size(), userId);
-        return ranked;
+        Set<UUID> changed = repository.saveScores(ranked);
+        log.info("Reprioritized {} executables for user {} ({} changed)",
+            ranked.size(), userId, changed.size());
+        return changed;
+    }
+
+    /**
+     * Resolves the graded alignment factor {@code [0, 1]} for one executable's cycle. Reuses the same
+     * domain policy the batch ranking applies (via the calculator), so the on-event score is identical
+     * to the batch one for the same state; an unassigned or missing cycle contributes no alignment.
+     */
+    private double resolveAlignment(UUID cycleId) {
+        if (cycleId == null) {
+            return 0.0;
+        }
+        return repository.findAlignmentContext(cycleId)
+            .map(context -> calculator.resolveAlignment(cycleId, Map.of(cycleId, context)))
+            .orElse(0.0);
     }
 }

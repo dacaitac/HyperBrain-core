@@ -76,13 +76,18 @@ public class PriorityScoreCalculator {
     /**
      * Computes the Priority Score of one executable from its raw factors and resolved alignment.
      *
+     * <p>The returned {@code urgency} is the raw 0–6 factor (capped at 6), surfaced for persistence
+     * into {@code urgency_score} / Notion {@code Urgence} (#66a); the score itself uses its normalized
+     * form. Alignment stays an in-memory intermediate — it is never persisted or reflected.
+     *
      * @param factors   the executable's un-normalized factors; never null
      * @param alignment the alignment factor already in {@code [0, 1]} (see {@link AlignmentResolver})
-     * @return the score and its inverted-effort tie-breaker, {@code score ∈ [0, 1]}
+     * @return the score, its raw urgency and its inverted-effort tie-breaker, {@code score ∈ [0, 1]}
      */
     public PriorityScore score(ExecutableFactors factors, double alignment) {
+        double urgencyCapped = Math.min(factors.urgencyRaw(), URGENCY_CAP);
         double impactN = normalizeImpact(factors.impact());
-        double urgencyN = normalizeUrgency(factors.urgencyRaw());
+        double urgencyN = urgencyCapped / URGENCY_CAP;
         double effortInv = invertEffort(factors.effort());
 
         double p = impactN * weights.wImpact()
@@ -90,7 +95,7 @@ public class PriorityScoreCalculator {
             + effortInv * weights.wEffort()
             + alignment * weights.wAlignment();
 
-        return new PriorityScore(factors.executableId(), p, effortInv);
+        return new PriorityScore(factors.executableId(), p, urgencyCapped, effortInv);
     }
 
     /**
@@ -114,16 +119,24 @@ public class PriorityScoreCalculator {
             .toList();
     }
 
+    /**
+     * Resolves the graded alignment factor {@code [0, 1]} for one cycle, using the same policy the
+     * ranking applies. Exposed so the on-event single-executable rescore ({@code #66a}) computes an
+     * alignment identical to the batch path for the same state.
+     *
+     * @param cycleId  the executable's owning cycle; may be null (unassigned → {@code 0.0})
+     * @param contexts the alignment context per cycle, keyed by cycle id; never null
+     * @return the graded alignment in {@code [0, 1]}
+     */
+    public double resolveAlignment(UUID cycleId, Map<UUID, CycleAlignmentContext> contexts) {
+        return alignmentResolver.resolve(cycleId, contexts);
+    }
+
     private static double normalizeImpact(Integer impact) {
         if (impact == null) {
             return 0.0;
         }
         return (impact - IMPACT_MIN) / IMPACT_RANGE;
-    }
-
-    private static double normalizeUrgency(double urgencyRaw) {
-        double capped = Math.min(urgencyRaw, URGENCY_CAP);
-        return capped / URGENCY_CAP;
     }
 
     private static double invertEffort(Double effort) {

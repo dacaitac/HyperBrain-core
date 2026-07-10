@@ -1,6 +1,7 @@
 package com.hyperbrain.core.application;
 
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
+import com.hyperbrain.core.application.rule.PriorityRecalculationRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
 import com.hyperbrain.core.application.rule.ReestimationConfirmationRule;
 import com.hyperbrain.core.application.rule.SingleFocusRule;
@@ -27,6 +28,7 @@ class CoreDomainChangeProcessorTest {
     private SingleFocusRule focusRule;
     private ReestimationConfirmationRule reestimationRule;
     private ProgressRecalculationRule progressRule;
+    private PriorityRecalculationRule priorityRule;
     private CoreDomainChangeProcessor processor;
 
     @BeforeEach
@@ -35,8 +37,9 @@ class CoreDomainChangeProcessorTest {
         focusRule = mock(SingleFocusRule.class);
         reestimationRule = mock(ReestimationConfirmationRule.class);
         progressRule = mock(ProgressRecalculationRule.class);
+        priorityRule = mock(PriorityRecalculationRule.class);
         processor = new CoreDomainChangeProcessor(
-            endTimeRule, focusRule, reestimationRule, progressRule);
+            endTimeRule, focusRule, reestimationRule, progressRule, priorityRule);
     }
 
     @Test
@@ -48,6 +51,7 @@ class CoreDomainChangeProcessorTest {
         ExecutableSnapshot afterFocus = ExecutableSnapshotBuilder.snapshot().name("b").build();
         ExecutableSnapshot afterReestimation = ExecutableSnapshotBuilder.snapshot().name("c").build();
         ExecutableSnapshot afterProgress = ExecutableSnapshotBuilder.snapshot().name("d").build();
+        ExecutableSnapshot afterPriority = ExecutableSnapshotBuilder.snapshot().name("e").build();
         when(endTimeRule.apply(same(previous), same(merged), eq(ExternalSystem.NOTION)))
             .thenReturn(afterEndTime);
         when(focusRule.apply(same(previous), same(afterEndTime), eq(ExternalSystem.NOTION)))
@@ -56,14 +60,17 @@ class CoreDomainChangeProcessorTest {
             .thenReturn(afterReestimation);
         when(progressRule.apply(same(previous), same(afterReestimation), eq(ExternalSystem.NOTION)))
             .thenReturn(afterProgress);
+        when(priorityRule.apply(same(previous), same(afterProgress), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterPriority);
 
         ExecutableSnapshot result = processor.process(previous, merged, ExternalSystem.NOTION);
 
-        assertThat(result).isSameAs(afterProgress);
-        InOrder order = inOrder(endTimeRule, focusRule, reestimationRule, progressRule);
+        assertThat(result).isSameAs(afterPriority);
+        InOrder order = inOrder(endTimeRule, focusRule, reestimationRule, progressRule, priorityRule);
         order.verify(endTimeRule).apply(any(), any(), any());
         order.verify(focusRule).apply(any(), any(), any());
         order.verify(reestimationRule).apply(any(), any(), any());
         order.verify(progressRule).apply(any(), any(), any());
+        order.verify(priorityRule).apply(any(), any(), any());
     }
 }

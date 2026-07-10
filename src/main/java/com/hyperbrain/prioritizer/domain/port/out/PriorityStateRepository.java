@@ -6,6 +6,8 @@ import com.hyperbrain.prioritizer.domain.model.PriorityScore;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -29,6 +31,17 @@ public interface PriorityStateRepository {
     List<ExecutableFactors> findTodaysFactors(UUID userId);
 
     /**
+     * Gathers the raw priority factors for a single executable, with its urgency derived onto the
+     * 0–6 source scale exactly as {@link #findTodaysFactors}. Used by the on-event recompute
+     * ({@code rescore}) to score one row without loading the whole day.
+     *
+     * @param executableId the executable to score
+     * @return its un-normalized factors, or empty when the row does not exist (e.g. a CREATE not yet
+     *         persisted, or a system-generated / read-only AGENDA row that carries no priority)
+     */
+    Optional<ExecutableFactors> findFactors(UUID executableId);
+
+    /**
      * Gathers the graded-alignment context for every cycle the user's executables may belong to: for
      * each {@code core_cycle}, its own horizon type and every {@code ACTIVE} ancestor reachable by
      * walking {@code parent_cycle_id} upward, tagged with the minimum hop-distance to it. A single
@@ -41,10 +54,26 @@ public interface PriorityStateRepository {
     Map<UUID, CycleAlignmentContext> findAlignmentContexts(UUID userId);
 
     /**
-     * Persists the computed Priority Scores into {@code core_executable.priority_score}. Writes only
-     * that column; every other attribute is left untouched.
+     * Gathers the graded-alignment context for a single cycle — the single-source specialization of
+     * {@link #findAlignmentContexts} used by the on-event {@code rescore}. Same recursive
+     * {@code parent_cycle_id} walk, cycle guard and depth bound, scoped to one starting cycle.
+     *
+     * @param cycleId the source cycle
+     * @return its alignment context, or empty when the cycle does not exist
+     */
+    Optional<CycleAlignmentContext> findAlignmentContext(UUID cycleId);
+
+    /**
+     * Persists the computed scores into {@code core_executable}: {@code priority_score} (normalized
+     * {@code [0, 1]}), {@code urgency_score} (raw 0–6) and {@code priority_computed_at} (the recompute
+     * clock, stamped {@code now()}). Writes only those columns; every other attribute is untouched.
+     *
+     * <p>Each row is diffed against its currently persisted {@code priority_score}/{@code urgency_score}
+     * with a floating-point epsilon: a row whose score is unchanged is skipped (no write, no clock
+     * bump), so downstream propagation fires only for executables whose priority actually moved.
      *
      * @param scores the scores to persist; never null, may be empty
+     * @return the ids of the executables whose persisted score changed; never null, may be empty
      */
-    void saveScores(List<PriorityScore> scores);
+    Set<UUID> saveScores(List<PriorityScore> scores);
 }

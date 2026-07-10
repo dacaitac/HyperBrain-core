@@ -60,21 +60,25 @@ class PriorityScoreCalculatorTest {
         }
 
         @Test
-        @DisplayName("urgency is normalized min(U, 6) / 6")
+        @DisplayName("urgency is normalized min(U, 6) / 6, and surfaced raw (uncapped input) for persistence")
         void urgency_normalized() {
             // urgency 3 -> 0.5; only urgency contributes: 0.5 * 0.3
             PriorityScore score = calculator.score(factors(E1, null, 1, 3.0, 5.0), 0.0);
 
             assertThat(score.score()).isCloseTo(0.5 * 0.3, within(EPS));
+            // the raw urgency (0-6 source scale) is exposed as-is, not normalized
+            assertThat(score.urgency()).isCloseTo(3.0, within(EPS));
         }
 
         @Test
-        @DisplayName("overdue urgency above 6 is capped at 6 (normalized to 1.0)")
+        @DisplayName("overdue urgency above 6 is capped at 6 (normalized to 1.0) and surfaced capped at 6")
         void urgency_overdue_is_capped() {
             // urgency 9 -> capped 6 -> 1.0; only urgency contributes: 1.0 * 0.3
             PriorityScore score = calculator.score(factors(E1, null, 1, 9.0, 5.0), 0.0);
 
             assertThat(score.score()).isCloseTo(0.3, within(EPS));
+            // the raw urgency reflected to urgency_score / Notion is capped at the domain cap 6
+            assertThat(score.urgency()).isCloseTo(6.0, within(EPS));
         }
 
         @Test

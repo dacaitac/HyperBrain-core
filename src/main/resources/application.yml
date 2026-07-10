@@ -93,6 +93,11 @@ app:
     # One-minute cadence is enough — settlement is idempotent and race-safe.
     expiry-poll-ms:     60000
     scheduling-enabled: true
+  prioritizer:
+    # #66a tick (a): recompute the day's Priority Scores as the urgency ramp advances and reflect
+    # only the moved rows to the satellites. Hourly, anchored to America/Bogota (see the scheduler).
+    tick-cron:          "0 0 * * * *"
+    scheduling-enabled: true
 
 management:
   endpoints:

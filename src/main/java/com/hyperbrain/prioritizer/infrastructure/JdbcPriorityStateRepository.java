@@ -12,14 +12,19 @@ import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
  * JDBC adapter for {@link PriorityStateRepository}. Reads aggregate state directly
  * ({@code core_executable} joined with {@code core_execution_profile}, and the {@code core_cycle}
- * hierarchy for graded alignment) and writes back only {@code core_executable.priority_score}.
+ * hierarchy for graded alignment) and writes back only the score columns of {@code core_executable}
+ * ({@code priority_score}, {@code urgency_score}, {@code priority_computed_at}), diffed so only rows
+ * whose score moved are touched.
  */
 @Repository
 class JdbcPriorityStateRepository implements PriorityStateRepository {
@@ -42,29 +47,55 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
      * SYSTEM-generated accounting rows and read-only AGENDA blocks are excluded — they are not the
      * user's actionable work.
      */
+    /**
+     * The deadline-anchored raw urgency expression on the 0–6 source scale, shared by the day query
+     * and the single-executable {@code rescore} read so both derive urgency identically.
+     */
+    private static final String URGENCY_RAW_EXPR = """
+        CASE
+            WHEN e.end_time IS NULL THEN 0
+            ELSE LEAST(
+                6,
+                5 * GREATEST(
+                    0,
+                    1 - (EXTRACT(EPOCH FROM (e.end_time - now())) / 86400.0)
+                        / %d
+                )
+            )
+        END AS urgency_raw
+        """.formatted(URGENCY_HORIZON_DAYS);
+
     private static final String FIND_TODAYS_FACTORS_SQL = """
         SELECT e.id,
                e.cycle_id,
                p.impact,
                e.effort_score,
-               CASE
-                   WHEN e.end_time IS NULL THEN 0
-                   ELSE LEAST(
-                       6,
-                       5 * GREATEST(
-                           0,
-                           1 - (EXTRACT(EPOCH FROM (e.end_time - now())) / 86400.0)
-                               / %d
-                       )
-                   )
-               END AS urgency_raw
+               %s
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
         WHERE e.user_id = ?
           AND e.status IN ('TODO', 'IN_PROGRESS')
           AND e.type <> 'AGENDA'
           AND e.system_generated = false
-        """.formatted(URGENCY_HORIZON_DAYS);
+        """.formatted(URGENCY_RAW_EXPR);
+
+    /**
+     * The same factor projection for one executable, applying the identical exclusions (read-only
+     * AGENDA and system-generated rows carry no priority signal) so {@code rescore} of such a row is
+     * a clean no-op rather than a spurious zero score.
+     */
+    private static final String FIND_FACTORS_BY_ID_SQL = """
+        SELECT e.id,
+               e.cycle_id,
+               p.impact,
+               e.effort_score,
+               %s
+        FROM core_executable e
+        LEFT JOIN core_execution_profile p ON p.executable_id = e.id
+        WHERE e.id = ?
+          AND e.type <> 'AGENDA'
+          AND e.system_generated = false
+        """.formatted(URGENCY_RAW_EXPR);
 
     /**
      * The graded-alignment context per cycle for one user, computed in a single recursive pass. From
@@ -110,8 +141,59 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
         WHERE src.user_id = ?
         """;
 
-    private static final String SAVE_SCORE_SQL =
-        "UPDATE core_executable SET priority_score = ? WHERE id = ?";
+    /**
+     * The graded-alignment context for a single source cycle, the single-source specialization of
+     * {@link #FIND_ALIGNMENT_CONTEXTS_SQL} used by the on-event {@code rescore}. Same recursive walk,
+     * same cycle guard and depth bound, scoped to one starting cycle.
+     */
+    private static final String FIND_ALIGNMENT_CONTEXT_BY_CYCLE_SQL = """
+        WITH RECURSIVE walk (current_id, depth, path) AS (
+            SELECT c.id, 0, ARRAY[c.id]
+            FROM core_cycle c
+            WHERE c.id = ?
+            UNION ALL
+            SELECT parent.id, w.depth + 1, w.path || parent.id
+            FROM walk w
+            JOIN core_cycle child ON child.id = w.current_id
+            JOIN core_cycle parent ON parent.id = child.parent_cycle_id
+            WHERE w.depth < 16
+              AND NOT parent.id = ANY(w.path)
+        ),
+        ancestor_link AS (
+            SELECT anc.type AS ancestor_type,
+                   MIN(w.depth) AS distance
+            FROM walk w
+            JOIN core_cycle anc ON anc.id = w.current_id
+            WHERE anc.status = 'ACTIVE'
+            GROUP BY anc.type
+        )
+        SELECT src.type AS own_type,
+               al.ancestor_type,
+               al.distance
+        FROM core_cycle src
+        LEFT JOIN ancestor_link al ON true
+        WHERE src.id = ?
+        """;
+
+    /**
+     * Reads the currently persisted score pair of one executable, used to diff against a freshly
+     * computed score before writing (epsilon-guarded change detection).
+     */
+    private static final String FIND_PERSISTED_SCORE_SQL =
+        "SELECT priority_score, urgency_score FROM core_executable WHERE id = ?";
+
+    private static final String SAVE_SCORE_SQL = """
+        UPDATE core_executable
+        SET priority_score = ?, urgency_score = ?, priority_computed_at = now()
+        WHERE id = ?
+        """;
+
+    /**
+     * The epsilon below which two scores count as unchanged; both {@code priority_score} ([0, 1]) and
+     * the raw {@code urgency_score} (0–6) are compared with it. Small enough to catch every meaningful
+     * move, large enough to absorb {@code double} round-off from repeated recomputation.
+     */
+    private static final double SCORE_EPSILON = 1e-9;
 
     private static final RowMapper<ExecutableFactors> FACTORS_MAPPER = (rs, rowNum) ->
         new ExecutableFactors(
@@ -130,6 +212,13 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
     @Override
     public List<ExecutableFactors> findTodaysFactors(UUID userId) {
         return jdbcTemplate.query(FIND_TODAYS_FACTORS_SQL, FACTORS_MAPPER, userId);
+    }
+
+    @Override
+    public Optional<ExecutableFactors> findFactors(UUID executableId) {
+        return jdbcTemplate.query(FIND_FACTORS_BY_ID_SQL, FACTORS_MAPPER, executableId)
+            .stream()
+            .findFirst();
     }
 
     @Override
@@ -156,14 +245,61 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
     }
 
     @Override
-    public void saveScores(List<PriorityScore> scores) {
-        if (scores.isEmpty()) {
-            return;
+    public Optional<CycleAlignmentContext> findAlignmentContext(UUID cycleId) {
+        List<AncestorLink> links = new ArrayList<>();
+        CycleType[] ownType = new CycleType[1];
+        boolean[] found = new boolean[1];
+
+        jdbcTemplate.query(FIND_ALIGNMENT_CONTEXT_BY_CYCLE_SQL, rs -> {
+            found[0] = true;
+            ownType[0] = CycleType.valueOf(rs.getString("own_type"));
+            String ancestorType = rs.getString("ancestor_type");
+            if (ancestorType != null) {
+                links.add(new AncestorLink(CycleType.valueOf(ancestorType), rs.getInt("distance")));
+            }
+        }, cycleId, cycleId);
+
+        return found[0]
+            ? Optional.of(new CycleAlignmentContext(ownType[0], links))
+            : Optional.empty();
+    }
+
+    @Override
+    public Set<UUID> saveScores(List<PriorityScore> scores) {
+        Set<UUID> changed = new HashSet<>();
+        for (PriorityScore score : scores) {
+            if (persistIfChanged(score)) {
+                changed.add(score.executableId());
+            }
         }
-        jdbcTemplate.batchUpdate(SAVE_SCORE_SQL, scores, scores.size(),
-            (ps, score) -> {
-                ps.setDouble(1, score.score());
-                ps.setObject(2, score.executableId());
-            });
+        return changed;
+    }
+
+    /**
+     * Persists one score only when it differs (beyond {@link #SCORE_EPSILON}) from the currently
+     * stored pair, so an unchanged executable is neither rewritten nor re-stamped and stays out of
+     * the changed set that drives propagation.
+     */
+    private boolean persistIfChanged(PriorityScore score) {
+        List<double[]> current = jdbcTemplate.query(FIND_PERSISTED_SCORE_SQL,
+            (rs, rowNum) -> new double[]{
+                rs.getObject("priority_score") != null ? rs.getDouble("priority_score") : Double.NaN,
+                rs.getObject("urgency_score") != null ? rs.getDouble("urgency_score") : Double.NaN},
+            score.executableId());
+        if (current.isEmpty()) {
+            // The row is not persisted yet (a CREATE scored before its upsert); nothing to update.
+            return false;
+        }
+        if (unchanged(current.get(0)[0], score.score())
+            && unchanged(current.get(0)[1], score.urgency())) {
+            return false;
+        }
+        jdbcTemplate.update(SAVE_SCORE_SQL, score.score(), score.urgency(), score.executableId());
+        return true;
+    }
+
+    /** A stored value equals a fresh one when both are present and within epsilon; NaN = never set. */
+    private static boolean unchanged(double stored, double fresh) {
+        return !Double.isNaN(stored) && Math.abs(stored - fresh) < SCORE_EPSILON;
     }
 }

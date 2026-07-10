@@ -78,6 +78,10 @@ CREATE TABLE core_executable (
     priority_score     DOUBLE PRECISION
                            CHECK (priority_score IS NULL OR priority_score BETWEEN 0 AND 1),
     urgency_score      DOUBLE PRECISION,
+    -- Mirrors HyperBrain-Infra: SYSTEM-owned recompute clock of the Prioritizer (#66a). Stamped
+    -- whenever priority_score/urgency_score are (re)computed; nullable, no default (an executable
+    -- that has never been scored has no clock).
+    priority_computed_at TIMESTAMPTZ,
     effort_score       DOUBLE PRECISION
                            CHECK (effort_score IS NULL OR effort_score BETWEEN 0 AND 5),
     is_important       BOOLEAN NOT NULL DEFAULT false,

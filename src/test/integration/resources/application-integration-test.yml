@@ -34,3 +34,6 @@ app:
   timeblock:
     # Tests drive expireDueBlocks() deterministically (TimeBlockExpiryIT).
     scheduling-enabled: false
+  prioritizer:
+    # Tests drive reflectDailyReprioritization() deterministically (PriorityReflectionIT).
+    scheduling-enabled: false

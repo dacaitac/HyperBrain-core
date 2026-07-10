@@ -278,13 +278,13 @@ class NotionInboundSyncIT {
     @Test
     @DisplayName("ADR-012 D1 — renaming in Notion never regresses a richer domain status (loss-aware merge)")
     void rename_does_not_regress_domain_status() {
-        // Given a synced task whose domain state is richer than what Notion can express:
-        // PLANNED projects to "Not started", priority was computed domain-side
+        // Given a synced task whose domain status is richer than Notion can express:
+        // PLANNED projects to "Not started".
         String pageId = newPageId();
         deliverAutomation(pageId, taskPage(pageId, "Original", "Not started", false, "Task",
             "2026-07-07T15:00:00.000Z", null));
         jdbcTemplate.update("""
-            UPDATE core_executable SET status = 'PLANNED', priority_score = 0.9
+            UPDATE core_executable SET status = 'PLANNED'
             WHERE id = (SELECT local_id FROM sync_mappings WHERE external_id = ?)
             """, pageId);
 
@@ -292,15 +292,66 @@ class NotionInboundSyncIT {
         deliverAutomation(pageId, taskPage(pageId, "Renamed", "Not started", false, "Task",
             "2026-07-07T15:01:00.000Z", null));
 
-        // Then the rename applies and the domain-owned state survives
+        // Then the rename applies and the loss-aware merge keeps the richer domain status
         Map<String, Object> row = jdbcTemplate.queryForMap("""
-            SELECT e.name, e.status, e.priority_score
+            SELECT e.name, e.status
             FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
             WHERE m.external_id = ?
             """, pageId);
         assertThat(row.get("name")).isEqualTo("Renamed");
         assertThat(row.get("status")).isEqualTo("PLANNED");
-        assertThat(row.get("priority_score")).isEqualTo(0.9);
+    }
+
+    @Test
+    @DisplayName("#66a — on-event ingestion recomputes and persists the Priority Score of the mapped row")
+    void ingestion_recomputes_priority_score() {
+        // Given a task carrying an Impact (so the recomputed priority is > 0). The score is computed
+        // lazily on the first re-ingest of the now-persisted row (CREATE persists after the rules).
+        String pageId = newPageId();
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored", "2026-07-07T15:00:00.000Z",
+            "Critical"));
+
+        // When a later edit re-ingests the persisted row (the rule scores the merged state)
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored again",
+            "2026-07-07T15:05:00.000Z", "Critical"));
+
+        // Then the SYSTEM-owned score columns are populated by the recompute
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT e.priority_score, e.urgency_score, e.priority_computed_at
+            FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, pageId);
+        // impact Critical (5) -> normalized 1.0 * 0.4 weight = 0.4, so priority is a real positive value
+        assertThat((Double) row.get("priority_score")).isNotNull().isGreaterThan(0.0);
+        // urgency is persisted raw on the 0-6 source scale (a TASK has no end boundary -> 0, DR-01)
+        assertThat((Double) row.get("urgency_score")).isNotNull();
+        assertThat(row.get("priority_computed_at")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("#66a — a Notion edit of the score is ignored: the domain-computed value is authoritative")
+    void notion_score_edit_is_ignored() {
+        String pageId = newPageId();
+        deliverAutomation(pageId, taskPage(pageId, "Owned", "Not started", false, "Task",
+            "2026-07-07T15:00:00.000Z", null));
+        // The domain owns a computed score
+        jdbcTemplate.update("""
+            UPDATE core_executable SET priority_score = 0.42, urgency_score = 2.0
+            WHERE id = (SELECT local_id FROM sync_mappings WHERE external_id = ?)
+            """, pageId);
+
+        // A webhook carrying a user-typed score (no due date -> recompute yields urgency 0)
+        deliverAutomation(pageId, scoredTaskPage(pageId, "Owned", "2026-07-07T15:05:00.000Z",
+            0.99, 6.0));
+
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT e.priority_score, e.urgency_score
+            FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, pageId);
+        // The inbound 0.99 / 6.0 never landed: priority is the domain recompute, not the Notion value
+        assertThat((Double) row.get("priority_score")).isNotEqualTo(0.99);
+        assertThat((Double) row.get("urgency_score")).isNotEqualTo(6.0);
     }
 
     @Test
@@ -309,16 +360,23 @@ class NotionInboundSyncIT {
         String pageId = newPageId();
         deliverAutomation(pageId, taskPage(pageId, "Stable", "Not started", false, "Task",
             "2026-07-07T15:00:00.000Z", null));
-
-        // Same state, newer last_edited_time (so the monotonicity guard does not kick in first)
+        // A first UPDATE lets the priority (computed lazily on the persisted row) settle, so the
+        // checksum stored afterwards already includes the stable score (#66a).
         deliverAutomation(pageId, taskPage(pageId, "Stable", "Not started", false, "Task",
             "2026-07-07T15:05:00.000Z", null));
+        int outboxAfterWarmup = countOutbox();
 
-        // No second outbox event and no double effect
-        Integer outbox = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events", Integer.class);
-        assertThat(outbox).isEqualTo(1);
+        // Now a truly-identical webhook (same state and score) is discarded by checksum — no new event
+        deliverAutomation(pageId, taskPage(pageId, "Stable", "Not started", false, "Task",
+            "2026-07-07T15:10:00.000Z", null));
+
+        assertThat(countOutbox()).isEqualTo(outboxAfterWarmup);
         assertThat(countExecutables()).isEqualTo(1);
+    }
+
+    private int countOutbox() {
+        Integer count = jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Integer.class);
+        return count == null ? 0 : count;
     }
 
     @Test
@@ -401,6 +459,35 @@ class NotionInboundSyncIT {
                "Complete":{"type":"checkbox","checkbox":%s},
                "Type":{"type":"select","select":{"name":"%s"}}%s}}
             """.formatted(pageId, lastEditedTime, TASKS_DB, name, status, complete, type, cycleRelation);
+    }
+
+    private String impactfulTaskPage(String pageId, String name, String lastEditedTime,
+                                     String impactOption) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Status":{"type":"status","status":{"name":"Not started"}},
+               "Complete":{"type":"checkbox","checkbox":false},
+               "Type":{"type":"select","select":{"name":"Task"}},
+               "Impact":{"type":"select","select":{"name":"%s"}}}}
+            """.formatted(pageId, lastEditedTime, TASKS_DB, name, impactOption);
+    }
+
+    private String scoredTaskPage(String pageId, String name, String lastEditedTime,
+                                  double priority, double urgency) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Status":{"type":"status","status":{"name":"Not started"}},
+               "Complete":{"type":"checkbox","checkbox":false},
+               "Type":{"type":"select","select":{"name":"Task"}},
+               "Priority Score":{"type":"number","number":%s},
+               "Urgence":{"type":"number","number":%s}}}
+            """.formatted(pageId, lastEditedTime, TASKS_DB, name, priority, urgency);
     }
 
     private String cyclePage(String pageId, String name, String type, boolean inactive,
