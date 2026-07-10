@@ -242,7 +242,10 @@ public final class SourceAwareMerge {
             return null;
         }
         int index = options.indexOf(optionName);
-        return index >= 0 ? index + 1 : currentValue;
+        if (index < 0) {
+            return currentValue;
+        }
+        return index + 1;
     }
 
     private static boolean sameInstant(OffsetDateTime a, OffsetDateTime b) {
