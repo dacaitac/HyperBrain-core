@@ -15,7 +15,7 @@ import java.util.UUID;
  * @param executableId the {@code core_executable} this row scores; never null
  * @param cycleId      the owning cycle ({@code core_executable.cycle_id}); null when unassigned.
  *                     Used only to resolve alignment against the active MCI cycles, never normalized.
- * @param impact       {@code core_execution_profile.impact} on the Fibonacci 1–8 scale; null when
+ * @param impact       {@code core_execution_profile.impact} on the ordinal 1–5 scale; null when
  *                     the execution profile has no impact recorded
  * @param urgencyRaw   the domain-computed urgency on its 0–6 source scale, anchored to a fixed
  *                     deadline horizon (0 while the deadline is beyond the horizon, 5 at the due

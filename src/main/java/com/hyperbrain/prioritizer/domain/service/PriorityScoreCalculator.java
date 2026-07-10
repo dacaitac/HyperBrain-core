@@ -16,12 +16,12 @@ import java.util.UUID;
  * do not re-derive here).
  *
  * <p><b>The v2 fix: normalize every factor to {@code [0, 1]} before weighting.</b> v1 weighted raw,
- * heterogeneous scales (Fibonacci 1–8, 0–6, 0–5, 0–1), so the declared 20% alignment weight carried
+ * heterogeneous scales (ordinal 1–5, 0–6, 0–5, 0–1), so the declared 20% alignment weight carried
  * only ~4% of real influence. Each factor is mapped onto {@code [0, 1]} on its documented fixed
  * scale (min–max against a known range, not batch-relative), then weighted:
  *
  * <pre>{@code
- *   impactN    = (impact − 1) / 7        // Fibonacci 1–8
+ *   impactN    = (impact − 1) / 4        // ordinal 1–5
  *   urgencyN   = min(urgency, 6) / 6     // 0–6 (overdue caps at 6)
  *   effortInv  = (5 − effort) / 5        // 0–5, inverted so Quick Wins score higher
  *   alignment  ∈ [0, 1]                  // already normalized (resolved upstream)
@@ -38,7 +38,10 @@ import java.util.UUID;
 public class PriorityScoreCalculator {
 
     private static final double IMPACT_MIN = 1.0;
-    private static final double IMPACT_RANGE = 7.0;
+    // 4 = (levels − 1) of the ordinal 1–5 impact domain scale. Deliberately NOT coupled to the
+    // cardinality of any external source (e.g. the Notion select in `sync`): the prioritizer and
+    // sync scales stay decoupled and must not share a constant, even if both happen to be 5-valued.
+    private static final double IMPACT_RANGE = 4.0;
     private static final double URGENCY_CAP = 6.0;
     private static final double EFFORT_MAX = 5.0;
 

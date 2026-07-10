@@ -35,8 +35,8 @@ class PriorityScoreCalculatorTest {
         @Test
         @DisplayName("all factors at their maximum yield P = 1.0 (weights sum to 1)")
         void all_max_factors_yield_one() {
-            // impact 8 -> 1.0, urgency 6 -> 1.0, effort 0 -> 1.0, alignment 1.0
-            PriorityScore score = calculator.score(factors(E1, null, 8, 6.0, 0.0), 1.0);
+            // impact 5 -> 1.0, urgency 6 -> 1.0, effort 0 -> 1.0, alignment 1.0
+            PriorityScore score = calculator.score(factors(E1, null, 5, 6.0, 0.0), 1.0);
 
             assertThat(score.score()).isCloseTo(1.0, within(EPS));
         }
@@ -51,12 +51,12 @@ class PriorityScoreCalculatorTest {
         }
 
         @Test
-        @DisplayName("impact is normalized (I - 1) / 7 on the Fibonacci 1-8 scale")
-        void impact_normalized_fibonacci() {
-            // impact 4 -> 3/7; only impact contributes: 3/7 * 0.4
-            PriorityScore score = calculator.score(factors(E1, null, 4, 0.0, 5.0), 0.0);
+        @DisplayName("impact is normalized (I - 1) / 4 on the ordinal 1-5 scale")
+        void impact_normalized_ordinal() {
+            // impact 5 -> 4/4 = 1.0; only impact contributes: 1.0 * 0.4 = 0.4
+            PriorityScore score = calculator.score(factors(E1, null, 5, 0.0, 5.0), 0.0);
 
-            assertThat(score.score()).isCloseTo((3.0 / 7.0) * 0.4, within(EPS));
+            assertThat(score.score()).isCloseTo(0.4, within(EPS));
         }
 
         @Test
@@ -104,12 +104,12 @@ class PriorityScoreCalculatorTest {
         @Test
         @DisplayName("combines the four normalized factors by their weights")
         void combines_all_factors() {
-            // impact 8 -> 1.0 * 0.4 = 0.4
+            // impact 5 -> 1.0 * 0.4 = 0.4
             // urgency 3 -> 0.5 * 0.3 = 0.15
             // effort 4 -> 0.2 * 0.1 = 0.02
             // alignment 1.0 -> 1.0 * 0.2 = 0.2
             // total = 0.77
-            PriorityScore score = calculator.score(factors(E1, MCI_CYCLE, 8, 3.0, 4.0), 1.0);
+            PriorityScore score = calculator.score(factors(E1, MCI_CYCLE, 5, 3.0, 4.0), 1.0);
 
             assertThat(score.score()).isCloseTo(0.77, within(EPS));
         }
@@ -121,7 +121,7 @@ class PriorityScoreCalculatorTest {
             PriorityScoreCalculator urgencyOnly = new PriorityScoreCalculator(
                 new PriorityWeights(0.0, 1.0, 0.0, 0.0), new AlignmentResolver());
 
-            PriorityScore score = urgencyOnly.score(factors(E1, null, 8, 6.0, 0.0), 1.0);
+            PriorityScore score = urgencyOnly.score(factors(E1, null, 5, 6.0, 0.0), 1.0);
 
             assertThat(score.score()).isCloseTo(1.0, within(EPS));
         }
@@ -143,8 +143,8 @@ class PriorityScoreCalculatorTest {
         @Test
         @DisplayName("null effort floors to 0 (no Quick-Win contribution)")
         void null_effort_floors_to_zero() {
-            // impact 8 -> 1.0 * 0.4 = 0.4 is the only contribution; effortInv is 0.0
-            PriorityScore score = calculator.score(factors(E1, null, 8, 0.0, null), 0.0);
+            // impact 5 -> 1.0 * 0.4 = 0.4 is the only contribution; effortInv is 0.0
+            PriorityScore score = calculator.score(factors(E1, null, 5, 0.0, null), 0.0);
 
             assertThat(score.score()).isCloseTo(0.4, within(EPS));
             assertThat(score.effortInv()).isCloseTo(0.0, within(EPS));
@@ -168,7 +168,7 @@ class PriorityScoreCalculatorTest {
         void orders_by_descending_score() {
             List<ExecutableFactors> input = List.of(
                 factors(E1, null, 1, 0.0, 5.0),   // P = 0.0
-                factors(E2, null, 8, 6.0, 0.0),   // P = 0.4 + 0.3 + 0.1 = 0.8
+                factors(E2, null, 5, 6.0, 0.0),   // P = 0.4 + 0.3 + 0.1 = 0.8
                 factors(E3, null, 4, 3.0, 3.0));  // middle
 
             List<PriorityScore> ranked = calculator.rank(input, Map.of());
@@ -196,7 +196,7 @@ class PriorityScoreCalculatorTest {
         void no_mci_active_alignment_is_neutral() {
             List<ExecutableFactors> input = List.of(
                 factors(E1, MCI_CYCLE, 4, 3.0, 3.0),
-                factors(E2, null, 8, 6.0, 0.0));
+                factors(E2, null, 5, 6.0, 0.0));
 
             List<PriorityScore> ranked = calculator.rank(input, Map.of());
 

@@ -116,9 +116,9 @@ class NotionWriteBackIT {
         assertThat(props.path("Priority Score").path("number").asDouble()).isEqualTo(0.8);
         assertThat(props.path("Urgence").path("number").asDouble()).isEqualTo(0.6);
         assertThat(props.path("Effort").path("number").asDouble()).isEqualTo(2.5);
-        assertThat(props.path("Energy").path("select").path("name").asText()).isEqualTo("Intenso");
-        assertThat(props.path("Mental Load").path("select").path("name").asText()).isEqualTo("Rutinario");
-        assertThat(props.path("Impact").path("select").path("name").asText()).isEqualTo("Alto");
+        assertThat(props.path("Energy").path("select").path("name").asText()).isEqualTo("Intense");
+        assertThat(props.path("Mental Load").path("select").path("name").asText()).isEqualTo("Routine");
+        assertThat(props.path("Impact").path("select").path("name").asText()).isEqualTo("High");
         assertThat(props.path("Date").path("date").path("start").asText()).isNotBlank();
 
         // And the sync_mapping closes synchronously with the normalized page_id (no result queue)

@@ -252,7 +252,7 @@ class NotionTaskSyncServiceTest {
                                        OffsetDateTime editedAt) {
         return new NotionTaskPage(PAGE_ID, editedAt, false,
             name, "Detailed description", status, complete, "Task",
-            null, null, 0.8, 0.6, 2.5, null, null, "Alto", "Intenso", "Rutinario",
+            null, null, 0.8, 0.6, 2.5, null, null, "High", "Intense", "Routine",
             CYCLE_PAGE_ID, null);
     }
 

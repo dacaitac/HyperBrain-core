@@ -198,9 +198,9 @@ class FocusAccountingIT {
         JsonNode props = objectMapper.readTree(patchA.getBodyAsString()).path("properties");
         assertThat(props.path("Effort").path("number").asDouble()).isEqualTo(3.5);
         assertThat(props.path("Effort").path("number").isNull()).isFalse();
-        assertThat(props.path("Energy").path("select").path("name").asText()).isEqualTo("Exigente");
-        assertThat(props.path("Mental Load").path("select").path("name").asText()).isEqualTo("Análisis");
-        assertThat(props.path("Impact").path("select").path("name").asText()).isEqualTo("Crítico");
+        assertThat(props.path("Energy").path("select").path("name").asText()).isEqualTo("Demanding");
+        assertThat(props.path("Mental Load").path("select").path("name").asText()).isEqualTo("Analysis");
+        assertThat(props.path("Impact").path("select").path("name").asText()).isEqualTo("Critical");
     }
 
     @Test

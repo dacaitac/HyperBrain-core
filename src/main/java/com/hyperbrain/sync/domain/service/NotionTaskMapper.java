@@ -35,7 +35,7 @@ import static java.util.Collections.singletonMap;
  *       (numbers; null → {@code number: null})</li>
  *   <li>{@code is_important} → {@code Important} (checkbox)</li>
  *   <li>{@code impact}/{@code energy_drain}/{@code mental_load} (execution profile) →
- *       {@code Impact}/{@code Energy}/{@code Mental Load} (selects, Spanish canonical options;
+ *       {@code Impact}/{@code Energy}/{@code Mental Load} (selects, English canonical options;
  *       null → {@code select: null})</li>
  *   <li>{@code cycle_id} → {@code Cycle}, {@code parent_id} → {@code Parent Task} (relations;
  *       unresolved or absent → empty relation list)</li>

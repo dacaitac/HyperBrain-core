@@ -34,7 +34,7 @@ class NotionTaskInboundMapperTest {
             "2026-07-07T10:00:00.000-05:00", "2026-07-07T11:30:00.000-05:00",
             0.8, 0.6, 2.5,
             true, 3.0,
-            "Alto", "Intenso", "Rutinario",
+            "High", "Intense", "Routine",
             "cycle000000000000000000000000001", "parent00000000000000000000000001");
 
         // When
@@ -88,10 +88,10 @@ class NotionTaskInboundMapperTest {
     @Test
     @DisplayName("scale selects map to their 1-based canonical index; unknown options map to null")
     void maps_scale_selects() {
-        assertThat(NotionTaskInboundMapper.scaleOf("Irrelevante", NotionSchema.IMPACT_OPTIONS)).isEqualTo(1);
-        assertThat(NotionTaskInboundMapper.scaleOf("Crítico", NotionSchema.IMPACT_OPTIONS)).isEqualTo(5);
-        assertThat(NotionTaskInboundMapper.scaleOf("Sostenido", NotionSchema.ENERGY_OPTIONS)).isEqualTo(3);
-        assertThat(NotionTaskInboundMapper.scaleOf("Foco", NotionSchema.MENTAL_LOAD_OPTIONS)).isEqualTo(2);
+        assertThat(NotionTaskInboundMapper.scaleOf("Irrelevant", NotionSchema.IMPACT_OPTIONS)).isEqualTo(1);
+        assertThat(NotionTaskInboundMapper.scaleOf("Critical", NotionSchema.IMPACT_OPTIONS)).isEqualTo(5);
+        assertThat(NotionTaskInboundMapper.scaleOf("Sustained", NotionSchema.ENERGY_OPTIONS)).isEqualTo(3);
+        assertThat(NotionTaskInboundMapper.scaleOf("Focus", NotionSchema.MENTAL_LOAD_OPTIONS)).isEqualTo(2);
         assertThat(NotionTaskInboundMapper.scaleOf("Inexistente", NotionSchema.IMPACT_OPTIONS)).isNull();
         assertThat(NotionTaskInboundMapper.scaleOf(null, NotionSchema.IMPACT_OPTIONS)).isNull();
     }

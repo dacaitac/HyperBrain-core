@@ -40,9 +40,9 @@ class NotionPageParserTest {
                 "Effort": { "type": "number", "number": 2.5 },
                 "Important": { "type": "checkbox", "checkbox": true },
                 "Frequency": { "type": "number", "number": 3.0 },
-                "Impact": { "type": "select", "select": { "name": "Alto" } },
-                "Energy": { "type": "select", "select": { "name": "Intenso" } },
-                "Mental Load": { "type": "select", "select": { "name": "Rutinario" } },
+                "Impact": { "type": "select", "select": { "name": "High" } },
+                "Energy": { "type": "select", "select": { "name": "Intense" } },
+                "Mental Load": { "type": "select", "select": { "name": "Routine" } },
                 "Cycle": { "type": "relation", "relation": [ { "id": "1bf8bc9c-5d91-81d8-82cf-e1f4aa38f295" } ] },
                 "Parent Task": { "type": "relation", "relation": [] }
               }
@@ -62,7 +62,7 @@ class NotionPageParserTest {
             "2026-07-07T10:00:00.000-05:00", "2026-07-07T11:30:00.000-05:00",
             0.8, 0.6, 2.5,
             true, 3.0,
-            "Alto", "Intenso", "Rutinario",
+            "High", "Intense", "Routine",
             "1bf8bc9c5d9181d882cfe1f4aa38f295", null));
     }
 

@@ -296,16 +296,16 @@ class NotionTaskMapperTest {
     }
 
     @Nested
-    @DisplayName("impact → Impact (select, Spanish canonical options)")
+    @DisplayName("impact → Impact (select, English canonical options)")
     class Impact {
 
         @ParameterizedTest(name = "{0} → {1}")
         @CsvSource({
-            "1, Irrelevante",
-            "2, Bajo",
-            "3, Moderado",
-            "4, Alto",
-            "5, Crítico"
+            "1, Irrelevant",
+            "2, Low",
+            "3, Moderate",
+            "4, High",
+            "5, Critical"
         })
         @DisplayName("maps the 1–5 scale to its option")
         void maps_impact(int impact, String option) {
@@ -314,10 +314,13 @@ class NotionTaskMapperTest {
         }
 
         @Test
-        @DisplayName("clamps the DDL upper bound (8) to Crítico")
-        void clamps_overflow() {
-            assertThat(selectName(map(snapshot().impact(8).build()), "Impact"))
-                .isEqualTo("Crítico");
+        @DisplayName("the DDL top of domain (5) maps to Critical; the clamp stays as defense (value ≥ 5 → Critical)")
+        void clamps_at_domain_top() {
+            assertThat(selectName(map(snapshot().impact(5).build()), "Impact"))
+                .isEqualTo("Critical");
+            // Defensive: a value beyond the 1–5 domain still degrades to the top option, never throws.
+            assertThat(selectName(map(snapshot().impact(6).build()), "Impact"))
+                .isEqualTo("Critical");
         }
 
         @Test
@@ -329,16 +332,16 @@ class NotionTaskMapperTest {
     }
 
     @Nested
-    @DisplayName("energy_drain → Energy (select, Spanish canonical options)")
+    @DisplayName("energy_drain → Energy (select, English canonical options)")
     class Energy {
 
         @ParameterizedTest(name = "{0} → {1}")
         @CsvSource({
-            "1, Automático",
-            "2, Ejecución",
-            "3, Sostenido",
-            "4, Exigente",
-            "5, Intenso"
+            "1, Automatic",
+            "2, Execution",
+            "3, Sustained",
+            "4, Demanding",
+            "5, Intense"
         })
         @DisplayName("maps the 1–5 scale to its option")
         void maps_energy(int energy, String option) {
@@ -355,16 +358,16 @@ class NotionTaskMapperTest {
     }
 
     @Nested
-    @DisplayName("mental_load → Mental Load (select, Spanish canonical options)")
+    @DisplayName("mental_load → Mental Load (select, English canonical options)")
     class MentalLoad {
 
         @ParameterizedTest(name = "{0} → {1}")
         @CsvSource({
-            "1, Rutinario",
-            "2, Foco",
-            "3, Análisis",
-            "4, Complejo",
-            "5, Abstracto"
+            "1, Routine",
+            "2, Focus",
+            "3, Analysis",
+            "4, Complex",
+            "5, Abstract"
         })
         @DisplayName("maps the 1–5 scale to its option")
         void maps_mental_load(int mentalLoad, String option) {

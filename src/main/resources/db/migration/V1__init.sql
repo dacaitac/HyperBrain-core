@@ -104,7 +104,8 @@ CREATE TABLE core_execution_profile (
     estimated_minutes  INTEGER,
     energy_drain       INTEGER CHECK (energy_drain IS NULL OR energy_drain BETWEEN 1 AND 5),
     mental_load        INTEGER CHECK (mental_load IS NULL OR mental_load BETWEEN 1 AND 5),
-    impact             INTEGER CHECK (impact IS NULL OR impact BETWEEN 1 AND 8),
+    -- Mirrors HyperBrain-Infra impact scale reconciliation (ordinal 1–5, Notion 5-level select)
+    impact             INTEGER CHECK (impact IS NULL OR impact BETWEEN 1 AND 5),
     context_location   TEXT    CHECK (context_location IS NULL OR
                                       context_location IN ('CASA', 'OFICINA', 'RECADOS', 'ANY'))
 );

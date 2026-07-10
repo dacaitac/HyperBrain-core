@@ -243,7 +243,7 @@ class SourceAwareMergeTest {
             assertThat(SourceAwareMerge.mergeScale(3, null, NotionSchema.ENERGY_OPTIONS)).isNull();
             assertThat(SourceAwareMerge.mergeScale(3, "???", NotionSchema.ENERGY_OPTIONS)).isEqualTo(3);
             assertThat(SourceAwareMerge.mergeScale(null, "???", NotionSchema.ENERGY_OPTIONS)).isNull();
-            assertThat(SourceAwareMerge.mergeScale(3, "Intenso", NotionSchema.ENERGY_OPTIONS)).isEqualTo(5);
+            assertThat(SourceAwareMerge.mergeScale(3, "Intense", NotionSchema.ENERGY_OPTIONS)).isEqualTo(5);
         }
 
         @Test
