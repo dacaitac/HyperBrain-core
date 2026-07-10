@@ -216,6 +216,7 @@ class E2ETransversalIT {
     @DisplayName("B1 — Notion TASK created triggers REMINDER CREATED WriteCommand to Apple (E2E-B1)")
     void notion_task_created_triggers_apple_reminder() throws Exception {
         String pageId = newPageId();
+        stubPatchPage(pageId);
 
         consumer.onMessage(notionAutomation(pageId, taskPage(pageId, "E2E task B1", "Not started", false)));
         outboxWorker.drainBatch();
@@ -227,8 +228,11 @@ class E2ETransversalIT {
         assertThat(cmd.path("operation").asText()).isEqualTo("CREATED");
         assertThat(cmd.path("payload").path("title").asText()).isEqualTo("E2E task B1");
         assertThat(cmd.path("entity_id").isNull()).isTrue();
-        // Loop protection: Notion WireMock received no calls (RF-17)
-        assertThat(NOTION.getAllServeEvents()).isEmpty();
+        // Loop protection (RF-17): the NOTION-origin event never bounces back. The only Notion write
+        // is the SYSTEM score reflection (#66a): the freshly persisted row's score reaches Notion via
+        // a single update-only PATCH — never a create.
+        assertThat(NOTION.findAll(postRequestedFor(urlPathEqualTo("/v1/pages")))).isEmpty();
+        assertThat(NOTION.findAll(patchRequestedFor(urlEqualTo("/v1/pages/" + pageId)))).hasSize(1);
         // NOTION sync_mapping was created
         assertThat(countNotionMappings()).isEqualTo(1);
     }
@@ -243,6 +247,7 @@ class E2ETransversalIT {
         insertNotionMapping(localId, pageId);
         insertAppleMapping(localId, appleEntityId);
 
+        stubPatchPage(pageId);
         consumer.onMessage(notionAutomation(pageId, taskPage(pageId, "Updated title B2", "In progress", false)));
         outboxWorker.drainBatch();
 
@@ -251,7 +256,8 @@ class E2ETransversalIT {
         JsonNode cmd = objectMapper.readTree(msg.getPayload());
         assertThat(cmd.path("operation").asText()).isEqualTo("UPDATED");
         assertThat(cmd.path("entity_id").asText()).isEqualTo(appleEntityId);
-        assertThat(NOTION.getAllServeEvents()).isEmpty();
+        // RF-17: the NOTION event never bounces; the only Notion write is the SYSTEM score reflection
+        assertThat(NOTION.findAll(postRequestedFor(urlPathEqualTo("/v1/pages")))).isEmpty();
     }
 
     @Test
@@ -264,6 +270,7 @@ class E2ETransversalIT {
         insertNotionMapping(localId, pageId);
         insertAppleMapping(localId, appleEntityId);
 
+        stubPatchPage(pageId);
         consumer.onMessage(notionAutomation(pageId, taskPage(pageId, "Task B3", "Done", true)));
         outboxWorker.drainBatch();
 
@@ -273,7 +280,8 @@ class E2ETransversalIT {
         assertThat(cmd.path("operation").asText()).isEqualTo("UPDATED");
         assertThat(cmd.path("entity_id").asText()).isEqualTo(appleEntityId);
         assertThat(cmd.path("payload").path("completed").asBoolean()).isTrue();
-        assertThat(NOTION.getAllServeEvents()).isEmpty();
+        // RF-17: the NOTION event never bounces; the only Notion write is the SYSTEM score reflection
+        assertThat(NOTION.findAll(postRequestedFor(urlPathEqualTo("/v1/pages")))).isEmpty();
     }
 
     @Test

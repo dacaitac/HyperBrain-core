@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.application;
 
 import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -31,7 +32,10 @@ import java.util.UUID;
  * <p>Same pipeline as {@link ReminderEventHandler} (HU-09 + ADR-012): parse → checksum →
  * source-aware merge (Apple authority: name, notes, start/end, calendar; status and type are
  * kept — EventKit events carry no completed flag and {@code AGENDA} stays {@code AGENDA}) →
- * {@link DomainChangeProcessor} → single persist + Outbox.
+ * {@link DomainChangeProcessor} → single persist → post-upsert priority reflection via
+ * {@link OnIngestionPriorityReflector} (#66a, ADR-020 D2) → Outbox. For this APPLE origin the
+ * reflector stages no SYSTEM event; the APPLE event carries the fresh score to Notion (see
+ * {@link ReminderEventHandler}).
  */
 @Component
 public class CalendarEventHandler implements IEventHandler {
@@ -47,6 +51,7 @@ public class CalendarEventHandler implements IEventHandler {
     private final SyncMappingRepository syncMappingRepo;
     private final OutboxRepository outboxRepo;
     private final DomainChangeProcessor domainChangeProcessor;
+    private final OnIngestionPriorityReflector priorityReflector;
     private final PayloadParser payloadParser;
     private final UUID defaultUserId;
 
@@ -56,6 +61,7 @@ public class CalendarEventHandler implements IEventHandler {
         SyncMappingRepository syncMappingRepo,
         OutboxRepository outboxRepo,
         DomainChangeProcessor domainChangeProcessor,
+        OnIngestionPriorityReflector priorityReflector,
         PayloadParser payloadParser,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
@@ -64,6 +70,7 @@ public class CalendarEventHandler implements IEventHandler {
         this.syncMappingRepo = syncMappingRepo;
         this.outboxRepo = outboxRepo;
         this.domainChangeProcessor = domainChangeProcessor;
+        this.priorityReflector = priorityReflector;
         this.payloadParser = payloadParser;
         this.defaultUserId = defaultUserId;
     }
@@ -105,6 +112,9 @@ public class CalendarEventHandler implements IEventHandler {
         ExecutableSnapshot processed =
             domainChangeProcessor.process(current, merged, ExternalSystem.APPLE);
         executableRepo.upsert(processed);
+        // Score the persisted merged row (ADR-020, D2). For an APPLE origin the reflector stages no
+        // extra event: the CalendarEventSyncedEvent below already carries the fresh score to Notion.
+        priorityReflector.reflect(executableId, ExternalSystem.APPLE);
 
         if (existing.isEmpty()) {
             syncMappingRepo.insert(buildSyncMapping(executableId, event.entityId(), checksum));

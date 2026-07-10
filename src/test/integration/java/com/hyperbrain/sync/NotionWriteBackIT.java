@@ -307,6 +307,26 @@ class NotionWriteBackIT {
     }
 
     @Test
+    @DisplayName("#66a IT-d: a SYSTEM score reflection on an unmapped executable creates no Notion page (regression 9921c80)")
+    void system_reflection_on_unmapped_executable_creates_no_page() {
+        // Given an executable with no Notion sync_mapping (e.g. an ACTIVITY that only lives in Apple)
+        // and a SYSTEM score reflection event — the update-only path must not fabricate a page.
+        UUID localId = insertExecutable("TASK", "TODO");
+        insertOutboxEvent(localId, "CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM");
+        stubCreatePage(TASKS_DS, "7f000000000000000000000000000000");
+
+        // When the outbox drains
+        outboxWorker.drainBatch();
+
+        // Then createPage was never invoked and no mapping was fabricated; the event still completes
+        assertThat(NOTION.findAll(postRequestedFor(urlPathEqualTo("/v1/pages")))).isEmpty();
+        Integer mappings = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_mappings WHERE local_id = ?", Integer.class, localId);
+        assertThat(mappings).isZero();
+        assertThat(unprocessedEvents()).isZero();
+    }
+
+    @Test
     @DisplayName("AGENDA entities do propagate to Notion (ADR-009 applies only to Apple)")
     void agenda_propagates_to_notion() {
         // Given an AGENDA executable (read-only towards Apple, visible in Notion)

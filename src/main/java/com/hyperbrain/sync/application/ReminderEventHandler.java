@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.application;
 
 import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -36,10 +37,16 @@ import java.util.UUID;
  *   <li>On CREATED/UPDATED: if the checksum matches the stored one, discard silently;
  *       otherwise merge the payload onto the current row ({@link SourceAwareMerge}, Apple
  *       authority fields only), run the {@link DomainChangeProcessor} and persist the final
- *       state once, then write to the Transactional Outbox.
+ *       state once, delegate the post-upsert priority reflection to
+ *       {@link OnIngestionPriorityReflector} (#66a), then write to the Transactional Outbox.
  *   <li>On DELETED: remove both {@code core_executable} and {@code sync_mappings}, then
  *       append a deletion event to the Outbox.
  * </ol>
+ *
+ * <p>The reflector rescores <b>after</b> the upsert (ADR-020, D2) so the Prioritizer scores the
+ * persisted merged state, not the stale pre-merge one. For this APPLE origin it stages no extra
+ * SYSTEM event: the {@code ReminderSyncedEvent} already carries {@code source_system=APPLE}, which
+ * the Notion propagator re-reads post-commit and mirrors — the fresh score rides that event.
  *
  * <p>All writes happen inside the ingestion transaction started by
  * {@code SyncEventIngestionService} — rolling back on any exception lets SQS redeliver.
@@ -58,6 +65,7 @@ public class ReminderEventHandler implements IEventHandler {
     private final SyncMappingRepository syncMappingRepo;
     private final OutboxRepository outboxRepo;
     private final DomainChangeProcessor domainChangeProcessor;
+    private final OnIngestionPriorityReflector priorityReflector;
     private final PayloadParser payloadParser;
     private final UUID defaultUserId;
 
@@ -67,6 +75,7 @@ public class ReminderEventHandler implements IEventHandler {
         SyncMappingRepository syncMappingRepo,
         OutboxRepository outboxRepo,
         DomainChangeProcessor domainChangeProcessor,
+        OnIngestionPriorityReflector priorityReflector,
         PayloadParser payloadParser,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
@@ -75,6 +84,7 @@ public class ReminderEventHandler implements IEventHandler {
         this.syncMappingRepo = syncMappingRepo;
         this.outboxRepo = outboxRepo;
         this.domainChangeProcessor = domainChangeProcessor;
+        this.priorityReflector = priorityReflector;
         this.payloadParser = payloadParser;
         this.defaultUserId = defaultUserId;
     }
@@ -116,6 +126,9 @@ public class ReminderEventHandler implements IEventHandler {
         ExecutableSnapshot processed =
             domainChangeProcessor.process(current, merged, ExternalSystem.APPLE);
         executableRepo.upsert(processed);
+        // Score the persisted merged row (ADR-020, D2). For an APPLE origin the reflector stages no
+        // extra event: the ReminderSyncedEvent below already carries the fresh score to Notion.
+        priorityReflector.reflect(executableId, ExternalSystem.APPLE);
 
         if (existing.isEmpty()) {
             syncMappingRepo.insert(buildSyncMapping(executableId, event.entityId(), checksum));

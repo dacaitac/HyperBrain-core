@@ -2,6 +2,7 @@ package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -43,7 +44,11 @@ import java.util.UUID;
  *
  * <p>Every write appends to the Transactional Outbox with {@code source_system=NOTION}: the
  * Apple propagator picks it up for ACTIVITY/TASK write-back (HU-09c) while the Notion
- * propagator's loop protection ignores it (RF-17). Runs inside the caller's ingestion
+ * propagator's loop protection ignores it (RF-17). After the upsert it delegates to
+ * {@link OnIngestionPriorityReflector} to recompute the Priority Score on the persisted merged row
+ * (#66a, ADR-020) and, for this NOTION origin, stage the SYSTEM reflection when the score moved — the
+ * NOTION event alone cannot reach Notion, since the propagator ignores its own origin. All appends
+ * share the one ingestion transaction (Transactional Outbox). Runs inside the caller's ingestion
  * transaction.
  */
 @Service
@@ -62,6 +67,7 @@ public class NotionTaskSyncService {
     private final OutboxRepository outboxRepo;
     private final NotionCycleSyncService cycleSyncService;
     private final DomainChangeProcessor domainChangeProcessor;
+    private final OnIngestionPriorityReflector priorityReflector;
     private final ObjectMapper objectMapper;
     private final UUID defaultUserId;
 
@@ -72,6 +78,7 @@ public class NotionTaskSyncService {
         OutboxRepository outboxRepo,
         NotionCycleSyncService cycleSyncService,
         DomainChangeProcessor domainChangeProcessor,
+        OnIngestionPriorityReflector priorityReflector,
         ObjectMapper objectMapper,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
@@ -81,6 +88,7 @@ public class NotionTaskSyncService {
         this.outboxRepo = outboxRepo;
         this.cycleSyncService = cycleSyncService;
         this.domainChangeProcessor = domainChangeProcessor;
+        this.priorityReflector = priorityReflector;
         this.objectMapper = objectMapper;
         this.defaultUserId = defaultUserId;
     }
@@ -136,6 +144,9 @@ public class NotionTaskSyncService {
         appendOutbox(localId, page.pageId(), snapshot.type(),
             operation == Operation.CREATED ? "ExecutableCreatedEvent" : "ExecutableUpdatedEvent",
             operation);
+        // Recompute the priority on the just-upserted merged row; a NOTION-origin move needs a SYSTEM
+        // reflection to reach Notion past the loop guard — the reflector decides that by origin.
+        priorityReflector.reflect(localId, ExternalSystem.NOTION);
         log.info("TASK page {} ({}) persisted as executable {}", page.pageId(), operation, localId);
         return operation == Operation.CREATED ? SyncOutcome.CREATED : SyncOutcome.UPDATED;
     }

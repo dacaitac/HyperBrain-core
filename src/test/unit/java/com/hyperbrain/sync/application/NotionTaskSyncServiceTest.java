@@ -2,6 +2,8 @@ package com.hyperbrain.sync.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
+import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
@@ -51,6 +53,7 @@ class NotionTaskSyncServiceTest {
     @Mock private SyncMappingRepository syncMappingRepo;
     @Mock private OutboxRepository outboxRepo;
     @Mock private NotionCycleSyncService cycleSyncService;
+    @Mock private OnIngestionPriorityReflector priorityReflector;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private NotionTaskSyncService service;
@@ -59,7 +62,7 @@ class NotionTaskSyncServiceTest {
     void setUp() {
         service = new NotionTaskSyncService(executableRepo, snapshotRepo, syncMappingRepo,
             outboxRepo, cycleSyncService, new EndTimeInvariantRule()::apply,
-            objectMapper, USER_ID);
+            priorityReflector, objectMapper, USER_ID);
     }
 
     @Test
@@ -120,6 +123,9 @@ class NotionTaskSyncServiceTest {
         ArgumentCaptor<OutboxEvent> outbox = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo).append(outbox.capture());
         assertThat(outbox.getValue().eventType()).isEqualTo("ExecutableUpdatedEvent");
+        // #66a: the post-upsert priority reflection is delegated to the shared reflector with the
+        // NOTION origin; whether a SYSTEM event follows is the reflector's decision (tested there).
+        verify(priorityReflector).reflect(LOCAL_ID, ExternalSystem.NOTION);
     }
 
     @Test

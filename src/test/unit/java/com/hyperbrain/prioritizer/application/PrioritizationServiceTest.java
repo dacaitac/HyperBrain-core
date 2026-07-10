@@ -25,6 +25,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static java.util.Collections.emptySet;
 
 @DisplayName("PrioritizationService (#66a rescore + reprioritizeToday)")
 class PrioritizationServiceTest {
@@ -53,16 +54,41 @@ class PrioritizationServiceTest {
             .thenReturn(Optional.of(new ExecutableFactors(E1, null, 5, 3.0, 0.0)));
         when(repository.saveScores(anyList())).thenReturn(Set.of(E1));
 
-        Optional<PriorityScore> result = service.rescore(E1);
+        RescoreResult result = service.rescore(E1);
 
-        assertThat(result).isPresent();
-        assertThat(result.get().score()).isCloseTo(0.4 + 0.15 + 0.1, within(EPS));
-        assertThat(result.get().urgency()).isCloseTo(3.0, within(EPS)); // raw, surfaced for persistence
+        assertThat(result.score()).isPresent();
+        assertThat(result.score().get().score()).isCloseTo(0.4 + 0.15 + 0.1, within(EPS));
+        assertThat(result.score().get().urgency()).isCloseTo(3.0, within(EPS)); // raw, for persistence
 
         ArgumentCaptor<List<PriorityScore>> saved = captor();
         verify(repository).saveScores(saved.capture());
         assertThat(saved.getValue()).singleElement()
             .satisfies(s -> assertThat(s.executableId()).isEqualTo(E1));
+    }
+
+    @Test
+    @DisplayName("rescore: reports moved=true when saveScores persisted the row (score crossed the epsilon)")
+    void rescore_reports_moved_when_persisted() {
+        when(repository.findFactors(E1))
+            .thenReturn(Optional.of(new ExecutableFactors(E1, null, 5, 3.0, 0.0)));
+        when(repository.saveScores(anyList())).thenReturn(Set.of(E1));
+
+        RescoreResult result = service.rescore(E1);
+
+        assertThat(result.moved()).isTrue();
+    }
+
+    @Test
+    @DisplayName("rescore: reports moved=false when saveScores found no change within the epsilon")
+    void rescore_reports_not_moved_when_unchanged() {
+        when(repository.findFactors(E1))
+            .thenReturn(Optional.of(new ExecutableFactors(E1, null, 5, 3.0, 0.0)));
+        when(repository.saveScores(anyList())).thenReturn(emptySet());
+
+        RescoreResult result = service.rescore(E1);
+
+        assertThat(result.score()).isPresent();
+        assertThat(result.moved()).isFalse();
     }
 
     @Test
@@ -76,20 +102,21 @@ class PrioritizationServiceTest {
                 CycleType.MCI, List.of(new AncestorLink(CycleType.MCI, 0)))));
         when(repository.saveScores(anyList())).thenReturn(Set.of(E1));
 
-        Optional<PriorityScore> result = service.rescore(E1);
+        RescoreResult result = service.rescore(E1);
 
-        assertThat(result).isPresent();
-        assertThat(result.get().score()).isCloseTo(0.2, within(EPS));
+        assertThat(result.score()).isPresent();
+        assertThat(result.score().get().score()).isCloseTo(0.2, within(EPS));
     }
 
     @Test
-    @DisplayName("rescore: a row with no priority signal is a no-op (empty, never persisted)")
+    @DisplayName("rescore: a row with no priority signal is a no-op (no-signal, never persisted)")
     void rescore_missing_row_is_noop() {
         when(repository.findFactors(E1)).thenReturn(Optional.empty());
 
-        Optional<PriorityScore> result = service.rescore(E1);
+        RescoreResult result = service.rescore(E1);
 
-        assertThat(result).isEmpty();
+        assertThat(result.score()).isEmpty();
+        assertThat(result.moved()).isFalse();
         verify(repository, never()).saveScores(anyList());
     }
 

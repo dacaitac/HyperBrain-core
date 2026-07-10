@@ -1,6 +1,7 @@
 package com.hyperbrain.sync.application;
 
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
+import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.EntityType;
@@ -36,6 +37,7 @@ class CalendarEventHandlerTest {
     private SyncSnapshotRepository snapshotRepo;
     private SyncMappingRepository syncMappingRepo;
     private OutboxRepository outboxRepo;
+    private OnIngestionPriorityReflector priorityReflector;
     private CalendarEventHandler handler;
 
     private static final UUID USER_ID =
@@ -47,9 +49,10 @@ class CalendarEventHandlerTest {
         snapshotRepo = mock(SyncSnapshotRepository.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
         outboxRepo = mock(OutboxRepository.class);
+        priorityReflector = mock(OnIngestionPriorityReflector.class);
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
         handler = new CalendarEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
-            outboxRepo, new EndTimeInvariantRule()::apply, parser, USER_ID);
+            outboxRepo, new EndTimeInvariantRule()::apply, priorityReflector, parser, USER_ID);
     }
 
     @Test

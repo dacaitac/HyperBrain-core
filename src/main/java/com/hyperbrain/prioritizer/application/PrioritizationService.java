@@ -39,19 +39,19 @@ public class PrioritizationService implements PrioritizerService {
 
     @Override
     @Transactional
-    public Optional<PriorityScore> rescore(UUID executableId) {
+    public RescoreResult rescore(UUID executableId) {
         Optional<ExecutableFactors> factors = repository.findFactors(executableId);
         if (factors.isEmpty()) {
-            return Optional.empty();
+            return RescoreResult.noSignal();
         }
         double alignment = resolveAlignment(factors.get().cycleId());
         PriorityScore score = calculator.score(factors.get(), alignment);
-        Set<UUID> changed = repository.saveScores(List.of(score));
+        boolean moved = repository.saveScores(List.of(score)).contains(executableId);
         if (log.isDebugEnabled()) {
-            log.debug("Rescored executable {} -> priority {}, urgency {} (changed: {})",
-                executableId, score.score(), score.urgency(), changed.contains(executableId));
+            log.debug("Rescored executable {} -> priority {}, urgency {} (moved: {})",
+                executableId, score.score(), score.urgency(), moved);
         }
-        return Optional.of(score);
+        return RescoreResult.scored(score, moved);
     }
 
     @Override

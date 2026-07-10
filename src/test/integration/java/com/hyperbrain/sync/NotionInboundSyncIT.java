@@ -5,8 +5,12 @@ import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
+import com.hyperbrain.sync.application.NotionTaskSyncService;
 import com.hyperbrain.sync.application.SyncEventIngestionService;
+import com.hyperbrain.sync.application.SyncOutcome;
+import com.hyperbrain.sync.domain.model.NotionTaskPage;
 import com.hyperbrain.sync.infrastructure.NotionEnvelopeNormalizer;
+import com.hyperbrain.sync.infrastructure.NotionPageParser;
 import com.hyperbrain.sync.infrastructure.SqsConsumer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,6 +28,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 /**
  * End-to-end tests of the Notion inbound sync (HU-14): real {@code NotionWebhookEnvelope}
@@ -74,6 +79,8 @@ class NotionInboundSyncIT {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private SyncEventIngestionService ingestionService;
     @Autowired private NotionEnvelopeNormalizer normalizer;
+    @Autowired private NotionTaskSyncService taskSyncService;
+    @Autowired private NotionPageParser pageParser;
 
     private SqsConsumer consumer;
 
@@ -110,11 +117,16 @@ class NotionInboundSyncIT {
         assertThat(row.get("status")).isEqualTo("TODO");
         assertThat((String) row.get("last_known_checksum")).hasSize(64);
 
-        // The outbox carries the CREATED event with source NOTION (Apple picks it up, HU-09c)
-        Map<String, Object> outbox = jdbcTemplate.queryForMap(
-            "SELECT event_type, source_system FROM outbox_events");
-        assertThat(outbox.get("event_type")).isEqualTo("ExecutableCreatedEvent");
-        assertThat(outbox.get("source_system")).isEqualTo("NOTION");
+        // The outbox carries the CREATED event with source NOTION (Apple picks it up, HU-09c).
+        Map<String, Object> notionEvent = jdbcTemplate.queryForMap(
+            "SELECT event_type, source_system FROM outbox_events WHERE source_system = 'NOTION'");
+        assertThat(notionEvent.get("event_type")).isEqualTo("ExecutableCreatedEvent");
+        assertThat(notionEvent.get("source_system")).isEqualTo("NOTION");
+        // The post-upsert recompute persists the row's first score (NULL -> 0 counts as a move), so a
+        // single SYSTEM reflection is staged so the domain-owned score reaches Notion (#66a).
+        Map<String, Object> systemEvent = jdbcTemplate.queryForMap(
+            "SELECT event_type, source_system FROM outbox_events WHERE source_system = 'SYSTEM'");
+        assertThat(systemEvent.get("event_type")).isEqualTo("ExecutableUpdatedEvent");
     }
 
     @Test
@@ -269,10 +281,15 @@ class NotionInboundSyncIT {
         Integer processed = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM processed_message", Integer.class);
         assertThat(processed).isEqualTo(6);
-        // Outbox carries only the net changes: 1 CREATE + 4 UPDATEs
-        Integer outbox = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events", Integer.class);
-        assertThat(outbox).isEqualTo(5);
+        // Outbox carries only the net NOTION changes: 1 CREATE + 4 UPDATEs
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION'", Integer.class);
+        assertThat(notionEvents).isEqualTo(5);
+        // Only the first edit moves the score (NULL -> 0 on the freshly persisted row); the four
+        // rename-only edits leave the impact-less score at 0, so exactly one SYSTEM reflection (#66a)
+        Integer systemEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'SYSTEM'", Integer.class);
+        assertThat(systemEvents).isEqualTo(1);
     }
 
     @Test
@@ -305,13 +322,13 @@ class NotionInboundSyncIT {
     @Test
     @DisplayName("#66a — on-event ingestion recomputes and persists the Priority Score of the mapped row")
     void ingestion_recomputes_priority_score() {
-        // Given a task carrying an Impact (so the recomputed priority is > 0). The score is computed
-        // lazily on the first re-ingest of the now-persisted row (CREATE persists after the rules).
+        // Given a task carrying an Impact (so the recomputed priority is > 0). The score is now scored
+        // on the persisted merged row after the upsert (ADR-020, D2), on the CREATE itself.
         String pageId = newPageId();
         deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored", "2026-07-07T15:00:00.000Z",
             "Critical"));
 
-        // When a later edit re-ingests the persisted row (the rule scores the merged state)
+        // When a later edit re-ingests the persisted row (scored again on the merged state)
         deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored again",
             "2026-07-07T15:05:00.000Z", "Critical"));
 
@@ -326,6 +343,79 @@ class NotionInboundSyncIT {
         // urgency is persisted raw on the 0-6 source scale (a TASK has no end boundary -> 0, DR-01)
         assertThat((Double) row.get("urgency_score")).isNotNull();
         assertThat(row.get("priority_computed_at")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("#66a IT-a — a Notion edit that moves the score stages exactly one SYSTEM reflection, never one per rule")
+    void moving_edit_stages_exactly_one_system_reflection() {
+        // Given a scored, mapped task (its score already settled on CREATE)
+        String pageId = newPageId();
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored", "2026-07-07T15:00:00.000Z",
+            "Low"));
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // When an edit moves the score (impact Low -> Critical changes the priority)
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored", "2026-07-07T15:05:00.000Z",
+            "Critical"));
+
+        // Then exactly one SYSTEM reflection is staged (the fan-out that produced ~8 is gone),
+        // alongside the single NOTION event for the Apple write-back
+        Integer systemEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'SYSTEM' AND aggregate_id = ?",
+            Integer.class, localId(pageId).toString());
+        assertThat(systemEvents).isEqualTo(1);
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION' AND aggregate_id = ?",
+            Integer.class, localId(pageId).toString());
+        assertThat(notionEvents).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("#66a IT-b — the recompute scores the merged (post-upsert) row, not the stale pre-merge one")
+    void recompute_scores_the_merged_state() {
+        // Given a task first ingested with a low impact, so its persisted score reflects impact Low
+        String pageId = newPageId();
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Task", "2026-07-07T15:00:00.000Z",
+            "Low"));
+        double lowImpactScore = persistedPriority(pageId);
+
+        // When an edit raises the impact to Critical
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Task", "2026-07-07T15:05:00.000Z",
+            "Critical"));
+
+        // Then the persisted score is the one for the MERGED impact (Critical), not the pre-merge Low.
+        // Against the pre-reorder code the rescore read the stale row and this stays at the Low score.
+        double criticalImpactScore = persistedPriority(pageId);
+        // Critical (5) -> impactN 1.0 * 0.4 = 0.4; Low (2) -> impactN 0.25 * 0.4 = 0.1
+        assertThat(criticalImpactScore).isGreaterThan(lowImpactScore);
+        assertThat(criticalImpactScore).isCloseTo(0.4, within(1e-9));
+    }
+
+    @Test
+    @DisplayName("#66a IT-c — the SYSTEM-mirrored snapshot (score in the page) echoes back as SKIPPED_ECHO on re-ingest")
+    void system_reflection_echo_is_discarded() {
+        // Given a scored, mapped task whose SYSTEM-owned score has settled in the DB
+        String pageId = newPageId();
+        deliverAutomation(pageId, impactfulTaskPage(pageId, "Scored", "2026-07-07T15:00:00.000Z",
+            "Critical"));
+        double priority = persistedPriority(pageId);
+        double urgency = persistedUrgency(pageId);
+
+        // When the SYSTEM propagator's write reaches Notion, the mapping checksum it stores includes
+        // the Priority Score / Urgence (they are in the canonical checksum). The first re-ingest of
+        // that mirrored page settles that score-inclusive checksum...
+        SyncOutcome mirrored = applyPage(mirrorPage(pageId, "Scored", "2026-07-07T15:04:00.000Z",
+            "Critical", priority, urgency));
+        assertThat(mirrored).isEqualTo(SyncOutcome.UPDATED);
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // ...so the identical echo that follows is discarded by checksum — the one-hop loop is closed.
+        // Were priority_score / urgency_score absent from the checksum, this echo would not converge.
+        SyncOutcome echo = applyPage(mirrorPage(pageId, "Scored", "2026-07-07T15:05:00.000Z",
+            "Critical", priority, urgency));
+
+        assertThat(echo).isEqualTo(SyncOutcome.SKIPPED_ECHO);
+        assertThat(countOutbox()).isZero();
     }
 
     @Test
@@ -394,9 +484,14 @@ class NotionInboundSyncIT {
             "SELECT count(*) FROM processed_message WHERE message_id = 'dup-1'", Integer.class);
         assertThat(processed).isEqualTo(1);
         assertThat(countExecutables()).isEqualTo(1);
-        Integer outbox = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events", Integer.class);
-        assertThat(outbox).isEqualTo(1);
+        // The single processed CREATE stages one NOTION event plus one SYSTEM score reflection (the
+        // freshly persisted row's NULL -> 0 score move, #66a); the redelivery is deduplicated.
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION'", Integer.class);
+        assertThat(notionEvents).isEqualTo(1);
+        Integer systemEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'SYSTEM'", Integer.class);
+        assertThat(systemEvents).isEqualTo(1);
     }
 
     @Test
@@ -508,6 +603,53 @@ class NotionInboundSyncIT {
             {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":true,
              "parent":{"type":"database_id","database_id":"%s"},"properties":{}}
             """.formatted(pageId, lastEditedTime, TASKS_DB);
+    }
+
+    /** The page a SYSTEM score reflection mirrors to Notion: Impact plus the domain-owned score pair. */
+    private String mirrorPage(String pageId, String name, String lastEditedTime, String impactOption,
+                              double priority, double urgency) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Status":{"type":"status","status":{"name":"Not started"}},
+               "Complete":{"type":"checkbox","checkbox":false},
+               "Type":{"type":"select","select":{"name":"Task"}},
+               "Impact":{"type":"select","select":{"name":"%s"}},
+               "Priority Score":{"type":"number","number":%s},
+               "Urgence":{"type":"number","number":%s}}}
+            """.formatted(pageId, lastEditedTime, TASKS_DB, name, impactOption, priority, urgency);
+    }
+
+    /** Parses one Tasks page and applies it directly, returning the sync decision. */
+    private SyncOutcome applyPage(String pageJson) {
+        try {
+            NotionTaskPage page = pageParser.parseTask(objectMapper.readTree(pageJson));
+            return taskSyncService.apply(page);
+        } catch (Exception ex) {
+            throw new IllegalStateException("Failed to apply page", ex);
+        }
+    }
+
+    private UUID localId(String pageId) {
+        return jdbcTemplate.queryForObject(
+            "SELECT local_id FROM sync_mappings WHERE external_system = 'NOTION' AND external_id = ?",
+            UUID.class, pageId);
+    }
+
+    private double persistedPriority(String pageId) {
+        return jdbcTemplate.queryForObject("""
+            SELECT e.priority_score FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, Double.class, pageId);
+    }
+
+    private double persistedUrgency(String pageId) {
+        return jdbcTemplate.queryForObject("""
+            SELECT e.urgency_score FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, Double.class, pageId);
     }
 
     private String mappedName(String pageId) {

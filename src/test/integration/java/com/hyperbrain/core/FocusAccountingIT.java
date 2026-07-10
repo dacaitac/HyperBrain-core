@@ -119,8 +119,17 @@ class FocusAccountingIT {
         // A carries a full execution profile — the cut must preserve every effort label
         seedProfile(taskA, 4, 3, 5);
 
-        activate(pageB, "Urgent fix", 1.0, "2026-07-08T11:00:00.000Z");
+        // Create B first, then clear the outbox so only the focus-switch's own SYSTEM events remain
+        // to be asserted — the setup activations' #66a score reflections (a separate, verified concern)
+        // are not part of what this DR-05/DR-06 test pins down.
+        deliverAutomation(pageB, taskPage(pageB, "Urgent fix", "Not started", 1.0, null,
+            "2026-07-08T09:00:00.000Z"));
         UUID taskB = localId(pageB);
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // Activating B cuts A (the focus switch)
+        deliverAutomation(pageB, taskPage(pageB, "Urgent fix", "In progress", 1.0, null,
+            "2026-07-08T11:00:00.000Z"));
 
         // A's block settled by the cut
         Map<String, Object> blockA = jdbcTemplate.queryForMap(

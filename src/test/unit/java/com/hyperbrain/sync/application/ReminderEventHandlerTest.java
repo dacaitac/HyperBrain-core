@@ -1,6 +1,8 @@
 package com.hyperbrain.sync.application;
 
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
+import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
+import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.EntityType;
@@ -36,6 +38,7 @@ class ReminderEventHandlerTest {
     private SyncSnapshotRepository snapshotRepo;
     private SyncMappingRepository syncMappingRepo;
     private OutboxRepository outboxRepo;
+    private OnIngestionPriorityReflector priorityReflector;
     private ReminderEventHandler handler;
 
     private static final UUID USER_ID =
@@ -47,9 +50,10 @@ class ReminderEventHandlerTest {
         snapshotRepo = mock(SyncSnapshotRepository.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
         outboxRepo = mock(OutboxRepository.class);
+        priorityReflector = mock(OnIngestionPriorityReflector.class);
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
         handler = new ReminderEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
-            outboxRepo, new EndTimeInvariantRule()::apply, parser, USER_ID);
+            outboxRepo, new EndTimeInvariantRule()::apply, priorityReflector, parser, USER_ID);
     }
 
     @Test
@@ -138,6 +142,9 @@ class ReminderEventHandlerTest {
         verify(syncMappingRepo).update(any(SyncMapping.class));
         verify(outboxRepo).append(any(OutboxEvent.class));
         verify(syncMappingRepo, never()).insert(any());
+        // #66a: the post-upsert priority reflection is delegated to the shared reflector with the
+        // APPLE origin (which stages no extra SYSTEM event — its own APPLE event carries the score).
+        verify(priorityReflector).reflect(localId, ExternalSystem.APPLE);
     }
 
     @Test
