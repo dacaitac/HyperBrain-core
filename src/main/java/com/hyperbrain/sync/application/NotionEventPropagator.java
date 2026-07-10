@@ -89,6 +89,22 @@ public class NotionEventPropagator implements IEventPropagator {
         "TaskCompletedEvent", Operation.UPDATED,
         "ExecutableDeletedEvent", Operation.DELETED);
 
+    /**
+     * Event types that reflect a change onto an executable that already exists and whose write-back
+     * must therefore be update-only: if the target has no {@code sync_mapping} yet, the entity was
+     * never mirrored here and the reflection is skipped rather than creating a spurious page.
+     *
+     * <p>This closes the score-reflection routes (#66a): the scheduled tick
+     * ({@code PriorityReflectionService}) and the on-event recalculation ride {@code
+     * ExecutableUpdatedEvent}, which fired mass creates for executables that legitimately have no
+     * Notion Tasks page (e.g. {@code ACTIVITY} calendar events). Across the codebase these two event
+     * types are only ever emitted for pre-existing entities, so update-only is always correct here;
+     * the genuine create paths use {@code ExecutableCreatedEvent} and the Apple {@code *SyncedEvent}s,
+     * which are unaffected.
+     */
+    private static final Set<String> UPDATE_ONLY_EXECUTABLE_EVENTS =
+        Set.of("ExecutableUpdatedEvent", "TaskCompletedEvent");
+
     private static final Map<String, Operation> SYNC_APPLE_EVENT_OPERATIONS = Map.of(
         "ReminderSyncedEvent", Operation.UPDATED,
         "CalendarEventSyncedEvent", Operation.UPDATED,
@@ -163,13 +179,14 @@ public class NotionEventPropagator implements IEventPropagator {
             return;
         }
 
+        boolean updateOnly = isExecutable && UPDATE_ONLY_EXECUTABLE_EVENTS.contains(event.eventType());
         try {
             if (operation == Operation.DELETED) {
                 propagateDelete(localId);
             } else if (isCycle) {
                 propagateCycleUpsert(event, localId);
             } else {
-                propagateExecutableUpsert(event, localId);
+                propagateExecutableUpsert(event, localId, updateOnly);
             }
         } catch (NotionApiException ex) {
             onPersistentFailure(localId, ex);
@@ -192,7 +209,7 @@ public class NotionEventPropagator implements IEventPropagator {
         }
     }
 
-    private void propagateExecutableUpsert(OutboxEvent event, UUID localId) {
+    private void propagateExecutableUpsert(OutboxEvent event, UUID localId, boolean updateOnly) {
         Optional<ExecutableSnapshot> snapshot = snapshotRepo.findExecutable(localId);
         if (snapshot.isEmpty()) {
             log.warn("Executable {} not found for outbox event {}; skipping Notion write-back",
@@ -204,11 +221,21 @@ public class NotionEventPropagator implements IEventPropagator {
                 localId);
             return;
         }
+        if (updateOnly && !isMapped(localId)) {
+            log.debug("Executable {} has no Notion mapping; update-only reflection skips create "
+                + "for event {}", localId, event.id());
+            return;
+        }
         String cycleExternalId = resolveCycleRelation(snapshot.get().cycleId());
         String parentExternalId = resolveMappedExternalId(snapshot.get().parentId());
         Map<String, Object> props =
             NotionTaskMapper.map(snapshot.get(), cycleExternalId, parentExternalId);
         upsertPage(localId, snapshot.get().userId(), properties.getTasksDataSourceId(), props);
+    }
+
+    /** Returns whether the executable already has a Notion page (a {@code sync_mapping} row). */
+    private boolean isMapped(UUID localId) {
+        return syncMappingRepo.findByExternalSystemAndLocalId(EXTERNAL_SYSTEM, localId).isPresent();
     }
 
     private void propagateCycleUpsert(OutboxEvent event, UUID localId) {

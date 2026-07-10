@@ -268,18 +268,47 @@ class NotionEventPropagatorTest {
     }
 
     @Test
-    @DisplayName("UPDATE without mapping is treated as a new entity and creates the page")
-    void update_without_mapping_creates_page() {
-        // Given
+    @DisplayName("ExecutableUpdatedEvent without mapping is update-only: skipped, never created (#66a)")
+    void executable_updated_without_mapping_is_skipped() {
+        // Given a score-reflection tick (PriorityReflectionService) for an executable that has no
+        // Notion Tasks page — e.g. an ACTIVITY calendar event that was never mirrored here
         givenUnmappedExecutable(taskSnapshot("TODO"));
-        when(notion.createPage(eq(TASKS_DS), anyMap())).thenReturn("newpage");
 
         // When
         service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
 
+        // Then no page is created and no mapping is inserted — the reflection is dropped
+        verify(notion, never()).createPage(anyString(), anyMap());
+        verify(syncMappingRepo, never()).insert(any(SyncMapping.class));
+    }
+
+    @Test
+    @DisplayName("TaskCompletedEvent without mapping is update-only: skipped, never created (#66a)")
+    void task_completed_without_mapping_is_skipped() {
+        // Given
+        givenUnmappedExecutable(taskSnapshot("DONE"));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "TaskCompletedEvent", "SYSTEM"));
+
         // Then
-        verify(notion).createPage(eq(TASKS_DS), anyMap());
-        verify(syncMappingRepo).insert(any(SyncMapping.class));
+        verify(notion, never()).createPage(anyString(), anyMap());
+        verify(syncMappingRepo, never()).insert(any(SyncMapping.class));
+    }
+
+    @Test
+    @DisplayName("ExecutableUpdatedEvent with mapping still updates the existing page (#66a)")
+    void executable_updated_with_mapping_still_updates() {
+        // Given a score reflection for an executable that is already mirrored in Notion
+        givenExecutable(taskSnapshot("IN_PROGRESS"), mapping(LOCAL_ID, "page123", "old-checksum"));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
+
+        // Then the fresh score is patched onto the existing page; nothing is created
+        verify(notion).updatePage(eq("page123"), anyMap());
+        verify(notion, never()).createPage(anyString(), anyMap());
+        verify(syncMappingRepo).update(any(SyncMapping.class));
     }
 
     // ── DELETE (CA-5) ─────────────────────────────────────────────────────────
