@@ -1,9 +1,12 @@
 package com.hyperbrain.shared.outbox;
 
+import com.hyperbrain.shared.outbox.infrastructure.OutboxListenConnection;
 import com.hyperbrain.support.IntegrationTest;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
@@ -22,12 +25,20 @@ import static org.awaitility.Awaitility.await;
  * (overriding the integration-test profile default). Appending via {@link OutboxRepository}
  * emits NOTIFY outbox_drain in the same transaction as the INSERT — the drain must complete
  * within 500 ms without any active poll.
+ *
+ * <p>The listener is stopped in {@code @AfterAll}: this is the only cached context with a live
+ * LISTEN connection, and NOTIFY is database-wide — if it survived the class it would silently
+ * drain outbox rows staged by later manual-drain ITs (an APPLE-origin event is consumed with zero
+ * trace here: Apple suppressed by loop protection, Notion disabled), which raced
+ * {@code E2ETransversalIT}. {@code @DirtiesContext} is not an option: closing the context stops
+ * the shared static Testcontainers for the rest of the suite.
  */
 @IntegrationTest
 @TestPropertySource(properties = {
     "app.outbox.notify-listen-enabled=true",
     "app.outbox.scheduling-enabled=false"
 })
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @DisplayName("OutboxListenConnection — LISTEN/NOTIFY drain trigger")
 class OutboxListenNotifyIT {
 
@@ -36,6 +47,14 @@ class OutboxListenNotifyIT {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private OutboxListenConnection listenConnection;
+
+    @AfterAll
+    void stopListenerSoTheCachedContextCannotStealLaterOutboxRows() {
+        listenConnection.stop();
+    }
 
     @BeforeEach
     void cleanState() {

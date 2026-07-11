@@ -27,6 +27,16 @@ import java.util.UUID;
 public interface PlannerStateRepository {
 
     /**
+     * Reads the user's timezone ({@code sys_user.timezone}) as a {@link ZoneId}. User commands
+     * (HU-01b slice 2) resolve the local day and the sleep-day bounds through this instead of a
+     * hardcoded zone.
+     *
+     * @param userId the owning user; never null
+     * @return the user's zone; never null
+     */
+    ZoneId loadUserZone(UUID userId);
+
+    /**
      * Gathers the sleep-frontier samples: the local wake and bedtime times of day over the history
      * window, already filtered by the freshness guard, plus the {@code planner_constraints.sleep_window}
      * cold-start fallback from settings. The adapter converts each record's instants into local times

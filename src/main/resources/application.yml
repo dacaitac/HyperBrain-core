@@ -48,6 +48,7 @@ spring:
           ia-jobs:     ${SQS_QUEUE_IA_JOBS:ia-jobs}
           apple-commands:         ${SQS_QUEUE_APPLE_COMMANDS:apple-commands.fifo}
           apple-commands-results: ${SQS_QUEUE_APPLE_COMMANDS_RESULTS:apple-commands-results.fifo}
+          user-commands:          ${SQS_QUEUE_USER_COMMANDS:user-commands.fifo}
 
 app:
   sync:
@@ -80,6 +81,16 @@ app:
       # database_id (automations) or a data_source_id (subscription); both are matched.
       tasks-database-id: ${NOTION_TASKS_DATABASE_ID:1bf8bc9c5d91812b8c97e5e6450858aa}
       cycles-database-id: ${NOTION_CYCLES_DATABASE_ID:1bf8bc9c5d9181d882cfe1f4aa38f295}
+  user-commands:
+    consumer:
+      # Listener of user-commands.fifo (HU-01b slice 2: «calcular» button + Sleep Score input).
+      # Deploy-safe default OFF: a missing queue fails the listener container at startup, and the
+      # queue is not provisioned until the Infra rollout. Enable in prod via
+      # USER_COMMANDS_CONSUMER_ENABLED=true once user-commands.fifo (+ DLQ) exists.
+      enabled: ${USER_COMMANDS_CONSUMER_ENABLED:false}
+    # A REPLAN_AGENDA whose occurred_at is older than this bound (consumer backlog after downtime)
+    # is discarded with a WARN instead of replanning from a long-gone instant (Daniel, 2026-07-11).
+    replan-staleness-hours: 2
   outbox:
     # Primary drain trigger is LISTEN/NOTIFY (OutboxListenConnection). This poll runs as a
     # backup at a long interval to recover events that survived a connection drop or restart.

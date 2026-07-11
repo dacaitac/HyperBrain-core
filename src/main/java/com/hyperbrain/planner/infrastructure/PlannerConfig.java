@@ -13,6 +13,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.time.Clock;
+
 /**
  * Wires the framework-free planner domain services as Spring beans, keeping the
  * {@code planner.domain} package free of framework annotations (spike #63, #6a). The calibrable
@@ -68,5 +70,15 @@ class PlannerConfig {
     MorningTriggerCalculator morningTriggerCalculator(AgendaDeliveryProperties properties) {
         return new MorningTriggerCalculator(
             properties.leadOffsetMinutes(), properties.hysteresisMarginMinutes());
+    }
+
+    /**
+     * Wall clock for time-sensitive guards (e.g. the replan staleness bound in
+     * {@code UserCommandService}). A bean — not {@code OffsetDateTime.now()} inline — so tests can
+     * pin it with a fixed {@code @Primary} clock and stay deterministic.
+     */
+    @Bean
+    Clock clock() {
+        return Clock.systemUTC();
     }
 }

@@ -20,9 +20,15 @@ import org.testcontainers.utility.MountableFile;
  */
 public interface ContainersConfiguration {
 
+    // max_connections is raised above the PostgreSQL default (100): the Spring test framework
+    // caches one context per test-property permutation and each context holds an eager Hikari pool
+    // (10 connections), so the suite's cached contexts together exceed the default and later
+    // contexts fail with "FATAL: sorry, too many clients already". Test container only — the real
+    // DB is not affected.
     @Container
     @ServiceConnection
-    PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("pgvector/pgvector:pg16");
+    PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("pgvector/pgvector:pg16")
+        .withCommand("postgres", "-c", "max_connections=300");
 
     @Container
     @ServiceConnection

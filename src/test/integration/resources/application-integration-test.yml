@@ -26,6 +26,11 @@ app:
       enabled: false
     results-consumer:
       enabled: false
+  user-commands:
+    # Off by default for the same competing-listener reason; UserCommandConsumerIT switches it on
+    # via @TestPropertySource so exactly one context polls user-commands.fifo.
+    consumer:
+      enabled: false
   outbox:
     scheduling-enabled: false
     # OutboxListenConnection is off so OutboxWorkerIT can drive drainBatch() manually without

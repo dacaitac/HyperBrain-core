@@ -13,6 +13,8 @@ awslocal sqs create-queue --queue-name apple-commands.fifo \
   --attributes FifoQueue=true,ContentBasedDeduplication=false,VisibilityTimeout=5
 awslocal sqs create-queue --queue-name apple-commands-results.fifo \
   --attributes FifoQueue=true,ContentBasedDeduplication=false,VisibilityTimeout=5
+awslocal sqs create-queue --queue-name user-commands.fifo \
+  --attributes FifoQueue=true,ContentBasedDeduplication=false,VisibilityTimeout=5
 awslocal sqs create-queue --queue-name core-events \
   --attributes VisibilityTimeout=5
 awslocal sqs create-queue --queue-name ia-jobs \

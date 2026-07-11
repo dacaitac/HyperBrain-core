@@ -69,6 +69,11 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * is a whole-history gate: if the newest record is older than the bound, the guarded subquery
      * yields nothing and the caller falls back to settings. {@code end_time}/{@code start_time} are
      * projected to the user's local wall-clock so the circular median runs on times of day.
+     *
+     * <p>Manual score-only rows (HU-01b slice 2) carry {@code end_time IS NULL}: the sample filter
+     * drops them, and the freshness guard also ignores them ({@code fresh.end_time IS NOT NULL}) so
+     * a fresh manual score can never vouch for stale hour history — the frontier stays fed
+     * exclusively by records that observed real bedtime/wake instants.
      */
     private static final String SLEEP_SAMPLES_SQL = """
         SELECT EXTRACT(HOUR   FROM (s.end_time   AT TIME ZONE ?))::int * 60
@@ -82,18 +87,25 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND EXISTS (
               SELECT 1 FROM tel_sleep_record fresh
               WHERE fresh.user_id = s.user_id
+                AND fresh.end_time IS NOT NULL
               GROUP BY fresh.user_id
               HAVING max(fresh.collected_at) >= now() - make_interval(hours => ?)
           )
         """;
 
+    /**
+     * Last night's score for the energy resolution. Device precedence (Daniel, 2026-07-11):
+     * within the freshness bound, a record with real hours ({@code end_time IS NOT NULL}, e.g.
+     * future HealthKit) wins over a manual score-only marker even when the marker's
+     * {@code collected_at} is fresher — recency only breaks ties within the same class.
+     */
     private static final String LAST_NIGHT_SCORE_SQL = """
         SELECT s.sleep_score
         FROM tel_sleep_record s
         WHERE s.user_id = ?
           AND s.sleep_score IS NOT NULL
           AND s.collected_at >= now() - make_interval(hours => ?)
-        ORDER BY s.collected_at DESC
+        ORDER BY (s.end_time IS NOT NULL) DESC, s.collected_at DESC
         LIMIT 1
         """;
 
@@ -306,6 +318,11 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         this.learnedCostRepository = learnedCostRepository;
         this.learnedUnitCostCalculator = learnedUnitCostCalculator;
         this.constraints = constraints;
+    }
+
+    @Override
+    public ZoneId loadUserZone(UUID userId) {
+        return ZoneId.of(jdbcTemplate.queryForObject(TIMEZONE_SQL, String.class, userId));
     }
 
     @Override
