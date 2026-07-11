@@ -126,6 +126,9 @@ CREATE TABLE core_time_block (
     origin                   TEXT NOT NULL DEFAULT 'PLANNER'
                                  CHECK (origin IN ('PLANNER', 'FOCUS', 'USER')),
     planned_minutes          INTEGER,
+    -- Mirrors HyperBrain-Infra (HU-01b): the readable placement reason of a PLANNER block, carried
+    -- to the morning write-back so each iOS reminder explains why the block is there (legibilidad).
+    reason                   TEXT,
     settled_at               TIMESTAMPTZ,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );

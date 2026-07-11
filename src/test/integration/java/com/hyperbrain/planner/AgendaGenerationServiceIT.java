@@ -39,6 +39,7 @@ class AgendaGenerationServiceIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
         jdbcTemplate.update("DELETE FROM core_execution_profile");
         jdbcTemplate.update("UPDATE core_executable SET imputed_time_block_id = NULL");
@@ -183,6 +184,62 @@ class AgendaGenerationServiceIT {
             OffsetDateTime.class, task);
         // Wake observed at 05:00 lets the block start earlier than the 06:30 cold-start default would.
         assertThat(blockStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 5, 0, 0, 0, UTC));
+    }
+
+    @Test
+    @DisplayName("idempotent convergence: regenerating the day replaces the planner blocks, never accumulates")
+    void regeneration_replaces_blocks_without_duplicating() {
+        insertTask("High", 0.9, 60);
+        insertTask("Low", 0.3, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+        Integer afterFirst = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            Integer.class);
+
+        // A second run on the same day must converge to the same set, not double it.
+        service.generate(USER, DAY, UTC, NOON, false);
+        Integer afterSecond = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            Integer.class);
+
+        assertThat(afterFirst).isEqualTo(2);
+        assertThat(afterSecond).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("idempotent convergence: a FOCUS/USER block on the same day survives regeneration")
+    void regeneration_preserves_non_planner_blocks() {
+        UUID task = insertTask("High", 0.9, 60);
+        // A USER-origin block on the same day must not be cleared by the planner delete.
+        jdbcTemplate.update("""
+            INSERT INTO core_time_block (id, executable_id, date_start, date_end, status, origin)
+            VALUES (?, ?, ?, ?, 'PLANNED', 'USER')
+            """, UUID.randomUUID(), task,
+            OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 16, 0, 0, 0, UTC));
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        Integer userBlocks = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE origin = 'USER'", Integer.class);
+        assertThat(userBlocks).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("write-back staging: a planned day stages one AgendaBlockPlannedEvent on the outbox")
+    void planned_day_stages_agenda_block_event() {
+        insertTask("High", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        Integer events = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK' "
+                + "AND event_type = 'AgendaBlockPlannedEvent'", Integer.class);
+        assertThat(events).isEqualTo(1);
+        String aggregateId = jdbcTemplate.queryForObject(
+            "SELECT aggregate_id FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", String.class);
+        assertThat(aggregateId).isEqualTo(USER.toString());
     }
 
     @Test

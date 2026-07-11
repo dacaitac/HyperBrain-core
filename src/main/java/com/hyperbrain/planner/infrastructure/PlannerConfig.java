@@ -6,8 +6,10 @@ import com.hyperbrain.planner.domain.service.AgendaGenerator;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
+import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -19,6 +21,7 @@ import org.springframework.context.annotation.Configuration;
  * constant hard-coded in a service), falling back to the sanctioned defaults when settings carry none.
  */
 @Configuration
+@EnableConfigurationProperties(AgendaDeliveryProperties.class)
 class PlannerConfig {
 
     @Bean
@@ -59,5 +62,11 @@ class PlannerConfig {
     @Bean
     AgendaValidator agendaValidator() {
         return new AgendaValidator();
+    }
+
+    @Bean
+    MorningTriggerCalculator morningTriggerCalculator(AgendaDeliveryProperties properties) {
+        return new MorningTriggerCalculator(
+            properties.leadOffsetMinutes(), properties.hysteresisMarginMinutes());
     }
 }

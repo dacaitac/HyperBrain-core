@@ -37,3 +37,10 @@ app:
   prioritizer:
     # Tests drive reflectDailyReprioritization() deterministically (PriorityReflectionIT).
     scheduling-enabled: false
+  planner:
+    delivery:
+      # Tests drive dispatchIfDue() deterministically (MorningAgendaDispatchIT); scheduler off.
+      lead-offset-minutes:        10
+      hysteresis-margin-minutes:  15
+      trigger-tolerance-minutes:  5
+      scheduling-enabled: false

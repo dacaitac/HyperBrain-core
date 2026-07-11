@@ -6,6 +6,7 @@ import com.hyperbrain.planner.domain.model.LearnedUnitCost;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
@@ -19,6 +20,7 @@ import org.springframework.stereotype.Repository;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -255,8 +257,40 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
 
     private static final String INSERT_BLOCK_SQL = """
         INSERT INTO core_time_block
-            (id, executable_id, date_start, date_end, status, origin, planned_minutes)
-        VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?)
+            (id, executable_id, date_start, date_end, status, origin, planned_minutes, reason)
+        VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?, ?)
+        """;
+
+    /**
+     * Clears the day's regenerable planner blocks. Scoped to {@code PLANNED}/{@code PLANNER} rows in
+     * the {@code [dayStart, dayEnd)} instant range so a regeneration replaces them (idempotent
+     * convergence) while {@code FOCUS}/{@code USER} blocks and settled work survive.
+     */
+    private static final String DELETE_PLANNED_DAY_SQL = """
+        DELETE FROM core_time_block
+        WHERE executable_id IN (SELECT id FROM core_executable WHERE user_id = ?)
+          AND status = 'PLANNED'
+          AND origin = 'PLANNER'
+          AND date_start >= ?
+          AND date_start < ?
+        """;
+
+    /** Re-reads the day's persisted planner blocks with their executable names for the write-back. */
+    private static final String PLANNED_BLOCKS_FOR_DAY_SQL = """
+        SELECT b.id,
+               b.executable_id,
+               e.name AS executable_name,
+               b.date_start,
+               COALESCE(b.date_end, b.date_start + interval '1 minute') AS date_end,
+               b.reason
+        FROM core_time_block b
+        JOIN core_executable e ON e.id = b.executable_id
+        WHERE e.user_id = ?
+          AND b.status = 'PLANNED'
+          AND b.origin = 'PLANNER'
+          AND b.date_start >= ?
+          AND b.date_start < ?
+        ORDER BY b.date_start, b.id
         """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -398,7 +432,30 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             ps.setObject(3, block.start());
             ps.setObject(4, block.end());
             ps.setObject(5, (int) block.durationMinutes());
+            ps.setString(6, block.reason());
         });
+    }
+
+    @Override
+    public int deletePlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone) {
+        OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
+        OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
+        return jdbcTemplate.update(DELETE_PLANNED_DAY_SQL, userId, dayStart, dayEnd);
+    }
+
+    @Override
+    public List<PlannedBlockRecord> loadPlannedBlocksForDay(UUID userId, LocalDate targetDay,
+                                                            ZoneId zone) {
+        OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
+        OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
+        return jdbcTemplate.query(PLANNED_BLOCKS_FOR_DAY_SQL, (rs, rowNum) -> new PlannedBlockRecord(
+                rs.getObject("id", UUID.class),
+                rs.getObject("executable_id", UUID.class),
+                rs.getString("executable_name"),
+                rs.getObject("date_start", OffsetDateTime.class),
+                rs.getObject("date_end", OffsetDateTime.class),
+                rs.getString("reason")),
+            userId, dayStart, dayEnd);
     }
 
     private Double resolveCu(UUID taskId) {

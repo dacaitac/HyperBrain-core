@@ -3,10 +3,13 @@ package com.hyperbrain.planner.domain.port.out;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 
@@ -82,10 +85,36 @@ public interface PlannerStateRepository {
                                                  OffsetDateTime dayEnd);
 
     /**
+     * Deletes the existing {@code PLANNED} blocks of {@code origin = PLANNER} whose {@code date_start}
+     * falls on the target day in the user's timezone. Called before re-persisting a regenerated day so
+     * a repeated run <b>replaces</b> rather than accumulates blocks (idempotent convergence per
+     * user+day). Scoped to {@code PLANNER}-origin PLANNED rows so {@code FOCUS}/{@code USER} blocks and
+     * already-settled work are never touched. Must run in the same transaction as the re-persist.
+     *
+     * @param userId    the owning user; never null
+     * @param targetDay the calendar day whose planner blocks to clear; never null
+     * @param zone      the user's timezone used to bound the local day; never null
+     * @return the number of blocks deleted
+     */
+    int deletePlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone);
+
+    /**
      * Persists the validated {@code PLANNED} blocks with {@code origin = PLANNER}. Writes only new
      * block rows; it never mutates executables.
      *
      * @param blocks the accepted blocks to persist; never null, may be empty
      */
     void persistPlannedBlocks(List<AgendaBlock> blocks);
+
+    /**
+     * Re-reads the persisted {@code PLANNED}/{@code PLANNER} blocks of the target day, each joined to
+     * its executable's display name, for the agenda write-back (HU-01b). Ordered by {@code date_start}
+     * so the emitted reminders follow the day's chronology.
+     *
+     * @param userId    the owning user; never null
+     * @param targetDay the calendar day to read; never null
+     * @param zone      the user's timezone used to bound the local day; never null
+     * @return the day's planner blocks with their executable names; never null, may be empty
+     */
+    List<PlannedBlockRecord> loadPlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone);
 }

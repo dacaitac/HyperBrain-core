@@ -98,6 +98,19 @@ app:
     # only the moved rows to the satellites. Hourly, anchored to America/Bogota (see the scheduler).
     tick-cron:          "0 0 * * * *"
     scheduling-enabled: true
+  planner:
+    delivery:
+      # HU-01b morning dispatch: fire at estimated-wake + lead-offset, clamped ±hysteresis vs.
+      # yesterday's trigger (the 5-night wake median carries ~±40 min error). The poll cron cadence
+      # equals trigger-tolerance-minutes so no trigger window is missed between ticks.
+      lead-offset-minutes:        10
+      hysteresis-margin-minutes:  15
+      trigger-tolerance-minutes:  5
+      poll-cron:          "0 */5 * * * *"
+      # Deploy-safe default OFF (HU-01b): morning dispatch stays dark until the SentinelAPI
+      # write-back + "HyperBrain" calendar are live on the Mac Mini. Enable in prod via
+      # APP_PLANNER_DELIVERY_SCHEDULING_ENABLED=true once the rollout choreography is done.
+      scheduling-enabled: false
 
 management:
   endpoints:

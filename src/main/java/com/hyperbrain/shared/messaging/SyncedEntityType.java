@@ -9,6 +9,8 @@ package com.hyperbrain.shared.messaging;
 public enum SyncedEntityType {
     EXECUTABLE,
     CYCLE,
+    /** A planned agenda block delivered to Apple as a reminder (HU-01b morning write-back). */
+    AGENDA_BLOCK,
     OTHER;
 
     /**
@@ -24,6 +26,7 @@ public enum SyncedEntityType {
         return switch (aggregateType) {
             case "CORE_EXECUTABLE", "TASK", "SYNC_APPLE" -> EXECUTABLE;
             case "CORE_CYCLE" -> CYCLE;
+            case "AGENDA_BLOCK" -> AGENDA_BLOCK;
             default -> OTHER;
         };
     }
