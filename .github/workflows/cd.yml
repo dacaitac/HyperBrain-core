@@ -18,12 +18,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Multi-arch image (ADR-021): k3s mixes amd64 (daniel-ubuntu) and arm64
+      # (OCI Ampere, Mac Mini VM) nodes. QEMU only emulates the runtime stage;
+      # the Gradle build stage runs natively once (Dockerfile BUILDPLATFORM pin).
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/build-push-action@v5
         with:
+          context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/dacaitac/hyperbrain-core:latest
             ghcr.io/dacaitac/hyperbrain-core:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
