@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
 
+# Serialize deploys — prevents a slow rollout from racing with the next push.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  KUBECTL_VERSION: v1.36.2 # matches the k3s server (v1.36.2+k3s1)
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -38,31 +46,67 @@ jobs:
 
   deploy:
     needs: build-and-push
-    runs-on: [self-hosted, daniel-ubuntu]
+    runs-on: ubuntu-latest
     environment: production
     steps:
-      # docker-compose.yml lives at ~/hyperbrain-deploy, kept in sync by
-      # HyperBrain-Infra/deploy.yml on every merge to its main. This job only
-      # refreshes the hyperbrain-core service image, never touches the rest
-      # of the stack (--no-deps).
-      - name: Pull new image and restart service
-        run: |
-          docker pull ghcr.io/dacaitac/hyperbrain-core:latest
-          docker compose -f ~/hyperbrain-deploy/docker-compose.yml --env-file ~/hyperbrain-deploy/.env up -d --no-deps hyperbrain-core
+      # ADR-021 F9' — same pattern as HyperBrain-Infra/deploy.yml: ephemeral
+      # Tailscale peer → kubeconfig → kubectl set image (SHA-pinned for rollback
+      # safety) → rollout status → health check via port-forward.
+      # Required secrets in the `production` environment:
+      #   TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET  OAuth client (tag:ci)
+      #   KUBECONFIG_B64                        base64 kubeconfig (server: 100.110.72.116:6443)
+      - name: Join tailnet (ephemeral)
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
 
-      - name: Health check
-        # Published ports bind to BIND_ADDRESS (Tailscale IP in production,
-        # HyperBrain-Infra hardening), so localhost is not listening.
-        # Spring Boot takes ~30-45 s to start; retry every 5 s up to 90 s.
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      # Force Tailscale to establish the direct peer route to OCI before any
+      # kubectl call — ephemeral peers need NAT-traversal warmup.
+      - name: Warm up Tailscale route to OCI
         run: |
-          BIND=$(grep -oP '^BIND_ADDRESS=\K.*' ~/hyperbrain-deploy/.env || echo 127.0.0.1)
-          for i in $(seq 1 18); do
-            if curl -sf "http://${BIND}:8080/actuator/health"; then
-              echo "Health check passed on attempt ${i}"
-              exit 0
-            fi
-            echo "Attempt ${i}/18 — not ready yet, retrying in 5 s..."
+          for i in $(seq 1 12); do
+            tailscale ping --c 1 100.110.72.116 && break
+            echo "ping attempt $i failed, retrying in 5s…"
             sleep 5
           done
-          echo "Health check failed after 90 s"
-          exit 1
+
+      - name: Configure kubeconfig
+        run: |
+          install -m 700 -d "$RUNNER_TEMP/kube"
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$RUNNER_TEMP/kube/config"
+          chmod 600 "$RUNNER_TEMP/kube/config"
+          echo "KUBECONFIG=$RUNNER_TEMP/kube/config" >> "$GITHUB_ENV"
+          export KUBECONFIG="$RUNNER_TEMP/kube/config"
+          kubectl version --request-timeout=60s
+
+      # Pin to the exact SHA built above — safe to re-run (idempotent) and
+      # allows rollback by re-running the previous workflow run.
+      - name: Deploy new core image
+        run: |
+          kubectl set image deployment/hyperbrain-core \
+            core=ghcr.io/dacaitac/hyperbrain-core:${{ github.sha }} \
+            -n hyperbrain
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/hyperbrain-core -n hyperbrain --timeout=10m
+
+      # Health check via kubectl port-forward — avoids exec (no curl in JRE image)
+      # and avoids the Tailscale proxy lookup (operator may not yet be provisioned).
+      - name: Health check core
+        run: |
+          kubectl port-forward -n hyperbrain deploy/hyperbrain-core 18080:8080 &
+          PF_PID=$!
+          trap "kill $PF_PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 12); do
+            curl -sf http://localhost:18080/actuator/health && break
+            echo "attempt $i…"; sleep 5
+          done
+          kill $PF_PID 2>/dev/null || true
