@@ -1,5 +1,6 @@
 package com.hyperbrain.core.application;
 
+import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.core.application.rule.HabitRecurrenceRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
@@ -25,6 +26,7 @@ import static org.mockito.Mockito.when;
 class CoreDomainChangeProcessorTest {
 
     private EndTimeInvariantRule endTimeRule;
+    private CompletionReactivationRule completionReactivationRule;
     private SingleFocusRule focusRule;
     private ReestimationConfirmationRule reestimationRule;
     private ProgressRecalculationRule progressRule;
@@ -34,27 +36,31 @@ class CoreDomainChangeProcessorTest {
     @BeforeEach
     void setUp() {
         endTimeRule = mock(EndTimeInvariantRule.class);
+        completionReactivationRule = mock(CompletionReactivationRule.class);
         focusRule = mock(SingleFocusRule.class);
         reestimationRule = mock(ReestimationConfirmationRule.class);
         progressRule = mock(ProgressRecalculationRule.class);
         habitRule = mock(HabitRecurrenceRule.class);
         processor = new CoreDomainChangeProcessor(
-            endTimeRule, focusRule, reestimationRule, progressRule, habitRule);
+            endTimeRule, completionReactivationRule, focusRule, reestimationRule, progressRule, habitRule);
     }
 
     @Test
-    @DisplayName("applies the DR chain in order, threading each rule's output into the next")
+    @DisplayName("applies the DR chain in order (DR-01→DR-02→DR-05/06→DR-07→DR-04), threading each rule's output into the next")
     void applies_chain_in_order() {
         ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot().status("TODO").build();
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot().status("IN_PROGRESS").build();
         ExecutableSnapshot afterEndTime = ExecutableSnapshotBuilder.snapshot().name("a").build();
-        ExecutableSnapshot afterFocus = ExecutableSnapshotBuilder.snapshot().name("b").build();
-        ExecutableSnapshot afterReestimation = ExecutableSnapshotBuilder.snapshot().name("c").build();
-        ExecutableSnapshot afterProgress = ExecutableSnapshotBuilder.snapshot().name("d").build();
-        ExecutableSnapshot afterHabit = ExecutableSnapshotBuilder.snapshot().name("e").build();
+        ExecutableSnapshot afterReactivation = ExecutableSnapshotBuilder.snapshot().name("b").build();
+        ExecutableSnapshot afterFocus = ExecutableSnapshotBuilder.snapshot().name("c").build();
+        ExecutableSnapshot afterReestimation = ExecutableSnapshotBuilder.snapshot().name("d").build();
+        ExecutableSnapshot afterProgress = ExecutableSnapshotBuilder.snapshot().name("e").build();
+        ExecutableSnapshot afterHabit = ExecutableSnapshotBuilder.snapshot().name("f").build();
         when(endTimeRule.apply(same(previous), same(merged), eq(ExternalSystem.NOTION)))
             .thenReturn(afterEndTime);
-        when(focusRule.apply(same(previous), same(afterEndTime), eq(ExternalSystem.NOTION)))
+        when(completionReactivationRule.apply(same(previous), same(afterEndTime), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterReactivation);
+        when(focusRule.apply(same(previous), same(afterReactivation), eq(ExternalSystem.NOTION)))
             .thenReturn(afterFocus);
         when(reestimationRule.apply(same(previous), same(afterFocus), eq(ExternalSystem.NOTION)))
             .thenReturn(afterReestimation);
@@ -66,8 +72,9 @@ class CoreDomainChangeProcessorTest {
         ExecutableSnapshot result = processor.process(previous, merged, ExternalSystem.NOTION);
 
         assertThat(result).isSameAs(afterHabit);
-        InOrder order = inOrder(endTimeRule, focusRule, reestimationRule, progressRule, habitRule);
+        InOrder order = inOrder(endTimeRule, completionReactivationRule, focusRule, reestimationRule, progressRule, habitRule);
         order.verify(endTimeRule).apply(any(), any(), any());
+        order.verify(completionReactivationRule).apply(any(), any(), any());
         order.verify(focusRule).apply(any(), any(), any());
         order.verify(reestimationRule).apply(any(), any(), any());
         order.verify(progressRule).apply(any(), any(), any());

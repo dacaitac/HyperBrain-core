@@ -171,12 +171,14 @@ class FocusAccountingIT {
             "SELECT status FROM core_time_block WHERE executable_id = ?", String.class, taskB);
         assertThat(blockBStatus).isEqualTo("ACTIVE");
 
-        // Outbox: SYSTEM-originated snapshot mirror, preserved-state mirror, focus event, settlement
+        // Outbox: SYSTEM-originated snapshot mirror, preserved-state mirror, focus event, settlement,
+        // and the canonical write-back reflection for B's ingestion (always staged for NOTION origin
+        // so the Core state reaches Notion past RF-17 loop protection).
         List<Map<String, Object>> systemEvents = jdbcTemplate.queryForList(
             "SELECT event_type, aggregate_id FROM outbox_events WHERE source_system = 'SYSTEM'");
         assertThat(systemEvents).extracting(row -> row.get("event_type"))
             .containsExactlyInAnyOrder("ExecutableCreatedEvent", "ExecutableUpdatedEvent",
-                "FocusSwitchedEvent", "TimeBlockSettledEvent");
+                "ExecutableUpdatedEvent", "FocusSwitchedEvent", "TimeBlockSettledEvent");
         assertThat(systemEvents)
             .filteredOn(row -> row.get("event_type").equals("ExecutableCreatedEvent"))
             .extracting(row -> row.get("aggregate_id"))

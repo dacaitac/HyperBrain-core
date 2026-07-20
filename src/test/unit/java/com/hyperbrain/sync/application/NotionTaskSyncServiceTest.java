@@ -107,6 +107,9 @@ class NotionTaskSyncServiceTest {
             ExecutableSnapshotBuilder.snapshot().id(LOCAL_ID).userId(USER_ID)
                 .name("Write tests").build()));
         when(cycleSyncService.resolveOrImport(CYCLE_PAGE_ID)).thenReturn(CYCLE_LOCAL_ID);
+        // Reflector already handles the SYSTEM reflection (priority moved); the status-change path
+        // must not fire a duplicate event.
+        when(priorityReflector.reflect(LOCAL_ID, ExternalSystem.NOTION)).thenReturn(true);
 
         // When
         SyncOutcome outcome = service.apply(page("Renamed", "Done", true, EDITED_AT));
@@ -127,6 +130,7 @@ class NotionTaskSyncServiceTest {
         // NOTION origin; whether a SYSTEM event follows is the reflector's decision (tested there).
         verify(priorityReflector).reflect(LOCAL_ID, ExternalSystem.NOTION);
     }
+
 
     @Test
     @DisplayName("CA-29: a page state older than last_synced_at is discarded without writing (out-of-order burst)")

@@ -45,13 +45,14 @@ class OnIngestionPriorityReflectorTest {
     }
 
     @Test
-    @DisplayName("NOTION origin + score moved: stages one SYSTEM ExecutableUpdatedEvent so the score escapes the loop guard")
+    @DisplayName("NOTION origin + score moved: stages one SYSTEM ExecutableUpdatedEvent; returns true")
     void notion_moved_stages_system_event() {
         when(prioritizerService.rescore(EXECUTABLE))
             .thenReturn(RescoreResult.scored(new PriorityScore(EXECUTABLE, 0.7, 3.0, 0.5), true));
 
-        reflector.reflect(EXECUTABLE, ExternalSystem.NOTION);
+        boolean staged = reflector.reflect(EXECUTABLE, ExternalSystem.NOTION);
 
+        assertThat(staged).isTrue();
         ArgumentCaptor<OutboxEvent> outbox = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo).append(outbox.capture());
         OutboxEvent event = outbox.getValue();
@@ -62,24 +63,40 @@ class OnIngestionPriorityReflectorTest {
     }
 
     @Test
-    @DisplayName("APPLE origin + score moved: stages no extra event — the APPLE event already reflects the score")
+    @DisplayName("NOTION origin + score did NOT move: still stages a SYSTEM event so the canonical state reaches Notion past loop protection; returns true")
+    void notion_unmoved_still_stages_system_event() {
+        when(prioritizerService.rescore(EXECUTABLE))
+            .thenReturn(RescoreResult.scored(new PriorityScore(EXECUTABLE, 0.7, 3.0, 0.5), false));
+
+        boolean staged = reflector.reflect(EXECUTABLE, ExternalSystem.NOTION);
+
+        assertThat(staged).isTrue();
+        ArgumentCaptor<OutboxEvent> outbox = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxRepo).append(outbox.capture());
+        assertThat(outbox.getValue().sourceSystem()).isEqualTo("SYSTEM");
+    }
+
+    @Test
+    @DisplayName("APPLE origin + score moved: stages no extra event — the APPLE event already reflects the score; returns false")
     void apple_moved_stages_no_event() {
         when(prioritizerService.rescore(EXECUTABLE))
             .thenReturn(RescoreResult.scored(new PriorityScore(EXECUTABLE, 0.7, 3.0, 0.5), true));
 
-        reflector.reflect(EXECUTABLE, ExternalSystem.APPLE);
+        boolean staged = reflector.reflect(EXECUTABLE, ExternalSystem.APPLE);
 
+        assertThat(staged).isFalse();
         verify(outboxRepo, never()).append(any());
     }
 
     @Test
-    @DisplayName("score did not move: stages no event, whatever the origin")
-    void unmoved_stages_no_event() {
+    @DisplayName("APPLE origin + score did not move: stages no event; returns false")
+    void apple_unmoved_stages_no_event() {
         when(prioritizerService.rescore(EXECUTABLE))
             .thenReturn(RescoreResult.scored(new PriorityScore(EXECUTABLE, 0.7, 3.0, 0.5), false));
 
-        reflector.reflect(EXECUTABLE, ExternalSystem.NOTION);
+        boolean staged = reflector.reflect(EXECUTABLE, ExternalSystem.APPLE);
 
+        assertThat(staged).isFalse();
         verify(outboxRepo, never()).append(any());
     }
 }

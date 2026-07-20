@@ -160,8 +160,10 @@ public class NotionTaskSyncService {
         appendOutbox(localId, page.pageId(), snapshot.type(),
             operation == Operation.CREATED ? "ExecutableCreatedEvent" : "ExecutableUpdatedEvent",
             operation);
-        // Recompute the priority on the just-upserted merged row; a NOTION-origin move needs a SYSTEM
-        // reflection to reach Notion past the loop guard — the reflector decides that by origin.
+        // Recompute the priority on the just-upserted merged row. For NOTION origin the reflector
+        // always stages a SYSTEM ExecutableUpdatedEvent so the canonical Core state (status, scores,
+        // all fields) reaches Notion past the loop guard (RF-17) — unconditionally, not only when
+        // the score moved.
         priorityReflector.reflect(localId, ExternalSystem.NOTION);
         log.info("TASK page {} ({}) persisted as executable {}", page.pageId(), operation, localId);
         return operation == Operation.CREATED ? SyncOutcome.CREATED : SyncOutcome.UPDATED;

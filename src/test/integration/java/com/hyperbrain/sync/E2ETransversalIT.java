@@ -311,6 +311,9 @@ class E2ETransversalIT {
     @DisplayName("B5 — AGENDA entity from Notion never generates WriteCommand to Apple (ADR-009, E2E-B5)")
     void agenda_entity_from_notion_never_triggers_apple_writeback() throws Exception {
         String pageId = newPageId();
+        // SYSTEM canonical write-back always fires for NOTION ingestions; stub the PATCH so the
+        // propagator succeeds (under the new always-stage behavior the SYSTEM event reaches Notion).
+        stubPatchPage(pageId);
 
         consumer.onMessage(notionAutomation(pageId,
             taskPage(pageId, "Agenda event B5", "Not started", false, "Agenda")));
@@ -318,8 +321,9 @@ class E2ETransversalIT {
 
         // ADR-009: AGENDA is read-only from Apple's perspective — no WriteCommand
         assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
-        // source_system=NOTION → loop protection blocks Notion write-back as well
-        assertThat(NOTION.getAllServeEvents()).isEmpty();
+        // The SYSTEM canonical write-back reaches Notion (loop protection only suppresses
+        // NOTION-origin events; SYSTEM-origin events propagate normally).
+        NOTION.verify(patchRequestedFor(urlEqualTo("/v1/pages/" + pageId)));
     }
 
     // ── C: Transversal ────────────────────────────────────────────────────────

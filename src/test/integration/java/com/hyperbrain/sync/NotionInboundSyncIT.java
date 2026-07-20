@@ -285,11 +285,11 @@ class NotionInboundSyncIT {
         Integer notionEvents = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION'", Integer.class);
         assertThat(notionEvents).isEqualTo(5);
-        // Only the first edit moves the score (NULL -> 0 on the freshly persisted row); the four
-        // rename-only edits leave the impact-less score at 0, so exactly one SYSTEM reflection (#66a)
+        // Every NOTION ingestion stages one SYSTEM reflection so the canonical Core state always
+        // reaches Notion past the RF-17 loop guard — 5 processed deliveries → 5 SYSTEM events.
         Integer systemEvents = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events WHERE source_system = 'SYSTEM'", Integer.class);
-        assertThat(systemEvents).isEqualTo(1);
+        assertThat(systemEvents).isEqualTo(5);
     }
 
     @Test

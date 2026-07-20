@@ -24,19 +24,20 @@ import java.util.UUID;
  * <p>What happens once the score is recomputed is decided <b>here</b>, keyed on the ingestion origin,
  * so the branching never leaks back into the handlers:
  * <ul>
- *   <li>The score is always recomputed and persisted (a moved value is stored, an unchanged one is a
- *       clean no-op — {@link RescoreResult#moved()} is the Prioritizer's own epsilon-guarded verdict).
- *   <li>When it moved and the origin does <b>not</b> already mirror its own change to Notion
- *       (a NOTION-origin ingestion, whose event the Notion propagator ignores by loop protection,
- *       RF-17), a dedicated {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} is staged so
- *       the SYSTEM-authored score still reaches Notion.
- *   <li>When it moved but the origin already mirrors its own change (APPLE — the Notion propagator
- *       does propagate {@code APPLE}-origin events, re-reading the row post-commit), no extra event
- *       is staged: the origin's own event carries the fresh score outward.
+ *   <li>The score is always recomputed and persisted ({@link RescoreResult#moved()} is the
+ *       Prioritizer's own epsilon-guarded verdict).
+ *   <li><b>NOTION origin:</b> a {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} is
+ *       <em>always</em> staged, regardless of whether the score moved. This guarantees that the
+ *       canonical Core state (status, scores, all fields) always overwrites whatever Notion holds
+ *       after any ingestion — the Notion propagator's loop protection (RF-17) would otherwise
+ *       suppress the NOTION-origin event and leave Notion stale.
+ *   <li><b>APPLE / SYSTEM origin:</b> those origins' own outbox events are propagated to Notion by
+ *       the propagator (they are not loop-protected), so no extra SYSTEM event is needed. The caller
+ *       may inspect the return value to decide whether the score moved.
  * </ul>
  *
- * <p>The optional SYSTEM append happens inside the caller's ingestion transaction (the append is a
- * plain {@code INSERT} on {@code outbox_events}), preserving the Transactional Outbox guarantee: the
+ * <p>The SYSTEM append happens inside the caller's ingestion transaction (the append is a plain
+ * {@code INSERT} on {@code outbox_events}), preserving the Transactional Outbox guarantee: the
  * persisted score and its reflection commit together or not at all.
  */
 @Service
@@ -59,37 +60,44 @@ public class OnIngestionPriorityReflector {
     }
 
     /**
-     * Recomputes the executable's Priority Score on its persisted merged state and, when the score
-     * moved, stages the outbound reflection appropriate to the ingestion origin (see the class
-     * documentation). Must be called after the merged row has been upserted, inside the ingestion
-     * transaction.
+     * Recomputes the executable's Priority Score on its persisted merged state and stages the
+     * outbound reflection appropriate to the ingestion origin (see the class documentation). Must
+     * be called after the merged row has been upserted, inside the ingestion transaction.
+     *
+     * <p>For NOTION origin a {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} is
+     * <em>always</em> staged (the score may or may not have moved — the canonical Core state must
+     * reach Notion regardless). For APPLE/SYSTEM origin no extra event is staged because those
+     * origins' own events are already propagated to Notion by the propagator.
      *
      * @param executableId the just-upserted executable to rescore
      * @param origin       the external system that produced the inbound change; decides whether a
-     *                     SYSTEM reflection event is needed
+     *                     SYSTEM reflection event is staged
+     * @return {@code true} if a SYSTEM {@code ExecutableUpdatedEvent} was staged (NOTION origin),
+     *         {@code false} for all other origins
      */
-    public void reflect(UUID executableId, ExternalSystem origin) {
+    public boolean reflect(UUID executableId, ExternalSystem origin) {
         RescoreResult result = prioritizerService.rescore(executableId);
-        if (!result.moved()) {
-            return;
-        }
         if (mirrorsOwnChangeToNotion(origin)) {
-            // The origin's own outbox event already carries the fresh score to Notion; adding a
-            // SYSTEM event would duplicate the reflection.
-            return;
+            // APPLE/SYSTEM origins: their own outbox events are propagated to Notion by the
+            // propagator — no extra SYSTEM event is needed. The score is still persisted above.
+            return false;
         }
+        // NOTION origin: always stage a SYSTEM event so the canonical Core state (status, scores,
+        // all fields) overwrites Notion regardless of whether the priority score moved (RF-17 loop
+        // protection would suppress the NOTION-origin event otherwise).
         outboxRepo.append(new OutboxEvent(UUID.randomUUID(), EXECUTABLE_AGGREGATE,
             executableId.toString(), EXECUTABLE_UPDATED_EVENT, REFLECTION_PAYLOAD, SYSTEM_SOURCE,
             OffsetDateTime.now()));
-        log.debug("Staged SYSTEM priority reflection for executable {} (score moved on {} ingestion)",
-            executableId, origin);
+        log.debug("Staged SYSTEM reflection for executable {} ({} ingestion, score moved={})",
+            executableId, origin, result.moved());
+        return true;
     }
 
     /**
      * Whether an ingestion of this origin already mirrors its own change to Notion. Only NOTION
-     * ingestion does not: the Notion propagator suppresses events of its own origin (RF-17), so its
-     * recomputed score would otherwise be stranded. Every other origin's event is propagated to
-     * Notion, which re-reads the row and carries the score along.
+     * ingestion does not: the Notion propagator suppresses events of its own origin (RF-17), so
+     * without an explicit SYSTEM event the Core state would never reach Notion. Every other origin's
+     * event is propagated to Notion, which re-reads the row and carries the state along.
      */
     private static boolean mirrorsOwnChangeToNotion(ExternalSystem origin) {
         return origin != ExternalSystem.NOTION;
