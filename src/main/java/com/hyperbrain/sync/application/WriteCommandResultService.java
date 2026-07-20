@@ -5,6 +5,7 @@ import com.hyperbrain.sync.domain.model.PendingWriteCommand;
 import com.hyperbrain.sync.domain.model.ResultStatus;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.model.WriteCommandResult;
+import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import org.slf4j.Logger;
@@ -43,15 +44,18 @@ public class WriteCommandResultService {
     private final ProcessedMessageStore processedMessageStore;
     private final WriteCommandLogRepository commandLogRepo;
     private final SyncMappingRepository syncMappingRepo;
+    private final CoreExecutableRepository executableRepo;
 
     public WriteCommandResultService(
         ProcessedMessageStore processedMessageStore,
         WriteCommandLogRepository commandLogRepo,
-        SyncMappingRepository syncMappingRepo
+        SyncMappingRepository syncMappingRepo,
+        CoreExecutableRepository executableRepo
     ) {
         this.processedMessageStore = processedMessageStore;
         this.commandLogRepo = commandLogRepo;
         this.syncMappingRepo = syncMappingRepo;
+        this.executableRepo = executableRepo;
     }
 
     /**
@@ -102,8 +106,17 @@ public class WriteCommandResultService {
         Optional<SyncMapping> existing =
             syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, result.entityId());
         if (existing.isPresent()) {
-            // The Apple echo won the race and already created the mapping; just refresh it.
-            log.warn("sync_mapping for {} already exists; refreshing instead of inserting", result.entityId());
+            UUID orphanId = existing.get().localId();
+            UUID canonicalId = command.localId();
+            if (!orphanId.equals(canonicalId)) {
+                // Echo-beat-result race: ReminderEventHandler created a transient entity for this
+                // Apple entity before the WriteCommandResult arrived. Delete the orphan so its
+                // pending outbox events (ReminderSyncedEvent) skip propagation in NotionEventPropagator
+                // (propagateExecutableUpsert returns early when snapshotRepo.findExecutable returns empty).
+                log.warn("Apple echo race for {}: orphan {} displaced by canonical {}; deleting orphan",
+                    result.entityId(), orphanId, canonicalId);
+                executableRepo.deleteById(orphanId);
+            }
             syncMappingRepo.update(buildMapping(existing.get().id(), command, result, checksum));
         } else {
             syncMappingRepo.insert(buildMapping(UUID.randomUUID(), command, result, checksum));

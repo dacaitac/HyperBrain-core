@@ -7,6 +7,7 @@ import com.hyperbrain.sync.domain.model.PendingWriteCommand;
 import com.hyperbrain.sync.domain.model.ResultStatus;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.model.WriteCommandResult;
+import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +40,7 @@ class WriteCommandResultServiceTest {
     private ProcessedMessageStore processedMessageStore;
     private WriteCommandLogRepository commandLogRepo;
     private SyncMappingRepository syncMappingRepo;
+    private CoreExecutableRepository executableRepo;
     private WriteCommandResultService service;
 
     @BeforeEach
@@ -46,7 +48,8 @@ class WriteCommandResultServiceTest {
         processedMessageStore = mock(ProcessedMessageStore.class);
         commandLogRepo = mock(WriteCommandLogRepository.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
-        service = new WriteCommandResultService(processedMessageStore, commandLogRepo, syncMappingRepo);
+        executableRepo = mock(CoreExecutableRepository.class);
+        service = new WriteCommandResultService(processedMessageStore, commandLogRepo, syncMappingRepo, executableRepo);
         when(processedMessageStore.markProcessed(anyString(), anyString())).thenReturn(true);
     }
 

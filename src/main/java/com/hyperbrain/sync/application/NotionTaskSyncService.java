@@ -119,16 +119,32 @@ public class NotionTaskSyncService {
         UUID parentId = resolveParent(page.parentRelationId());
         ExecutableSnapshot merged =
             SourceAwareMerge.mergeNotionTask(current, page, localId, defaultUserId, cycleId, parentId);
+
+        // CA-4 echo check runs on the pre-rules snapshot so that stateful domain rules
+        // (specifically HabitRecurrenceRule / DR-04) never fire on Notion echoes.
+        // Rationale: the stored checksum was produced by NotionEventPropagator from the same
+        // Notion-authority fields that SourceAwareMerge copies into `merged`, so the comparison
+        // is valid for genuine echoes. When Core-authority fields (e.g. priority_score) diverged
+        // since the last write, the check produces a false non-match — those echoes fall through
+        // to the normal UPDATED path, which is correct (the score needs to propagate back).
+        // Critical scenario blocked by this ordering: after a DONE entity is deleted from Apple
+        // (handleDeleted removes the core_executable row), a late Notion webhook arrives with
+        // current=null and merged=DONE; without this guard HabitRecurrenceRule fires
+        // (becameDone(null, DONE)=true) and creates a spurious clone. With the guard, the stored
+        // DONE checksum matches and the event is correctly discarded.
+        Map<String, Object> preRulesProps =
+            NotionTaskMapper.map(merged, page.cycleRelationId(), page.parentRelationId());
+        if (mapping.isPresent()
+            && ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(),
+                preRulesProps, objectMapper)) {
+            log.debug("TASK page {} unchanged (checksum match); discarded (CA-4)", page.pageId());
+            return SyncOutcome.SKIPPED_ECHO;
+        }
+
         ExecutableSnapshot snapshot =
             domainChangeProcessor.process(current, merged, ExternalSystem.NOTION);
         Map<String, Object> canonicalProps =
             NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId());
-        if (mapping.isPresent()
-            && ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(),
-                canonicalProps, objectMapper)) {
-            log.debug("TASK page {} unchanged (checksum match); discarded (CA-4)", page.pageId());
-            return SyncOutcome.SKIPPED_ECHO;
-        }
 
         executableRepo.upsert(snapshot);
         String checksum = ChecksumSupport.compute(page.pageId(), canonicalProps, objectMapper);
