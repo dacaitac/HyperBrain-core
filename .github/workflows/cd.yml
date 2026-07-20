@@ -53,7 +53,16 @@ jobs:
       - name: Health check
         # Published ports bind to BIND_ADDRESS (Tailscale IP in production,
         # HyperBrain-Infra hardening), so localhost is not listening.
+        # Spring Boot takes ~30-45 s to start; retry every 5 s up to 90 s.
         run: |
-          sleep 10
           BIND=$(grep -oP '^BIND_ADDRESS=\K.*' ~/hyperbrain-deploy/.env || echo 127.0.0.1)
-          curl -f "http://${BIND}:8080/actuator/health" || exit 1
+          for i in $(seq 1 18); do
+            if curl -sf "http://${BIND}:8080/actuator/health"; then
+              echo "Health check passed on attempt ${i}"
+              exit 0
+            fi
+            echo "Attempt ${i}/18 — not ready yet, retrying in 5 s..."
+            sleep 5
+          done
+          echo "Health check failed after 90 s"
+          exit 1
