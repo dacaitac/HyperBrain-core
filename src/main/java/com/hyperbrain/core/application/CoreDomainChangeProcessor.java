@@ -2,6 +2,7 @@ package com.hyperbrain.core.application;
 
 import com.hyperbrain.core.application.rule.DomainRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
+import com.hyperbrain.core.application.rule.HabitRecurrenceRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
 import com.hyperbrain.core.application.rule.ReestimationConfirmationRule;
 import com.hyperbrain.core.application.rule.SingleFocusRule;
@@ -22,8 +23,8 @@ import java.util.List;
  * Production {@link DomainChangeProcessor} (ADR-012 D2 + ADR-013 D6): applies the active
  * domain-rule catalog (components.md) as an ordered chain, inside the ingestion transaction.
  * Chain order: DR-01 structural invariant first, then the focus cut (DR-05/DR-06), then the
- * re-estimation confirmation, then the progress recalculation (DR-07) — each link receives the
- * snapshot the previous one produced.
+ * re-estimation confirmation, then the progress recalculation (DR-07), and finally the habit
+ * recurrence cloning (DR-04) — each link receives the snapshot the previous one produced.
  *
  * <p>Priority reflection (#66a) is deliberately <b>not</b> a link here. It is recomputed
  * <em>after</em> the merged row is upserted, by each ingestion service (Notion and Apple alike), so
@@ -40,13 +41,15 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         EndTimeInvariantRule endTimeInvariantRule,
         SingleFocusRule singleFocusRule,
         ReestimationConfirmationRule reestimationConfirmationRule,
-        ProgressRecalculationRule progressRecalculationRule
+        ProgressRecalculationRule progressRecalculationRule,
+        HabitRecurrenceRule habitRecurrenceRule
     ) {
         this.rules = List.of(
             endTimeInvariantRule,
             singleFocusRule,
             reestimationConfirmationRule,
-            progressRecalculationRule);
+            progressRecalculationRule,
+            habitRecurrenceRule);
     }
 
     @Override

@@ -4,6 +4,7 @@ import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -110,6 +111,38 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
           AND last_completed_at BETWEEN ? AND ?
         """;
 
+    private static final String UPSERT_EXECUTABLE_SQL = """
+        INSERT INTO core_executable
+            (id, user_id, parent_id, cycle_id, name, description, type, status,
+             priority_score, urgency_score, effort_score, is_important, frequency,
+             start_time, end_time, source_calendar)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            parent_id       = EXCLUDED.parent_id,
+            cycle_id        = EXCLUDED.cycle_id,
+            name            = EXCLUDED.name,
+            description     = EXCLUDED.description,
+            type            = EXCLUDED.type,
+            status          = EXCLUDED.status,
+            priority_score  = EXCLUDED.priority_score,
+            urgency_score   = EXCLUDED.urgency_score,
+            effort_score    = EXCLUDED.effort_score,
+            is_important    = EXCLUDED.is_important,
+            frequency       = EXCLUDED.frequency,
+            start_time      = EXCLUDED.start_time,
+            end_time        = EXCLUDED.end_time,
+            source_calendar = EXCLUDED.source_calendar
+        """;
+
+    private static final String UPSERT_PROFILE_SQL = """
+        INSERT INTO core_execution_profile (executable_id, energy_drain, mental_load, impact)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (executable_id) DO UPDATE SET
+            energy_drain = EXCLUDED.energy_drain,
+            mental_load  = EXCLUDED.mental_load,
+            impact       = EXCLUDED.impact
+        """;
+
     private static final RowMapper<FocusCandidate> CANDIDATE_MAPPER = (rs, rowNum) ->
         new FocusCandidate(
             rs.getObject("id", UUID.class),
@@ -197,6 +230,17 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
                                        OffsetDateTime windowStart, OffsetDateTime windowEnd) {
         return jdbcTemplate.update(IMPUTE_COMPLETED_SQL,
             blockId, executableId, toTimestamp(windowStart), toTimestamp(windowEnd));
+    }
+
+    @Override
+    public void upsertExecutable(ExecutableSnapshot s) {
+        jdbcTemplate.update(UPSERT_EXECUTABLE_SQL,
+            s.id(), s.userId(), s.parentId(), s.cycleId(), s.name(), s.description(),
+            s.type(), s.status(), s.priorityScore(), s.urgencyScore(), s.effortScore(),
+            Boolean.TRUE.equals(s.isImportant()), s.frequency(),
+            toTimestamp(s.startTime()), toTimestamp(s.endTime()), s.sourceCalendar());
+        jdbcTemplate.update(UPSERT_PROFILE_SQL,
+            s.id(), s.energyDrain(), s.mentalLoad(), s.impact());
     }
 
     private static Timestamp toTimestamp(OffsetDateTime odt) {

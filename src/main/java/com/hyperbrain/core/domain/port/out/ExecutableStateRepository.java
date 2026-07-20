@@ -3,6 +3,7 @@ package com.hyperbrain.core.domain.port.out;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -137,4 +138,13 @@ public interface ExecutableStateRepository {
      */
     int imputeCompletedSubtasks(UUID blockId, UUID executableId,
                                 OffsetDateTime windowStart, OffsetDateTime windowEnd);
+
+    /**
+     * Inserts or updates the full attribute set of a {@code core_executable} row plus its
+     * {@code core_execution_profile}, keyed by {@code id}. Used by DR-04 to persist habit
+     * recurrence clones generated inside the ingestion transaction.
+     *
+     * @param snapshot the clone to persist
+     */
+    void upsertExecutable(ExecutableSnapshot snapshot);
 }
