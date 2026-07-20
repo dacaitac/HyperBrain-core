@@ -261,8 +261,8 @@ class E2ETransversalIT {
     }
 
     @Test
-    @DisplayName("B3 — Notion TASK completed triggers UPDATED WriteCommand with completed=true (E2E-B3)")
-    void notion_task_completed_triggers_apple_completion() throws Exception {
+    @DisplayName("B3 — Notion TASK completed triggers DELETED WriteCommand to Apple (E2E-B3)")
+    void notion_task_completed_triggers_apple_deletion() throws Exception {
         String pageId = newPageId();
         String appleEntityId = "EKReminder-" + UUID.randomUUID();
         UUID localId = UUID.randomUUID();
@@ -274,12 +274,14 @@ class E2ETransversalIT {
         consumer.onMessage(notionAutomation(pageId, taskPage(pageId, "Task B3", "Done", true)));
         outboxWorker.drainBatch();
 
+        // DONE in PG removes the item from Apple rather than marking it completed:
+        // the completed reminder would otherwise remain visible in the "Completed" section.
         Message<String> msg = receiveOne(COMMANDS_QUEUE).orElseThrow(
-            () -> new AssertionError("Expected completion WriteCommand on apple-commands.fifo"));
+            () -> new AssertionError("Expected DELETED WriteCommand on apple-commands.fifo"));
         JsonNode cmd = objectMapper.readTree(msg.getPayload());
-        assertThat(cmd.path("operation").asText()).isEqualTo("UPDATED");
+        assertThat(cmd.path("operation").asText()).isEqualTo("DELETED");
         assertThat(cmd.path("entity_id").asText()).isEqualTo(appleEntityId);
-        assertThat(cmd.path("payload").path("completed").asBoolean()).isTrue();
+        assertThat(cmd.path("payload").isMissingNode() || cmd.path("payload").isNull()).isTrue();
         // RF-17: the NOTION event never bounces; the only Notion write is the SYSTEM score reflection
         assertThat(NOTION.findAll(postRequestedFor(urlPathEqualTo("/v1/pages")))).isEmpty();
     }

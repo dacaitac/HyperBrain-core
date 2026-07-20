@@ -58,6 +58,7 @@ public class AppleEventPropagator implements IEventPropagator {
     private static final String EXTERNAL_SYSTEM = "APPLE";
     private static final String COMMAND_ID_NAMESPACE = "hyperbrain-write-command:";
     private static final String STATUS_PENDING = "PENDING";
+    private static final String STATUS_DONE = "DONE";
 
     /** Outbox aggregate types that represent a {@code core_executable} change. */
     private static final Set<String> EXECUTABLE_AGGREGATES = Set.of("CORE_EXECUTABLE", "TASK");
@@ -141,6 +142,23 @@ public class AppleEventPropagator implements IEventPropagator {
 
         Optional<SyncMapping> mapping = syncMappingRepo.findByExternalSystemAndLocalId(EXTERNAL_SYSTEM, localId);
         UUID userId = executable.get().userId();
+
+        // DONE executables are removed from Apple (not just marked completed): this keeps Apple
+        // in sync with PG's authoritative state and avoids accumulating "completed" reminders.
+        // The WriteCommandResult handler cleans up the sync_mapping on DELETE applied.
+        if (STATUS_DONE.equals(executable.get().status())) {
+            if (mapping.isEmpty()) {
+                log.debug("Executable {} is DONE with no Apple mapping; skipping", localId);
+                return;
+            }
+            CommandType commandType = WriteCommandFactory.commandTypeForExecutableType(executable.get().type())
+                .orElse(CommandType.REMINDER);
+            String externalId = mapping.get().externalId();
+            emit(Optional.of(WriteCommandFactory.forDelete(deterministicCommandId(event.id()), commandType, externalId)),
+                event, userId, localId, externalId);
+            log.info("Executable {} DONE: deleting Apple entity {} (sync_mapping cleaned up on result)", localId, externalId);
+            return;
+        }
 
         if (mapping.isEmpty()) {
             UUID commandId = deterministicCommandId(event.id());

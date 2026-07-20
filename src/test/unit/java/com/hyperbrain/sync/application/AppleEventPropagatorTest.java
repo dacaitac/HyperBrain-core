@@ -112,12 +112,14 @@ class AppleEventPropagatorTest {
     }
 
     @Test
-    @DisplayName("UPDATE: mapped executable emits UPDATED against the EventKit id (CA-2, CA-6)")
+    @DisplayName("UPDATE: mapped TODO executable emits UPDATED against the EventKit id (CA-2, CA-6)")
     void mapped_executable_emits_updated() {
-        // Given
-        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(task("DONE")));
+        // Given — status=TODO; only DONE triggers the delete path
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(task("TODO")));
         when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
             .thenReturn(Optional.of(mapping("EK-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.REMINDER));
 
         // When
         service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
@@ -130,9 +132,46 @@ class AppleEventPropagatorTest {
     }
 
     @Test
-    @DisplayName("TaskCompletedEvent on a mapped task emits UPDATED with completed=true (scenario 3)")
-    void task_completed_emits_update() {
-        // Given
+    @DisplayName("DONE mapped: emits DELETE so Apple removes the completed item (PG is authoritative)")
+    void done_task_with_mapping_emits_delete() {
+        // Given — DONE with an existing Apple mapping: the reminder must be removed from Apple.
+        // This covers ExecutableUpdatedEvent (Notion/SYSTEM origin) and TaskCompletedEvent alike.
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(task("DONE")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-1")));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then a DELETE command targeting the existing EventKit id
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.DELETED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.REMINDER);
+        assertThat(captor.getValue().entityId()).isEqualTo("EK-1");
+        assertThat(captor.getValue().payload()).isNull();
+    }
+
+    @Test
+    @DisplayName("DONE unmapped: no command is emitted (nothing to remove from Apple)")
+    void done_task_without_mapping_is_skipped() {
+        // Given — DONE but no Apple mapping: the reminder was never created or already deleted.
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(task("DONE")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.empty());
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
+
+        // Then
+        verify(commandPublisher, never()).publish(any(), anyString());
+        verifyNoInteractions(commandLogRepo);
+    }
+
+    @Test
+    @DisplayName("TaskCompletedEvent on a mapped DONE HABIT emits DELETE (habit clone scenario)")
+    void task_completed_event_emits_delete() {
+        // Given — DONE via TaskCompletedEvent (e.g. HABIT marked done in Notion)
         when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(task("DONE")));
         when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
             .thenReturn(Optional.of(mapping("EK-1")));
@@ -140,11 +179,10 @@ class AppleEventPropagatorTest {
         // When
         service.propagate(event("TASK", "TaskCompletedEvent", "SYSTEM"));
 
-        // Then
-        ArgumentCaptor<PendingWriteCommand> pending = ArgumentCaptor.forClass(PendingWriteCommand.class);
-        verify(commandLogRepo).upsertPending(pending.capture());
-        assertThat(pending.getValue().operation()).isEqualTo(Operation.UPDATED);
-        assertThat(pending.getValue().payloadJson()).contains("\"completed\":true");
+        // Then DELETE, not UPDATED with completed=true
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.DELETED);
     }
 
     @Test
