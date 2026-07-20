@@ -3,6 +3,7 @@ name: CD
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Serialize deploys — prevents a slow rollout from racing with the next push.
 concurrency:
