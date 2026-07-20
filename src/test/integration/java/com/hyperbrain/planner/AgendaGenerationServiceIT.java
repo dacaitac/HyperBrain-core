@@ -169,11 +169,13 @@ class AgendaGenerationServiceIT {
     @DisplayName("observed sleep frontier: enough fresh records shift the window off the cold-start default")
     void observed_frontier_replaces_cold_start() {
         // Five fresh nights waking at 05:00 UTC, well before the 06:30 cold-start default.
+        // Dates are relative to now() so records always fall within the 14-day history window,
+        // regardless of when the test runs.
+        OffsetDateTime collectedAt = OffsetDateTime.now(UTC).minusHours(2);
         for (int i = 1; i <= 5; i++) {
-            insertSleepRecord(
-                OffsetDateTime.of(2026, 7, 10, 0, 0, 0, 0, UTC).minusDays(i),   // bedtime ~00:00
-                OffsetDateTime.of(2026, 7, 10, 5, 0, 0, 0, UTC).minusDays(i),   // wake 05:00
-                80, OffsetDateTime.now(UTC).minusHours(2));
+            OffsetDateTime wake = OffsetDateTime.now(UTC).minusDays(i)
+                .withHour(5).withMinute(0).withSecond(0).withNano(0);
+            insertSleepRecord(wake.withHour(0), wake, 80, collectedAt);
         }
         UUID task = insertTask("Early bird", 0.9, 60);
 
