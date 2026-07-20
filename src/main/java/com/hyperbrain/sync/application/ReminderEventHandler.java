@@ -145,7 +145,9 @@ public class ReminderEventHandler implements IEventHandler {
             EXTERNAL_SYSTEM, event.entityId());
 
         if (existing.isEmpty()) {
-            log.warn("REMINDER {} not found in sync_mappings; DELETE event {} has no effect",
+            log.warn("REMINDER Apple-ID={} not found in sync_mappings; DELETE event {} has no effect "
+                    + "(likely cause: write-back reminder without a registered mapping, "
+                    + "or a native Apple reminder not tracked by HyperBrain)",
                 event.entityId(), event.eventId());
             return;
         }

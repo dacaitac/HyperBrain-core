@@ -135,6 +135,10 @@ public class AgendaGenerationService {
             stageAgendaBlockDelivery(userId, targetDay, zone, agenda.energyCriterion(), now);
         }
 
+        if (fromNow) {
+            log.info("Replan completed: {} new block(s), {} deleted (from {})",
+                validated.accepted().size(), cleared, window.lowerBound());
+        }
         log.info("Planned {} block(s) for user {} ({} mode); replaced {} prior, {} excluded, {} paused, degraded={}",
             validated.accepted().size(), userId, fromNow ? "replan" : "full-day",
             cleared, agenda.excluded().size(), agenda.paused().size(), agenda.degraded());
