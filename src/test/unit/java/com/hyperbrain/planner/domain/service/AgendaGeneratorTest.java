@@ -67,7 +67,7 @@ class AgendaGeneratorTest {
     @DisplayName("wall: a read-only AGENDA executable is excluded, never scheduled (ADR-009)")
     void excludes_read_only_agenda() {
         SchedulableExecutable agendaExecutable = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.AGENDA, 0.9, false, null, null, 0, 30, 0);
+            UUID.randomUUID(), ExecutableType.AGENDA, 0.9, false, null, null, 0, 30, 0, null);
         PlannerDayState state =
             state(List.of(agendaExecutable), List.of(), List.of(), NEUTRAL, true);
 
@@ -217,7 +217,7 @@ class AgendaGeneratorTest {
     @DisplayName("paused: an IN_PROGRESS executable that gets no block is listed explicitly")
     void lists_paused_in_progress() {
         SchedulableExecutable inProgressNoRoom = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, 0.5, true, null, null, 0, 0, 0); // zero effort
+            UUID.randomUUID(), ExecutableType.TASK, 0.5, true, null, null, 0, 0, 0, null); // zero effort
         PlannerDayState state =
             state(List.of(inProgressNoRoom), List.of(), List.of(), NEUTRAL, true);
 
@@ -244,13 +244,51 @@ class AgendaGeneratorTest {
     void excludes_zero_effort() {
         // estimated=0 means fully overrun; the calculator returns 0 → the generator excludes it.
         SchedulableExecutable zero = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 0, 0);
+            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 0, 0, null);
         PlannerDayState state = state(List.of(zero), List.of(), List.of(), NEUTRAL, true);
 
         Agenda agenda = generator.generate(state);
 
         assertThat(agenda.excluded())
             .containsExactly(new ExcludedExecutable(zero.id(), ExclusionReason.NO_REMAINING_EFFORT));
+    }
+
+    @Test
+    @DisplayName("pinned end: a task with dueInstant inside the window ends exactly at dueInstant")
+    void pinned_end_within_window_anchors_block_end() {
+        // Given: a task due at 22:00 (1h before bedtime) with 60 min of effort
+        OffsetDateTime due = BEDTIME.minusHours(1); // 22:00 UTC
+        SchedulableExecutable executable = new SchedulableExecutable(
+            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, due);
+        PlannerDayState state = state(List.of(executable), List.of(), List.of(), NEUTRAL, true);
+
+        // When
+        Agenda agenda = generator.generate(state);
+
+        // Then: exactly one block, ending at due and starting 60 min before
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.end()).isEqualTo(due);
+        assertThat(block.start()).isEqualTo(due.minusMinutes(60));
+    }
+
+    @Test
+    @DisplayName("pinned end: a dueInstant outside the window falls back to cursor placement")
+    void pinned_end_outside_window_falls_back_to_cursor() {
+        // Given: a task due at midnight (00:00 on targetDay) — before the 07:00 window start
+        OffsetDateTime midnight = OffsetDateTime.of(2026, 7, 10, 0, 0, 0, 0, ZoneOffset.UTC);
+        SchedulableExecutable executable = new SchedulableExecutable(
+            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, midnight);
+        PlannerDayState state = state(List.of(executable), List.of(), List.of(), NEUTRAL, true);
+
+        // When
+        Agenda agenda = generator.generate(state);
+
+        // Then: the task is still placed (cursor fallback), but not ending at midnight
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.end()).isNotEqualTo(midnight);
+        assertThat(block.start()).isAfterOrEqualTo(WAKE);
     }
 
     private static PlannerDayState state(
@@ -266,16 +304,16 @@ class AgendaGeneratorTest {
 
     private static SchedulableExecutable task(double priority, int estimatedMinutes) {
         return new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, priority, false, null, null, 0, estimatedMinutes, 0);
+            UUID.randomUUID(), ExecutableType.TASK, priority, false, null, null, 0, estimatedMinutes, 0, null);
     }
 
     private static SchedulableExecutable highLoad(double priority, int estimatedMinutes) {
         return new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, priority, false, 5, null, 0, estimatedMinutes, 0);
+            UUID.randomUUID(), ExecutableType.TASK, priority, false, 5, null, 0, estimatedMinutes, 0, null);
     }
 
     private static SchedulableExecutable highLoadWithId(UUID id, double priority, int estimatedMinutes) {
         return new SchedulableExecutable(
-            id, ExecutableType.LEAD_MEASURE, priority, false, 5, null, 0, estimatedMinutes, 0);
+            id, ExecutableType.LEAD_MEASURE, priority, false, 5, null, 0, estimatedMinutes, 0, null);
     }
 }

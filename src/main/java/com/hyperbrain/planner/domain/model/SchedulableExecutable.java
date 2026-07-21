@@ -1,5 +1,6 @@
 package com.hyperbrain.planner.domain.model;
 
+import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
@@ -32,6 +33,10 @@ import java.util.UUID;
  *                             without-subtasks branch; null when unestimated
  * @param settledActualMinutes Σ {@code actual_duration_minutes} of the task's settled blocks; the
  *                             work already spent, subtracted in the without-subtasks branch
+ * @param dueInstant           the {@code core_executable.end_time} timestamp; when non-null,
+ *                             constrains placement to the matching calendar day and pins the block's
+ *                             end to this instant when within the planning window; null when no due
+ *                             date is set
  */
 public record SchedulableExecutable(
     UUID id,
@@ -42,7 +47,8 @@ public record SchedulableExecutable(
     Double learnedUnitCost,
     int pendingSubtasks,
     Integer estimatedMinutes,
-    int settledActualMinutes
+    int settledActualMinutes,
+    OffsetDateTime dueInstant
 ) {
 
     public SchedulableExecutable {
@@ -58,6 +64,7 @@ public record SchedulableExecutable(
         if (settledActualMinutes < 0) {
             throw new IllegalArgumentException("settledActualMinutes must be non-negative: " + settledActualMinutes);
         }
+        // dueInstant nullable: no validation needed
     }
 
     /** @return the ranking key: the priority score, or the neutral floor {@code 0.0} when null */

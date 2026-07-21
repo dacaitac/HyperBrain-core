@@ -50,18 +50,18 @@ class RemainingEffortCalculatorTest {
     @DisplayName("no cu and no estimate: falls back to COLD_START_MINUTES so the task is schedulable")
     void no_signal_falls_back_to_cold_start() {
         SchedulableExecutable executable = new SchedulableExecutable(
-            ID, ExecutableType.TASK, 0.5, false, null, null, 0, null, 0);
+            ID, ExecutableType.TASK, 0.5, false, null, null, 0, null, 0, null);
 
         assertThat(RemainingEffortCalculator.remainingMinutes(executable))
             .isEqualTo(RemainingEffortCalculator.COLD_START_MINUTES);
     }
 
     private static SchedulableExecutable withSubtasks(int pending, double cu) {
-        return new SchedulableExecutable(ID, ExecutableType.TASK, 0.5, false, null, cu, pending, null, 0);
+        return new SchedulableExecutable(ID, ExecutableType.TASK, 0.5, false, null, cu, pending, null, 0, null);
     }
 
     private static SchedulableExecutable withoutSubtasks(int estimated, int settled) {
         return new SchedulableExecutable(
-            ID, ExecutableType.TASK, 0.5, false, null, null, 0, estimated, settled);
+            ID, ExecutableType.TASK, 0.5, false, null, null, 0, estimated, settled, null);
     }
 }

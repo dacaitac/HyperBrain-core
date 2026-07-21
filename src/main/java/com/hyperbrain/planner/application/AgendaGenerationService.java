@@ -117,6 +117,8 @@ public class AgendaGenerationService {
         List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId)
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
+            .filter(e -> e.dueInstant() == null
+                      || e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
             .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
         List<OccupiedInterval> occupied = repository.loadOccupiedIntervals(

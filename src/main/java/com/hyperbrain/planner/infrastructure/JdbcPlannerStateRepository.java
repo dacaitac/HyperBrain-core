@@ -140,7 +140,8 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                   AND sub.system_generated = false)              AS total_subtasks,
                COALESCE((SELECT sum(b.actual_duration_minutes) FROM core_time_block b
                 WHERE b.executable_id = e.id
-                  AND b.actual_duration_minutes IS NOT NULL), 0) AS settled_actual
+                  AND b.actual_duration_minutes IS NOT NULL), 0) AS settled_actual,
+               e.end_time                                        AS due_instant
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
         WHERE e.user_id = ?
@@ -371,7 +372,8 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 learnedCu,
                 rs.getInt("pending_subtasks"),
                 rs.getObject("estimated_minutes", Integer.class),
-                rs.getInt("settled_actual"));
+                rs.getInt("settled_actual"),
+                rs.getObject("due_instant", OffsetDateTime.class));
         }, userId);
     }
 

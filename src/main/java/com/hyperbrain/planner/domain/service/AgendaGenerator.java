@@ -128,6 +128,24 @@ public class AgendaGenerator {
                 continue;
             }
 
+            // Pinned-end placement: when the executable has a due instant that falls within the
+            // planning window, anchor the block's end to that instant (deadline-driven scheduling).
+            OffsetDateTime dueInstant = executable.dueInstant();
+            if (dueInstant != null) {
+                OffsetDateTime pinnedEnd = dueInstant;
+                OffsetDateTime pinnedStart = pinnedEnd.minusMinutes(minutes);
+                if (!pinnedStart.isBefore(state.windowStart()) && !pinnedEnd.isAfter(state.windowEnd())) {
+                    blocks.add(new AgendaBlock(executable.id(), pinnedStart, pinnedEnd, false, highLoad,
+                        rankReasonPinned(executable, minutes)));
+                    walls.add(new OccupiedInterval(executable.id(), pinnedStart, pinnedEnd, false));
+                    placed.add(executable.id());
+                    if (highLoad) highLoadUsed++;
+                    urgentPlaced++;
+                    continue;
+                }
+                // Due instant outside window (e.g. midnight) — fall through to cursor-based placement.
+            }
+
             Optional<OffsetDateTime> slot =
                 earliestSlot(state.windowStart(), rankingLimit, minutes, walls);
             if (slot.isEmpty()) {
@@ -238,5 +256,12 @@ public class AgendaGenerator {
         return String.format(
             "Ranked by priority %.3f, %d min remaining effort, %s",
             executable.rankingScore(), minutes, load);
+    }
+
+    private String rankReasonPinned(SchedulableExecutable executable, int minutes) {
+        String load = executable.isHighLoad(constraints.highLoadDrainFloor()) ? "high-load" : "standard";
+        return String.format(
+            "Pinned to due time %s, %d min remaining effort, priority %.3f, %s",
+            executable.dueInstant(), minutes, executable.rankingScore(), load);
     }
 }
