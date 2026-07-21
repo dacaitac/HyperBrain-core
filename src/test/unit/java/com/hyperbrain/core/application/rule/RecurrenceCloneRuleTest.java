@@ -16,29 +16,29 @@ import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
-@DisplayName("HabitRecurrenceRule (DR-04)")
-class HabitRecurrenceRuleTest {
+@DisplayName("RecurrenceCloneRule (DR-04)")
+class RecurrenceCloneRuleTest {
 
     private static final OffsetDateTime DUE = OffsetDateTime.of(2026, 7, 12, 0, 0, 0, 0, ZoneOffset.UTC);
+    private static final OffsetDateTime END = DUE.plusHours(1);
 
     private ExecutableStateRepository stateRepo;
     private OutboxRepository outboxRepo;
-    private HabitRecurrenceRule rule;
+    private RecurrenceCloneRule rule;
 
     @BeforeEach
     void setUp() {
         stateRepo = mock(ExecutableStateRepository.class);
         outboxRepo = mock(OutboxRepository.class);
-        rule = new HabitRecurrenceRule(stateRepo, outboxRepo);
+        rule = new RecurrenceCloneRule(stateRepo, outboxRepo);
     }
 
     @Test
     @DisplayName("DONE transition with frequency: upserts clone with start_time + frequency days and emits ExecutableCreatedEvent")
-    void done_with_frequency_clones_habit() {
+    void done_with_frequency_clones_executable() {
         ExecutableSnapshot previous = habit("TODO");
         ExecutableSnapshot merged   = habit("DONE");
 
@@ -57,7 +57,7 @@ class HabitRecurrenceRuleTest {
         assertThat(clone.status()).isEqualTo("TODO");
         assertThat(clone.frequency()).isEqualTo(10.0);
         assertThat(clone.startTime()).isEqualTo(DUE.plusDays(10));
-        assertThat(clone.endTime()).isNull();
+        assertThat(clone.endTime()).isEqualTo(END.plusDays(10));
         assertThat(clone.priorityScore()).isNull();
         assertThat(clone.urgencyScore()).isNull();
         assertThat(clone.systemGenerated()).isFalse();
@@ -71,6 +71,20 @@ class HabitRecurrenceRuleTest {
         assertThat(event.sourceSystem()).isEqualTo("SYSTEM");
         assertThat(event.payload()).contains("\"local_id\":\"" + clone.id() + "\"");
         assertThat(event.payload()).contains("\"operation\":\"CREATED\"");
+    }
+
+    @Test
+    @DisplayName("null end_time: clone has null end_time (no crash)")
+    void null_end_time_produces_null_next_end() {
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .type("HABIT").status("DONE").frequency(10.0).startTime(DUE).build();
+
+        rule.apply(ExecutableSnapshotBuilder.snapshot().type("HABIT").status("TODO").build(),
+            merged, ExternalSystem.NOTION);
+
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(stateRepo).upsertExecutable(captor.capture());
+        assertThat(captor.getValue().endTime()).isNull();
     }
 
     @Test
@@ -169,6 +183,7 @@ class HabitRecurrenceRuleTest {
             .status(status)
             .frequency(10.0)
             .startTime(DUE)
+            .endTime(END)
             .build();
     }
 }

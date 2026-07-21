@@ -3,7 +3,7 @@ package com.hyperbrain.core.application;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.DomainRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
-import com.hyperbrain.core.application.rule.HabitRecurrenceRule;
+import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
 import com.hyperbrain.core.application.rule.ReestimationConfirmationRule;
 import com.hyperbrain.core.application.rule.SingleFocusRule;
@@ -25,7 +25,7 @@ import java.util.List;
  * domain-rule catalog (components.md) as an ordered chain, inside the ingestion transaction.
  * Chain order: DR-01 structural invariant first, DR-02 completion reactivation, then the focus
  * cut (DR-05/DR-06), then the re-estimation confirmation, then the progress recalculation
- * (DR-07), and finally the habit recurrence cloning (DR-04) — each link receives the snapshot
+ * (DR-07), and finally the recurrence cloning (DR-04) — each link receives the snapshot
  * the previous one produced.
  *
  * <p>Priority reflection (#66a) is deliberately <b>not</b> a link here. It is recomputed
@@ -45,7 +45,7 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         SingleFocusRule singleFocusRule,
         ReestimationConfirmationRule reestimationConfirmationRule,
         ProgressRecalculationRule progressRecalculationRule,
-        HabitRecurrenceRule habitRecurrenceRule
+        RecurrenceCloneRule recurrenceCloneRule
     ) {
         this.rules = List.of(
             endTimeInvariantRule,
@@ -53,7 +53,7 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
             singleFocusRule,
             reestimationConfirmationRule,
             progressRecalculationRule,
-            habitRecurrenceRule);
+            recurrenceCloneRule);
     }
 
     @Override

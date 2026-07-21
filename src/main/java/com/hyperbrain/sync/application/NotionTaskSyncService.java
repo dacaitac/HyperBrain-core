@@ -121,7 +121,7 @@ public class NotionTaskSyncService {
             SourceAwareMerge.mergeNotionTask(current, page, localId, defaultUserId, cycleId, parentId);
 
         // CA-4 echo check runs on the pre-rules snapshot so that stateful domain rules
-        // (specifically HabitRecurrenceRule / DR-04) never fire on Notion echoes.
+        // (specifically RecurrenceCloneRule / DR-04) never fire on Notion echoes.
         // Rationale: the stored checksum was produced by NotionEventPropagator from the same
         // Notion-authority fields that SourceAwareMerge copies into `merged`, so the comparison
         // is valid for genuine echoes. When Core-authority fields (e.g. priority_score) diverged
@@ -129,7 +129,7 @@ public class NotionTaskSyncService {
         // to the normal UPDATED path, which is correct (the score needs to propagate back).
         // Critical scenario blocked by this ordering: after a DONE entity is deleted from Apple
         // (handleDeleted removes the core_executable row), a late Notion webhook arrives with
-        // current=null and merged=DONE; without this guard HabitRecurrenceRule fires
+        // current=null and merged=DONE; without this guard RecurrenceCloneRule fires
         // (becameDone(null, DONE)=true) and creates a spurious clone. With the guard, the stored
         // DONE checksum matches and the event is correctly discarded.
         Map<String, Object> preRulesProps =

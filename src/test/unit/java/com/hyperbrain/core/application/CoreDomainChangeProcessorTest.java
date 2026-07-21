@@ -2,7 +2,7 @@ package com.hyperbrain.core.application;
 
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
-import com.hyperbrain.core.application.rule.HabitRecurrenceRule;
+import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
 import com.hyperbrain.core.application.rule.ReestimationConfirmationRule;
 import com.hyperbrain.core.application.rule.SingleFocusRule;
@@ -30,7 +30,7 @@ class CoreDomainChangeProcessorTest {
     private SingleFocusRule focusRule;
     private ReestimationConfirmationRule reestimationRule;
     private ProgressRecalculationRule progressRule;
-    private HabitRecurrenceRule habitRule;
+    private RecurrenceCloneRule habitRule;
     private CoreDomainChangeProcessor processor;
 
     @BeforeEach
@@ -40,7 +40,7 @@ class CoreDomainChangeProcessorTest {
         focusRule = mock(SingleFocusRule.class);
         reestimationRule = mock(ReestimationConfirmationRule.class);
         progressRule = mock(ProgressRecalculationRule.class);
-        habitRule = mock(HabitRecurrenceRule.class);
+        habitRule = mock(RecurrenceCloneRule.class);
         processor = new CoreDomainChangeProcessor(
             endTimeRule, completionReactivationRule, focusRule, reestimationRule, progressRule, habitRule);
     }

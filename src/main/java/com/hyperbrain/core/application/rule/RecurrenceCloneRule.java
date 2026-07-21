@@ -20,11 +20,12 @@ import java.util.UUID;
  */
 
 /**
- * DR-04 — Habit recurrence cloning.
+ * DR-04 — Recurrence cloning for any executable with {@code frequency > 0}.
  *
  * <p>When an executable with {@code frequency > 0} transitions to {@code DONE}, a clone is
  * persisted immediately with {@code start_time = original.start_time + frequency days} and
- * {@code status = TODO}. The clone carries the same user, parent, cycle, type, effort,
+ * {@code end_time = original.end_time + frequency days} (null if the original had no end time),
+ * and {@code status = TODO}. The clone carries the same user, parent, cycle, type, effort,
  * profile scales, and recurrence metadata — priority and urgency scores are left null for the
  * Prioritizer tick to recompute (ADR-020 D2).
  *
@@ -40,9 +41,9 @@ import java.util.UUID;
  * double-clones).
  */
 @Component
-public class HabitRecurrenceRule implements DomainRule {
+public class RecurrenceCloneRule implements DomainRule {
 
-    private static final Logger log = LoggerFactory.getLogger(HabitRecurrenceRule.class);
+    private static final Logger log = LoggerFactory.getLogger(RecurrenceCloneRule.class);
 
     private static final String DONE = "DONE";
     private static final String TODO = "TODO";
@@ -52,7 +53,7 @@ public class HabitRecurrenceRule implements DomainRule {
     private final ExecutableStateRepository stateRepo;
     private final OutboxRepository outboxRepo;
 
-    public HabitRecurrenceRule(ExecutableStateRepository stateRepo, OutboxRepository outboxRepo) {
+    public RecurrenceCloneRule(ExecutableStateRepository stateRepo, OutboxRepository outboxRepo) {
         this.stateRepo = stateRepo;
         this.outboxRepo = outboxRepo;
     }
@@ -66,7 +67,7 @@ public class HabitRecurrenceRule implements DomainRule {
         ExecutableSnapshot clone = buildClone(merged);
         stateRepo.upsertExecutable(clone);
         appendCreatedEvent(clone);
-        log.info("Habit {} cloned as {} (frequency {} days, next due {})",
+        log.info("Executable {} cloned as {} (frequency {} days, next due {})",
             merged.id(), clone.id(), merged.frequency().longValue(), clone.startTime());
         return merged;
     }
@@ -84,6 +85,9 @@ public class HabitRecurrenceRule implements DomainRule {
         OffsetDateTime nextDue = source.startTime() != null
             ? source.startTime().plusDays(source.frequency().longValue())
             : null;
+        OffsetDateTime nextEndTime = source.endTime() != null
+            ? source.endTime().plusDays(source.frequency().longValue())
+            : null;
         return new ExecutableSnapshot(
             UUID.randomUUID(),
             source.userId(),
@@ -99,7 +103,7 @@ public class HabitRecurrenceRule implements DomainRule {
             source.isImportant(),
             source.frequency(),
             nextDue,
-            null,
+            nextEndTime,
             source.sourceCalendar(),
             source.energyDrain(),
             source.mentalLoad(),
