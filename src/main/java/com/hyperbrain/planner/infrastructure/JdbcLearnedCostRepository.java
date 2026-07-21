@@ -65,7 +65,7 @@ class JdbcLearnedCostRepository implements LearnedCostRepository {
             jdbcTemplate.query(OBSERVATIONS_SQL, OBSERVATION_MAPPER, taskId);
         Integer estimatedMinutes = jdbcTemplate.query(ESTIMATE_SQL,
             (rs, rowNum) -> rs.getObject("estimated_minutes", Integer.class), taskId)
-            .stream().findFirst().orElse(null);
+            .stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
         Integer totalSubtasks =
             jdbcTemplate.queryForObject(TOTAL_SUBTASKS_SQL, Integer.class, taskId);
 

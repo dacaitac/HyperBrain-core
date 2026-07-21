@@ -354,7 +354,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         return jdbcTemplate.query(LAST_NIGHT_SCORE_SQL,
                 (rs, rowNum) -> rs.getObject("sleep_score", Integer.class),
                 userId, constraints.sleepFreshnessHours())
-            .stream().findFirst().orElse(null);
+            .stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
     }
 
     @Override
