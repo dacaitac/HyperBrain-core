@@ -4,12 +4,14 @@ import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
+import com.hyperbrain.sync.domain.model.CoreExecutable;
 import com.hyperbrain.sync.domain.model.EntityType;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SentinelEvent;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
+import com.hyperbrain.sync.domain.port.out.PlannerBlockDeletionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
@@ -38,6 +40,7 @@ class CalendarEventHandlerTest {
     private SyncMappingRepository syncMappingRepo;
     private OutboxRepository outboxRepo;
     private OnIngestionPriorityReflector priorityReflector;
+    private PlannerBlockDeletionPort plannerBlockDeletionPort;
     private CalendarEventHandler handler;
 
     private static final UUID USER_ID =
@@ -50,9 +53,11 @@ class CalendarEventHandlerTest {
         syncMappingRepo = mock(SyncMappingRepository.class);
         outboxRepo = mock(OutboxRepository.class);
         priorityReflector = mock(OnIngestionPriorityReflector.class);
+        plannerBlockDeletionPort = mock(PlannerBlockDeletionPort.class);
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
         handler = new CalendarEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
-            outboxRepo, new EndTimeInvariantRule()::apply, priorityReflector, parser, USER_ID);
+            outboxRepo, new EndTimeInvariantRule()::apply, priorityReflector, parser,
+            plannerBlockDeletionPort, USER_ID);
     }
 
     @Test
@@ -122,17 +127,65 @@ class CalendarEventHandlerTest {
     }
 
     @Test
-    @DisplayName("DELETED: removes records and appends outbox event")
+    @DisplayName("DELETED of an executable-backed event: removes records and appends outbox event")
     void deleted_removes_and_appends_outbox() {
         UUID localId = UUID.randomUUID();
         when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-5"))
             .thenReturn(Optional.of(syncMapping("EKEvent-5", localId, "x")));
+        when(executableRepo.findById(localId)).thenReturn(Optional.of(executable(localId)));
 
         handler.handle(calendarEvent("EKEvent-5", Operation.DELETED, null));
 
         verify(executableRepo).deleteById(localId);
         verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-5");
         verify(outboxRepo).append(any(OutboxEvent.class));
+        verifyNoInteractions(plannerBlockDeletionPort);
+    }
+
+    @Test
+    @DisplayName("DELETED of a planner block (stale mapping): deletes the block and its mapping, no outbox")
+    void deleted_planner_block_removes_block() {
+        UUID blockId = UUID.randomUUID();
+        OffsetDateTime mappedLongAgo = OffsetDateTime.now().minusHours(1);
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-7"))
+            .thenReturn(Optional.of(syncMapping("EKEvent-7", blockId, "x", mappedLongAgo)));
+        when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
+        when(plannerBlockDeletionPort.deletePlannedBlock(blockId)).thenReturn(true);
+
+        handler.handle(calendarEvent("EKEvent-7", Operation.DELETED, null));
+
+        verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
+        verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-7");
+        verify(executableRepo, never()).deleteById(any());
+        verifyNoInteractions(outboxRepo);
+    }
+
+    @Test
+    @DisplayName("DELETED of a freshly mapped block: id-mutation guard skips the destructive delete")
+    void deleted_freshly_mapped_block_is_guarded() {
+        UUID blockId = UUID.randomUUID();
+        OffsetDateTime mappedJustNow = OffsetDateTime.now().minusMinutes(1);
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-8"))
+            .thenReturn(Optional.of(syncMapping("EKEvent-8", blockId, "x", mappedJustNow)));
+        when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
+
+        handler.handle(calendarEvent("EKEvent-8", Operation.DELETED, null));
+
+        verifyNoInteractions(plannerBlockDeletionPort, outboxRepo);
+        verify(syncMappingRepo, never()).deleteByExternalSystemAndId(any(), any());
+        verify(executableRepo, never()).deleteById(any());
+    }
+
+    @Test
+    @DisplayName("DELETED with no mapping: no-op")
+    void deleted_without_mapping_is_noop() {
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-9"))
+            .thenReturn(Optional.empty());
+
+        handler.handle(calendarEvent("EKEvent-9", Operation.DELETED, null));
+
+        verifyNoInteractions(executableRepo, plannerBlockDeletionPort, outboxRepo);
+        verify(syncMappingRepo, never()).deleteByExternalSystemAndId(any(), any());
     }
 
     @Test
@@ -174,8 +227,18 @@ class CalendarEventHandlerTest {
     }
 
     private static SyncMapping syncMapping(String externalId, UUID localId, String checksum) {
+        return syncMapping(externalId, localId, checksum, OffsetDateTime.now());
+    }
+
+    private static SyncMapping syncMapping(String externalId, UUID localId, String checksum,
+                                           OffsetDateTime lastSyncedAt) {
         return new SyncMapping(
             UUID.randomUUID(), USER_ID, localId,
-            "APPLE", externalId, checksum, "SYNCED", OffsetDateTime.now());
+            "APPLE", externalId, checksum, "SYNCED", lastSyncedAt);
+    }
+
+    private static CoreExecutable executable(UUID id) {
+        return new CoreExecutable(
+            id, USER_ID, "Team meeting", null, "ACTIVITY", "TODO", null, null, "Work", false);
     }
 }
