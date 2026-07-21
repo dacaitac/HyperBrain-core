@@ -12,6 +12,7 @@ import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.NotionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
+import com.hyperbrain.sync.infrastructure.NotionPageParser;
 import com.hyperbrain.sync.infrastructure.NotionSyncProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,10 +54,14 @@ class NotionEventPropagatorTest {
     private static final OffsetDateTime START =
         OffsetDateTime.of(2026, 7, 6, 14, 0, 0, 0, ZoneOffset.UTC);
 
+    private static final String BOT_USER_ID = "b0700000-0000-0000-0000-0000000000b0";
+    private static final String PERSON_USER_ID = "9e9e0000-0000-0000-0000-0000000000e9";
+
     private SyncSnapshotRepository snapshotRepo;
     private SyncMappingRepository syncMappingRepo;
     private NotionPort notion;
     private SimpleMeterRegistry meterRegistry;
+    private NotionSyncProperties properties;
     private NotionEventPropagator service;
 
     @BeforeEach
@@ -65,12 +70,12 @@ class NotionEventPropagatorTest {
         syncMappingRepo = mock(SyncMappingRepository.class);
         notion = mock(NotionPort.class);
         meterRegistry = new SimpleMeterRegistry();
-        NotionSyncProperties properties = new NotionSyncProperties();
+        properties = new NotionSyncProperties();
         properties.setEnabled(true);
         properties.setTasksDataSourceId(TASKS_DS);
         properties.setCyclesDataSourceId(CYCLES_DS);
         service = new NotionEventPropagator(snapshotRepo, syncMappingRepo, notion,
-            properties, new ObjectMapper(), meterRegistry);
+            new NotionPageParser(), properties, new ObjectMapper(), meterRegistry);
     }
 
     // ── Routing (CA-2, RF-17) ─────────────────────────────────────────────────
@@ -468,6 +473,108 @@ class NotionEventPropagatorTest {
             .isEqualTo(1.0);
     }
 
+    // ── ADR-020: score reflections are field-scoped and skip the pre-read ─────
+
+    @Test
+    @DisplayName("priority reflection PATCHes only Priority Score + Urgence and skips the pre-read")
+    void priority_reflection_patches_only_scores_and_skips_preread() {
+        // Given a mapped executable and a SYSTEM score reflection (marked payload); the bot id is
+        // configured, so the guard would run for a full mirror — but a reflection must skip it.
+        properties.setBotUserId(BOT_USER_ID);
+        givenExecutable(taskSnapshotWithScores("IN_PROGRESS", 0.8, 0.6),
+            mapping(LOCAL_ID, "page123", "old-checksum"));
+
+        // When
+        service.propagate(reflectionEvent());
+
+        // Then only the two SYSTEM-owned score properties are patched — no name/status/etc.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> props = ArgumentCaptor.forClass(Map.class);
+        verify(notion).updatePage(eq("page123"), props.capture());
+        assertThat(props.getValue()).containsOnlyKeys("Priority Score", "Urgence");
+        assertThat(props.getValue().get("Priority Score")).isEqualTo(Map.of("number", 0.8));
+        assertThat(props.getValue().get("Urgence")).isEqualTo(Map.of("number", 0.6));
+        // And the page is never re-read (the reflection cannot collide with a human edit)
+        verify(notion, never()).retrievePage(anyString());
+        // And the checksum still refreshes over the FULL mirror so inbound echoes are recognized
+        ArgumentCaptor<SyncMapping> mapping = ArgumentCaptor.forClass(SyncMapping.class);
+        verify(syncMappingRepo).update(mapping.capture());
+        assertThat(mapping.getValue().lastKnownChecksum()).hasSize(64).isNotEqualTo("old-checksum");
+    }
+
+    // ── ADR-020: outbound staleness guard for full-mirror write-backs ─────────
+
+    @Test
+    @DisplayName("full-mirror write-back is discarded when a person is editing the page in flight")
+    void genuine_change_discarded_when_human_edit_in_flight() {
+        // Given a mapped executable last synced at 10:00 and an APPLE domain change to write back
+        OffsetDateTime lastSynced = OffsetDateTime.of(2026, 7, 20, 10, 0, 0, 0, ZoneOffset.UTC);
+        properties.setBotUserId(BOT_USER_ID);
+        givenExecutable(taskSnapshot("DONE"), mappingSyncedAt(LOCAL_ID, "page123", lastSynced));
+        // The page's last editor is a person, editing in the same minute as our last sync
+        when(notion.retrievePage("page123")).thenReturn(pageJson(PERSON_USER_ID, lastSynced));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE"));
+
+        // Then the write-back is dropped: no patch, no mapping refresh, no error marker
+        verify(notion, never()).updatePage(anyString(), anyMap());
+        verify(syncMappingRepo, never()).update(any(SyncMapping.class));
+        assertThat(meterRegistry.counter("hyperbrain.sync.notion.skips",
+            "reason", "human_edit_in_flight").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("minute asymmetry: an equal-timestamp human edit wins; a strictly-older one does not")
+    void guard_bias_is_opposite_to_ca29() {
+        properties.setBotUserId(BOT_USER_ID);
+        OffsetDateTime lastSynced = OffsetDateTime.of(2026, 7, 20, 10, 0, 0, 0, ZoneOffset.UTC);
+
+        // Equal-minute person edit → discard (opposite to CA-29, which keeps same-minute inbound)
+        givenExecutable(taskSnapshot("DONE"), mappingSyncedAt(LOCAL_ID, "pageEq", lastSynced));
+        when(notion.retrievePage("pageEq")).thenReturn(pageJson(PERSON_USER_ID, lastSynced));
+        service.propagate(event("CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE"));
+        verify(notion, never()).updatePage(anyString(), anyMap());
+
+        // Strictly-older person edit (already reconciled) → the write-back proceeds
+        OffsetDateTime older = lastSynced.minusMinutes(1);
+        givenExecutable(taskSnapshot("DONE"), mappingSyncedAt(LOCAL_ID, "pageOld", lastSynced));
+        when(notion.retrievePage("pageOld")).thenReturn(pageJson(PERSON_USER_ID, older));
+        service.propagate(event("CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE"));
+        verify(notion).updatePage(eq("pageOld"), anyMap());
+    }
+
+    @Test
+    @DisplayName("full-mirror write-back proceeds when the last editor is the integration bot")
+    void genuine_change_proceeds_when_last_editor_is_the_bot() {
+        // Given the page's last edit was the Core's own write (last_edited_by = bot), same minute
+        OffsetDateTime lastSynced = OffsetDateTime.of(2026, 7, 20, 10, 0, 0, 0, ZoneOffset.UTC);
+        properties.setBotUserId(BOT_USER_ID);
+        givenExecutable(taskSnapshot("DONE"), mappingSyncedAt(LOCAL_ID, "page123", lastSynced));
+        when(notion.retrievePage("page123")).thenReturn(pageJson(BOT_USER_ID, lastSynced));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE"));
+
+        // Then the write-back is not blocked by the Core's own prior write
+        verify(notion).updatePage(eq("page123"), anyMap());
+        verify(syncMappingRepo).update(any(SyncMapping.class));
+    }
+
+    @Test
+    @DisplayName("guard is inert when the integration bot id is not configured (no pre-read)")
+    void guard_inert_without_bot_id() {
+        // Given no bot id configured (properties.botUserId left blank)
+        givenExecutable(taskSnapshot("DONE"), mapping(LOCAL_ID, "page123", null));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE"));
+
+        // Then the page is never re-read and the full mirror is written as before
+        verify(notion, never()).retrievePage(anyString());
+        verify(notion).updatePage(eq("page123"), anyMap());
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private void givenUnmappedExecutable(ExecutableSnapshot snapshot) {
@@ -485,6 +592,13 @@ class NotionEventPropagatorTest {
     private static ExecutableSnapshot taskSnapshot(String status) {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", null,
             "TASK", status, null, null, null, false, null, START, null, null, null, null, null, false);
+    }
+
+    private static ExecutableSnapshot taskSnapshotWithScores(String status, double priority,
+                                                             double urgency) {
+        return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", null,
+            "TASK", status, priority, urgency, null, false, null, START, null, null, null, null,
+            null, false);
     }
 
     private static ExecutableSnapshot systemGeneratedSnapshot() {
@@ -507,8 +621,27 @@ class NotionEventPropagatorTest {
             checksum, "SYNCED", OffsetDateTime.now());
     }
 
+    private static SyncMapping mappingSyncedAt(UUID localId, String externalId,
+                                               OffsetDateTime lastSyncedAt) {
+        return new SyncMapping(UUID.randomUUID(), USER_ID, localId, "NOTION", externalId,
+            "old-checksum", "SYNCED", lastSyncedAt);
+    }
+
     private static OutboxEvent event(String aggregateType, String eventType, String sourceSystem) {
         return new OutboxEvent(UUID.randomUUID(), aggregateType, LOCAL_ID.toString(),
             eventType, "{}", sourceSystem, OffsetDateTime.now());
+    }
+
+    /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the ADR-020 score-reflection marker. */
+    private static OutboxEvent reflectionEvent() {
+        return new OutboxEvent(UUID.randomUUID(), "CORE_EXECUTABLE", LOCAL_ID.toString(),
+            "ExecutableUpdatedEvent", "{\"operation\":\"UPDATED\",\"reflection\":\"PRIORITY_SCORE\"}",
+            "SYSTEM", OffsetDateTime.now());
+    }
+
+    private static String pageJson(String editorId, OffsetDateTime lastEdited) {
+        return "{\"object\":\"page\","
+            + "\"last_edited_by\":{\"object\":\"user\",\"id\":\"" + editorId + "\"},"
+            + "\"last_edited_time\":\"" + lastEdited + "\"}";
     }
 }

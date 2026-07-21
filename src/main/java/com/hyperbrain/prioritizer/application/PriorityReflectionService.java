@@ -63,10 +63,13 @@ public class PriorityReflectionService {
     }
 
     /**
-     * The propagator re-reads the row and needs only the local id (carried in {@code aggregate_id});
-     * the operation marker keeps the payload consistent with the sync-produced upsert events.
+     * The propagator re-reads the row and needs only the local id (carried in {@code aggregate_id}).
+     * The {@code reflection=PRIORITY_SCORE} marker tells it this write-back only touches the
+     * SYSTEM-owned score fields, so it PATCHes just those (never the full page mirror) and skips the
+     * outbound human-edit pre-read — the user never edits scores, so this tier cannot collide with a
+     * manual edit (ADR-020 write-back field scoping).
      */
     private static String minimalPayload() {
-        return "{\"operation\":\"UPDATED\"}";
+        return "{\"operation\":\"UPDATED\",\"reflection\":\"PRIORITY_SCORE\"}";
     }
 }

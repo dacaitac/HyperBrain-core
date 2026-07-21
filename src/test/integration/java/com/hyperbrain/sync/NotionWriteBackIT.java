@@ -10,6 +10,7 @@ import com.github.tomakehurst.wiremock.verification.LoggedRequest;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
+import com.hyperbrain.sync.infrastructure.NotionSyncProperties;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -19,11 +20,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
@@ -67,9 +71,13 @@ class NotionWriteBackIT {
         NOTION.stop();
     }
 
+    private static final String BOT_USER_ID = "b0700000-0000-0000-0000-0000000000b0";
+    private static final String PERSON_USER_ID = "9e9e0000-0000-0000-0000-0000000000e9";
+
     @Autowired private OutboxWorker outboxWorker;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private NotionSyncProperties notionProperties;
 
     @BeforeEach
     void cleanState() throws Exception {
@@ -82,6 +90,9 @@ class NotionWriteBackIT {
         try (var conn = jdbcTemplate.getDataSource().getConnection()) {
             DataFixture.insertSystemUser(conn);
         }
+        // The outbound staleness guard is inert unless the integration bot id is configured; each
+        // test opts in explicitly, so reset it to keep the existing full-mirror tests unaffected.
+        notionProperties.setBotUserId("");
         NOTION.resetAll();
     }
 
@@ -414,6 +425,92 @@ class NotionWriteBackIT {
         assertThat(status).isEqualTo("ERROR");
     }
 
+    // ── ADR-020: score reflections are field-scoped and skip the pre-read ─────
+
+    @Test
+    @DisplayName("burst: a SYSTEM score reflection PATCHes only the scores and never pre-reads the page")
+    void score_reflection_is_field_scoped_and_skips_preread() throws Exception {
+        // Given a mapped executable whose page the user could be editing, and a SYSTEM score
+        // reflection. The bot id is configured, yet a reflection must still skip the guard.
+        notionProperties.setBotUserId(BOT_USER_ID);
+        UUID localId = insertExecutable("TASK", "IN_PROGRESS");
+        String externalId = "page0000000000000000000000ref001";
+        insertMapping(localId, externalId, "previous-checksum");
+        insertReflectionEvent(localId);
+        stubPatchPage(externalId);
+
+        // When the outbox drains
+        outboxWorker.drainBatch();
+
+        // Then only the two SYSTEM-owned score properties are patched — the user's Name/Status edit
+        // in flight is physically never overwritten
+        LoggedRequest patch = singleRequest(patchRequestedFor(urlEqualTo("/v1/pages/" + externalId)));
+        JsonNode props = objectMapper.readTree(patch.getBodyAsString()).path("properties");
+        assertThat(props.size()).isEqualTo(2);
+        assertThat(props.has("Priority Score")).isTrue();
+        assertThat(props.has("Urgence")).isTrue();
+        assertThat(props.has("Name")).isFalse();
+        assertThat(props.has("Status")).isFalse();
+        // And no pre-read (GET) is issued for the reflection
+        assertThat(NOTION.findAll(getRequestedFor(urlEqualTo("/v1/pages/" + externalId)))).isEmpty();
+        // And the checksum still refreshes over the full mirror so the inbound echo is recognized
+        String checksum = jdbcTemplate.queryForObject(
+            "SELECT last_known_checksum FROM sync_mappings WHERE external_id = ?",
+            String.class, externalId);
+        assertThat(checksum).hasSize(64).isNotEqualTo("previous-checksum");
+        assertThat(unprocessedEvents()).isZero();
+    }
+
+    @Test
+    @DisplayName("guard: a full-mirror write-back is discarded when a person is editing the page in flight")
+    void full_mirror_discarded_when_person_editing() {
+        // Given a mapped executable and an Apple domain change to write back, but the page's last
+        // editor is a person whose edit is newer than our last sync (a burst in flight)
+        notionProperties.setBotUserId(BOT_USER_ID);
+        UUID localId = insertExecutable("TASK", "DONE");
+        String externalId = "page0000000000000000000000grd001";
+        insertMapping(localId, externalId, "previous-checksum");
+        insertOutboxEvent(localId, "CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE");
+        stubRetrievePage(externalId, PERSON_USER_ID, OffsetDateTime.now().plusMinutes(5));
+        stubPatchPage(externalId);
+
+        // When
+        outboxWorker.drainBatch();
+
+        // Then the write-back is discarded: no PATCH, the mapping keeps its checksum, event completes
+        assertThat(NOTION.findAll(patchRequestedFor(urlEqualTo("/v1/pages/" + externalId)))).isEmpty();
+        String checksum = jdbcTemplate.queryForObject(
+            "SELECT last_known_checksum FROM sync_mappings WHERE external_id = ?",
+            String.class, externalId);
+        assertThat(checksum).isEqualTo("previous-checksum");
+        assertThat(unprocessedEvents()).isZero();
+    }
+
+    @Test
+    @DisplayName("guard: a full-mirror write-back proceeds when the page's last editor is the bot")
+    void full_mirror_proceeds_when_last_editor_is_bot() {
+        // Given the page's last edit was the Core's own write (last_edited_by = the integration bot)
+        notionProperties.setBotUserId(BOT_USER_ID);
+        UUID localId = insertExecutable("TASK", "DONE");
+        String externalId = "page0000000000000000000000grd002";
+        insertMapping(localId, externalId, "previous-checksum");
+        insertOutboxEvent(localId, "CORE_EXECUTABLE", "TaskCompletedEvent", "APPLE");
+        stubRetrievePage(externalId, BOT_USER_ID, OffsetDateTime.now().plusMinutes(5));
+        stubPatchPage(externalId);
+
+        // When
+        outboxWorker.drainBatch();
+
+        // Then the Core's own prior write does not block the follow-up: the full mirror is written
+        singleRequest(patchRequestedFor(urlEqualTo("/v1/pages/" + externalId))
+            .withRequestBody(matchingJsonPath("$.properties.Status.status.name",
+                WireMock.equalTo("Done"))));
+        String checksum = jdbcTemplate.queryForObject(
+            "SELECT last_known_checksum FROM sync_mappings WHERE external_id = ?",
+            String.class, externalId);
+        assertThat(checksum).hasSize(64).isNotEqualTo("previous-checksum");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void stubCreatePage(String dataSourceId, String pageId) {
@@ -430,6 +527,15 @@ class NotionWriteBackIT {
             .willReturn(aResponse().withStatus(200)
                 .withHeader("Content-Type", "application/json")
                 .withBody("{\"object\":\"page\",\"id\":\"" + pageId + "\"}")));
+    }
+
+    private void stubRetrievePage(String pageId, String lastEditedById, OffsetDateTime lastEditedTime) {
+        NOTION.stubFor(get(urlEqualTo("/v1/pages/" + pageId))
+            .willReturn(aResponse().withStatus(200)
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"object\":\"page\",\"id\":\"" + pageId + "\","
+                    + "\"last_edited_by\":{\"object\":\"user\",\"id\":\"" + lastEditedById + "\"},"
+                    + "\"last_edited_time\":\"" + lastEditedTime + "\"}")));
     }
 
     private LoggedRequest singleRequest(
@@ -485,6 +591,15 @@ class NotionWriteBackIT {
             INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, source_system, occurred_at)
             VALUES (?, ?, ?, ?, '{}'::jsonb, ?, now())
             """, UUID.randomUUID(), aggregateType, localId.toString(), eventType, sourceSystem);
+    }
+
+    /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the ADR-020 score-reflection marker. */
+    private void insertReflectionEvent(UUID localId) {
+        jdbcTemplate.update("""
+            INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, source_system, occurred_at)
+            VALUES (?, 'CORE_EXECUTABLE', ?, 'ExecutableUpdatedEvent',
+                    '{"operation":"UPDATED","reflection":"PRIORITY_SCORE"}'::jsonb, 'SYSTEM', now())
+            """, UUID.randomUUID(), localId.toString());
     }
 
     private int unprocessedEvents() {

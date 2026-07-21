@@ -27,6 +27,16 @@ public class NotionSyncProperties {
     /** Data source id of the Cycles database. */
     private String cyclesDataSourceId = "";
 
+    /**
+     * Notion user id of this integration's bot (the {@code last_edited_by} Notion stamps on the
+     * Core's own writes). Drives the outbound staleness guard: a page whose last human editor is a
+     * <em>person</em> (id ≠ this) has an edit in flight, so a full-mirror write-back that would
+     * clobber it is discarded (the inbound webhook reconciles). Obtainable once via
+     * {@code GET /v1/users/me}; provisioned via SOPS in HyperBrain-Infra. When blank the guard is
+     * inert (the actor cannot be identified), so the write-back proceeds as before.
+     */
+    private String botUserId = "";
+
     /** Database id of the Tasks database (webhook parents may carry it instead of the data source id, HU-14). */
     private String tasksDatabaseId = "";
 
@@ -94,6 +104,14 @@ public class NotionSyncProperties {
 
     public void setCyclesDataSourceId(String cyclesDataSourceId) {
         this.cyclesDataSourceId = cyclesDataSourceId;
+    }
+
+    public String getBotUserId() {
+        return botUserId;
+    }
+
+    public void setBotUserId(String botUserId) {
+        this.botUserId = botUserId;
     }
 
     public String getTasksDatabaseId() {

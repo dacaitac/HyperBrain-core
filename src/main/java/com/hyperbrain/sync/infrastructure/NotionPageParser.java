@@ -2,6 +2,7 @@ package com.hyperbrain.sync.infrastructure;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.hyperbrain.sync.domain.model.NotionCyclePage;
+import com.hyperbrain.sync.domain.model.NotionPageEditState;
 import com.hyperbrain.sync.domain.model.NotionTaskPage;
 import com.hyperbrain.sync.domain.service.NotionSchema;
 import org.springframework.stereotype.Component;
@@ -67,6 +68,20 @@ public class NotionPageParser {
             dateBound(props.path(NotionSchema.PROP_DATE), "start"),
             dateBound(props.path(NotionSchema.PROP_DATE), "end"),
             checkbox(props.path(NotionSchema.PROP_INACTIVE)));
+    }
+
+    /**
+     * Extracts the authorship view of a raw Notion page object (the outbound staleness guard):
+     * who last edited the page and when. The editor id is normalized (lowercase, no dashes) so it
+     * compares cleanly against the configured integration bot id regardless of dash formatting.
+     *
+     * @param page the raw page object ({@code object=page})
+     * @return the {@code last_edited_by.id} / {@code last_edited_time} pair
+     */
+    public NotionPageEditState parseEditState(JsonNode page) {
+        return new NotionPageEditState(
+            normalizeId(page.path("last_edited_by").path("id").asText(null)),
+            parseTimestamp(page.path("last_edited_time").asText(null)));
     }
 
     /**

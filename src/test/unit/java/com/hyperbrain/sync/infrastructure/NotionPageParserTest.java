@@ -2,6 +2,7 @@ package com.hyperbrain.sync.infrastructure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.sync.domain.model.NotionCyclePage;
+import com.hyperbrain.sync.domain.model.NotionPageEditState;
 import com.hyperbrain.sync.domain.model.NotionTaskPage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -129,5 +130,34 @@ class NotionPageParserTest {
             """;
 
         assertThat(parser.parseTask(objectMapper.readTree(json)).name()).isEqualTo("HyperBrain");
+    }
+
+    @Test
+    @DisplayName("parseEditState extracts the normalized editor id and last_edited_time (outbound guard)")
+    void parses_edit_state() throws Exception {
+        String json = """
+            {
+              "object": "page",
+              "id": "2fa8bc9c-5d91-81ba-b3c9-f2a27fa48cc9",
+              "last_edited_by": { "object": "user", "id": "9E9E0000-0000-0000-0000-0000000000E9" },
+              "last_edited_time": "2026-07-20T10:00:00.000Z"
+            }
+            """;
+
+        NotionPageEditState state = parser.parseEditState(objectMapper.readTree(json));
+
+        assertThat(state).usingRecursiveComparison().isEqualTo(new NotionPageEditState(
+            "9e9e00000000000000000000000000e9",
+            OffsetDateTime.parse("2026-07-20T10:00:00Z")));
+    }
+
+    @Test
+    @DisplayName("parseEditState tolerates a page with no author or timestamp")
+    void parses_edit_state_when_absent() throws Exception {
+        NotionPageEditState state = parser.parseEditState(
+            objectMapper.readTree("{\"id\":\"a\",\"properties\":{}}"));
+
+        assertThat(state.lastEditedById()).isNull();
+        assertThat(state.lastEditedTime()).isNull();
     }
 }

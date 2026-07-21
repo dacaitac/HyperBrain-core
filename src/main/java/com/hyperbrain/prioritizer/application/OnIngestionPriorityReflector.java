@@ -26,11 +26,13 @@ import java.util.UUID;
  * <ul>
  *   <li>The score is always recomputed and persisted ({@link RescoreResult#moved()} is the
  *       Prioritizer's own epsilon-guarded verdict).
- *   <li><b>NOTION origin:</b> a {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} is
- *       <em>always</em> staged, regardless of whether the score moved. This guarantees that the
- *       canonical Core state (status, scores, all fields) always overwrites whatever Notion holds
- *       after any ingestion — the Notion propagator's loop protection (RF-17) would otherwise
- *       suppress the NOTION-origin event and leave Notion stale.
+ *   <li><b>NOTION origin:</b> a {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} carrying
+ *       the {@code reflection=PRIORITY_SCORE} marker is <em>always</em> staged, regardless of whether
+ *       the score moved. It re-asserts the SYSTEM-owned scores onto Notion: {@code SourceAwareMerge}
+ *       pins the scores to the domain value and ignores Notion's, so a manual score edit must be
+ *       overwritten, and the Notion propagator's loop protection (RF-17) suppresses the NOTION-origin
+ *       event. The marker makes the propagator PATCH only the score fields, so the human-owned fields
+ *       the user just edited are never touched.
  *   <li><b>APPLE / SYSTEM origin:</b> those origins' own outbox events are propagated to Notion by
  *       the propagator (they are not loop-protected), so no extra SYSTEM event is needed. The caller
  *       may inspect the return value to decide whether the score moved.
@@ -48,7 +50,12 @@ public class OnIngestionPriorityReflector {
     private static final String EXECUTABLE_AGGREGATE = "CORE_EXECUTABLE";
     private static final String EXECUTABLE_UPDATED_EVENT = "ExecutableUpdatedEvent";
     private static final String SYSTEM_SOURCE = "SYSTEM";
-    private static final String REFLECTION_PAYLOAD = "{\"operation\":\"UPDATED\"}";
+    // The "reflection":"PRIORITY_SCORE" marker tells the NotionEventPropagator this write-back only
+    // touches the SYSTEM-owned score fields, so it PATCHes just those (never the full page mirror)
+    // and skips the outbound human-edit pre-read: the user never edits scores, so a burst of manual
+    // edits can never collide with it (ADR-020 write-back field scoping).
+    private static final String REFLECTION_PAYLOAD =
+        "{\"operation\":\"UPDATED\",\"reflection\":\"PRIORITY_SCORE\"}";
 
     private final PrioritizerService prioritizerService;
     private final OutboxRepository outboxRepo;
@@ -64,10 +71,11 @@ public class OnIngestionPriorityReflector {
      * outbound reflection appropriate to the ingestion origin (see the class documentation). Must
      * be called after the merged row has been upserted, inside the ingestion transaction.
      *
-     * <p>For NOTION origin a {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} is
-     * <em>always</em> staged (the score may or may not have moved — the canonical Core state must
-     * reach Notion regardless). For APPLE/SYSTEM origin no extra event is staged because those
-     * origins' own events are already propagated to Notion by the propagator.
+     * <p>For NOTION origin a {@code source_system=SYSTEM} {@code ExecutableUpdatedEvent} marked
+     * {@code reflection=PRIORITY_SCORE} is <em>always</em> staged (the score may or may not have
+     * moved — the SYSTEM-owned scores must be re-asserted onto Notion regardless). For APPLE/SYSTEM
+     * origin no extra event is staged because those origins' own events are already propagated to
+     * Notion by the propagator.
      *
      * @param executableId the just-upserted executable to rescore
      * @param origin       the external system that produced the inbound change; decides whether a
@@ -82,9 +90,12 @@ public class OnIngestionPriorityReflector {
             // propagator — no extra SYSTEM event is needed. The score is still persisted above.
             return false;
         }
-        // NOTION origin: always stage a SYSTEM event so the canonical Core state (status, scores,
-        // all fields) overwrites Notion regardless of whether the priority score moved (RF-17 loop
-        // protection would suppress the NOTION-origin event otherwise).
+        // NOTION origin: always stage a SYSTEM reflection so the SYSTEM-owned scores are re-asserted
+        // onto Notion regardless of whether the score moved. SourceAwareMerge pins the scores to the
+        // domain value and ignores whatever Notion held, so a manual score edit in Notion must be
+        // overwritten here; the NOTION-origin event alone cannot do it (RF-17 loop protection
+        // suppresses it). The marked payload makes the propagator PATCH only the score fields — every
+        // human-owned field the user just edited in Notion is left exactly as they typed it.
         outboxRepo.append(new OutboxEvent(UUID.randomUUID(), EXECUTABLE_AGGREGATE,
             executableId.toString(), EXECUTABLE_UPDATED_EVENT, REFLECTION_PAYLOAD, SYSTEM_SOURCE,
             OffsetDateTime.now()));
