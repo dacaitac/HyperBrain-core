@@ -7,6 +7,7 @@ import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
+import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
@@ -23,7 +24,9 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * JDBC adapter for {@link PlannerStateRepository} (#6a). Reads the day's state straight from the
@@ -280,24 +283,49 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND e.end_time > ?
         """;
 
-    private static final String INSERT_BLOCK_SQL = """
+    /**
+     * Upserts a desired block under its <b>stable id</b>: a brand-new id inserts, a surviving id
+     * updates in place (so the block keeps its {@code sync_mapping} → the write-back emits an UPDATE,
+     * not a duplicate CREATE, #15). The {@code ON CONFLICT} update is guarded to
+     * {@code PLANNED}/{@code PLANNER} rows so a stable id that happens to collide with an
+     * {@code ACTIVE}/{@code SETTLED} block (already-started work, telemetry-bearing) never clobbers it —
+     * the conflicting desired block is silently skipped, which is correct: that executable is already
+     * being worked on today.
+     */
+    private static final String UPSERT_BLOCK_SQL = """
         INSERT INTO core_time_block
             (id, executable_id, date_start, date_end, status, origin, planned_minutes, reason)
         VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?, ?)
+        ON CONFLICT (id) DO UPDATE
+           SET date_start      = EXCLUDED.date_start,
+               date_end        = EXCLUDED.date_end,
+               planned_minutes = EXCLUDED.planned_minutes,
+               reason          = EXCLUDED.reason
+         WHERE core_time_block.status = 'PLANNED'
+           AND core_time_block.origin = 'PLANNER'
+        """;
+
+    /** The day's regenerable planner block ids — the reconciliation universe (survive vs. removed). */
+    private static final String EXISTING_PLANNED_IDS_SQL = """
+        SELECT b.id
+        FROM core_time_block b
+        JOIN core_executable e ON e.id = b.executable_id
+        WHERE e.user_id = ?
+          AND b.status = 'PLANNED'
+          AND b.origin = 'PLANNER'
+          AND b.date_start >= ?
+          AND b.date_start < ?
         """;
 
     /**
-     * Clears the day's regenerable planner blocks. Scoped to {@code PLANNED}/{@code PLANNER} rows in
-     * the {@code [dayStart, dayEnd)} instant range so a regeneration replaces them (idempotent
-     * convergence) while {@code FOCUS}/{@code USER} blocks and settled work survive.
+     * Deletes a single regenerable block by id when it dropped out of the new plan. Scoped to
+     * {@code PLANNED}/{@code PLANNER} so {@code FOCUS}/{@code USER} blocks and settled work survive.
      */
-    private static final String DELETE_PLANNED_DAY_SQL = """
+    private static final String DELETE_REMOVED_BLOCK_SQL = """
         DELETE FROM core_time_block
-        WHERE executable_id IN (SELECT id FROM core_executable WHERE user_id = ?)
+        WHERE id = ?
           AND status = 'PLANNED'
           AND origin = 'PLANNER'
-          AND date_start >= ?
-          AND date_start < ?
         """;
 
     /** Re-reads the day's persisted planner blocks with their executable names for the write-back. */
@@ -453,25 +481,38 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     }
 
     @Override
-    public void persistPlannedBlocks(List<AgendaBlock> blocks) {
-        if (blocks.isEmpty()) {
-            return;
-        }
-        jdbcTemplate.batchUpdate(INSERT_BLOCK_SQL, blocks, blocks.size(), (ps, block) -> {
-            ps.setObject(1, UUID.randomUUID());
+    public List<UUID> reconcilePlannedBlocks(UUID userId, LocalDate targetDay, ZoneId zone,
+                                             List<AgendaBlock> desired) {
+        OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
+        OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
+
+        List<UUID> existingIds =
+            jdbcTemplate.queryForList(EXISTING_PLANNED_IDS_SQL, UUID.class, userId, dayStart, dayEnd);
+
+        List<PlannerBlockIdentity.IdentifiedBlock> identified =
+            PlannerBlockIdentity.assign(desired, targetDay);
+        Set<UUID> desiredIds = identified.stream()
+            .map(PlannerBlockIdentity.IdentifiedBlock::blockId)
+            .collect(Collectors.toSet());
+
+        jdbcTemplate.batchUpdate(UPSERT_BLOCK_SQL, identified, identified.size(), (ps, entry) -> {
+            AgendaBlock block = entry.block();
+            ps.setObject(1, entry.blockId());
             ps.setObject(2, block.executableId());
             ps.setObject(3, block.start());
             ps.setObject(4, block.end());
             ps.setObject(5, (int) block.durationMinutes());
             ps.setString(6, block.reason());
         });
-    }
 
-    @Override
-    public int deletePlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone) {
-        OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
-        OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
-        return jdbcTemplate.update(DELETE_PLANNED_DAY_SQL, userId, dayStart, dayEnd);
+        List<UUID> removed = existingIds.stream()
+            .filter(id -> !desiredIds.contains(id))
+            .toList();
+        if (!removed.isEmpty()) {
+            jdbcTemplate.batchUpdate(DELETE_REMOVED_BLOCK_SQL, removed, removed.size(),
+                (ps, id) -> ps.setObject(1, id));
+        }
+        return removed;
     }
 
     @Override

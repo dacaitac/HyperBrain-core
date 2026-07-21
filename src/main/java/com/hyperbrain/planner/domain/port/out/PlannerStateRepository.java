@@ -95,26 +95,33 @@ public interface PlannerStateRepository {
                                                  OffsetDateTime dayEnd);
 
     /**
-     * Deletes the existing {@code PLANNED} blocks of {@code origin = PLANNER} whose {@code date_start}
-     * falls on the target day in the user's timezone. Called before re-persisting a regenerated day so
-     * a repeated run <b>replaces</b> rather than accumulates blocks (idempotent convergence per
-     * user+day). Scoped to {@code PLANNER}-origin PLANNED rows so {@code FOCUS}/{@code USER} blocks and
-     * already-settled work are never touched. Must run in the same transaction as the re-persist.
+     * Reconciles the day's regenerable {@code PLANNED}/{@code PLANNER} blocks against a freshly
+     * generated plan, <b>preserving block identity</b> so a regeneration converges without churning
+     * the Apple calendar (#15). Each desired block is keyed by its stable id
+     * ({@link com.hyperbrain.planner.domain.model.PlannerBlockIdentity}):
+     * <ul>
+     *   <li>a block that survives (same id) is <b>updated</b> in place (new start/end/reason), keeping
+     *       its {@code core_time_block.id} and therefore its {@code sync_mapping} → the write-back
+     *       emits an {@code UPDATE} of the existing EKEvent instead of a duplicate {@code CREATE};</li>
+     *   <li>a genuinely new block is <b>inserted</b>;</li>
+     *   <li>a block that dropped out of the new plan is <b>deleted</b>, and its id is returned so the
+     *       caller can stage the deletion of its Apple counterpart (the mapping is not touched here —
+     *       it is closed by the write-command result loop once Apple confirms the delete).</li>
+     * </ul>
+     * Scoped to {@code PLANNER}-origin {@code PLANNED} rows: {@code FOCUS}/{@code USER} blocks and any
+     * {@code ACTIVE}/{@code SETTLED} work (which carries telemetry) are never touched, even when a
+     * desired block's stable id would collide with such a row. Must run in the same transaction as the
+     * write-back staging so the plan and its delivery are atomic.
      *
      * @param userId    the owning user; never null
-     * @param targetDay the calendar day whose planner blocks to clear; never null
+     * @param targetDay the calendar day being reconciled; never null
      * @param zone      the user's timezone used to bound the local day; never null
-     * @return the number of blocks deleted
+     * @param desired   the accepted blocks the new plan wants for the day; never null, may be empty
+     * @return the ids of previously-persisted {@code PLANNED} blocks that dropped out of the new plan;
+     *         never null, may be empty
      */
-    int deletePlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone);
-
-    /**
-     * Persists the validated {@code PLANNED} blocks with {@code origin = PLANNER}. Writes only new
-     * block rows; it never mutates executables.
-     *
-     * @param blocks the accepted blocks to persist; never null, may be empty
-     */
-    void persistPlannedBlocks(List<AgendaBlock> blocks);
+    List<UUID> reconcilePlannedBlocks(UUID userId, LocalDate targetDay, ZoneId zone,
+                                      List<AgendaBlock> desired);
 
     /**
      * Re-reads the persisted {@code PLANNED}/{@code PLANNER} blocks of the target day, each joined to

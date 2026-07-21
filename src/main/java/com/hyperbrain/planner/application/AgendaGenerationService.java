@@ -2,6 +2,7 @@ package com.hyperbrain.planner.application;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
@@ -144,23 +145,25 @@ public class AgendaGenerationService {
                 validated.violations().size(), userId, validated.violations());
         }
 
-        // Idempotent convergence: a regeneration replaces the day's planner blocks instead of
-        // accumulating them (delete-before-insert in the same transaction, so a repeated run — or a
-        // double scheduler fire — converges to a single set of blocks for the user+day).
-        int cleared = repository.deletePlannedBlocksForDay(userId, targetDay, zone);
-        repository.persistPlannedBlocks(validated.accepted());
+        // Identity-stable reconciliation (#15): a regeneration keeps a surviving block's id (so its
+        // Apple EKEvent is UPDATED, not duplicated), inserts genuinely new blocks, and reports the
+        // blocks that dropped out so their EKEvents are deleted — all in the same transaction as the
+        // write-back staging, so the plan and its delivery are atomic.
+        List<UUID> removedBlockIds =
+            repository.reconcilePlannedBlocks(userId, targetDay, zone, validated.accepted());
 
-        if (!validated.accepted().isEmpty()) {
-            stageAgendaBlockDelivery(userId, targetDay, zone, agenda.energyCriterion(), now);
+        if (!validated.accepted().isEmpty() || !removedBlockIds.isEmpty()) {
+            stageAgendaBlockDelivery(
+                userId, targetDay, zone, agenda.energyCriterion(), removedBlockIds, now);
         }
 
         if (fromNow) {
-            log.info("Replan completed: {} new block(s), {} deleted (from {})",
-                validated.accepted().size(), cleared, window.lowerBound());
+            log.info("Replan completed: {} block(s) planned, {} removed (from {})",
+                validated.accepted().size(), removedBlockIds.size(), window.lowerBound());
         }
-        log.info("Planned {} block(s) for user {} ({} mode); replaced {} prior, {} excluded, {} paused, degraded={}",
+        log.info("Planned {} block(s) for user {} ({} mode); removed {} prior, {} excluded, {} paused, degraded={}",
             validated.accepted().size(), userId, fromNow ? "replan" : "full-day",
-            cleared, agenda.excluded().size(), agenda.paused().size(), agenda.degraded());
+            removedBlockIds.size(), agenda.excluded().size(), agenda.paused().size(), agenda.degraded());
 
         return new Agenda(validated.accepted(), agenda.excluded(), agenda.paused(),
             agenda.energyCriterion(), agenda.degraded());
@@ -173,9 +176,10 @@ public class AgendaGenerationService {
      * only the target's own origin), so the {@code AgendaBlockPropagator} routes it to Apple.
      */
     private void stageAgendaBlockDelivery(UUID userId, LocalDate targetDay, ZoneId zone,
-                                          String energyCriterion, OffsetDateTime now) {
-        AgendaBlockPlannedEvent event =
-            new AgendaBlockPlannedEvent(userId, targetDay, zone.getId(), energyCriterion);
+                                          String energyCriterion, List<UUID> removedBlockIds,
+                                          OffsetDateTime now) {
+        AgendaBlockPlannedEvent event = new AgendaBlockPlannedEvent(
+            userId, targetDay, zone.getId(), energyCriterion, removedBlockIds);
         outboxRepository.append(new OutboxEvent(
             UUID.randomUUID(),
             AgendaBlockPlannedEvent.AGGREGATE_TYPE,
@@ -192,6 +196,8 @@ public class AgendaGenerationService {
         node.put("target_day", event.targetDay().toString());
         node.put("zone_id", event.zoneId());
         node.put("energy_criterion", event.energyCriterion());
+        ArrayNode removed = node.putArray("removed_block_ids");
+        event.removedBlockIds().forEach(id -> removed.add(id.toString()));
         try {
             return objectMapper.writeValueAsString(node);
         } catch (JsonProcessingException ex) {

@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -49,11 +50,14 @@ import java.util.UUID;
  * ({@code calendar_name = "HyperBrain"}, {@code calendar_id} left empty for SentinelAPI to resolve),
  * never a read-only AGENDA calendar (ADR-009) — those are sync-only and must not be written to.
  *
- * <p><b>Block identity.</b> Each block is mapped in {@code sync_mappings} under its own
- * {@code core_time_block.id} as {@code local_id}, kept separate from the executable's own mapping so
- * the block event and the task it schedules never collide. Reusing the HU-09c command log + results
- * loop, a mapped block updates its EventKit event and an unmapped one creates a fresh one (the
- * {@code WriteCommandResult} closes the mapping, ADR-010).
+ * <p><b>Block identity and reconciliation.</b> Each block is mapped in {@code sync_mappings} under its
+ * own {@code core_time_block.id} as {@code local_id}, kept separate from the executable's own mapping
+ * so the block event and the task it schedules never collide. Because a regeneration preserves that id
+ * (#15, {@code PlannerBlockIdentity}), reusing the HU-09c command log + results loop: a surviving
+ * mapped block <b>updates</b> its EventKit event, a genuinely new block <b>creates</b> one, and a block
+ * the regeneration dropped is carried in {@code removed_block_ids} and <b>deleted</b> from Apple — so a
+ * replan reconciles the day's events instead of duplicating them. The {@code WriteCommandResult} closes
+ * (create) or removes (delete) the mapping, ADR-010.
  *
  * <p><b>Idempotency.</b> The {@code commandId} is derived deterministically from the outbox event id
  * and the block id, so a retried drain re-emits the same commands (SQS FIFO + SentinelAPI dedup
@@ -125,8 +129,9 @@ public class AgendaBlockPropagator implements IEventPropagator {
 
         List<PlannedBlockRecord> blocks =
             plannerStateRepository.loadPlannedBlocksForDay(userId, targetDay, zone);
-        if (blocks.isEmpty()) {
-            log.info("AgendaBlockPlannedEvent {}: no planner blocks for user {} on {}; nothing to deliver",
+        List<UUID> removedBlockIds = parseUuidArray(payload.path("removed_block_ids"));
+        if (blocks.isEmpty() && removedBlockIds.isEmpty()) {
+            log.info("AgendaBlockPlannedEvent {}: nothing to deliver for user {} on {}",
                 event.id(), userId, targetDay);
             return;
         }
@@ -134,8 +139,11 @@ public class AgendaBlockPropagator implements IEventPropagator {
         for (PlannedBlockRecord block : blocks) {
             emitBlock(event, userId, block, energyCriterion);
         }
-        log.info("Delivered {} agenda block(s) as calendar events for user {} on {} (event {})",
-            blocks.size(), userId, targetDay, event.id());
+        for (UUID removedBlockId : removedBlockIds) {
+            emitRemoval(event, userId, removedBlockId);
+        }
+        log.info("Delivered {} agenda block(s) and {} removal(s) as calendar events for user {} on {} (event {})",
+            blocks.size(), removedBlockIds.size(), userId, targetDay, event.id());
     }
 
     private void emitBlock(OutboxEvent event, UUID userId, PlannedBlockRecord block,
@@ -169,6 +177,49 @@ public class AgendaBlockPropagator implements IEventPropagator {
         commandPublisher.publish(command, groupKey);
         log.debug("Agenda block {} ({}-{}) emitted as calendar event command {} ({}) for user {}",
             block.blockId(), block.start(), block.end(), commandId, operation, userId);
+    }
+
+    /**
+     * Emits the {@code DELETE} of a block that a regeneration dropped from the plan (#15): its
+     * {@code core_time_block} row is already gone, but its {@code sync_mapping} survives (no cascade),
+     * so its EKEvent id is resolved here and a {@code CALENDAR_EVENT DELETED} command is published,
+     * keyed by the EKEvent id so SentinelAPI applies it after any prior update of the same entity. The
+     * {@code sync_mapping} itself is closed by the write-command result loop once Apple confirms the
+     * delete (ADR-010), mirroring the executable delete path — never here. A block with no mapping was
+     * never delivered to Apple, so its removal is a no-op.
+     */
+    private void emitRemoval(OutboxEvent event, UUID userId, UUID blockId) {
+        Optional<SyncMapping> mapping =
+            syncMappingRepo.findByExternalSystemAndLocalId(EXTERNAL_SYSTEM, blockId);
+        if (mapping.isEmpty()) {
+            log.debug("Removed agenda block {} has no Apple mapping; nothing to delete", blockId);
+            return;
+        }
+        String externalId = mapping.get().externalId();
+        UUID commandId = deterministicCommandId(event.id(), blockId);
+        WriteCommand command = new WriteCommand(
+            commandId, CommandType.CALENDAR_EVENT, Operation.DELETED, externalId, null);
+
+        commandLogRepo.upsertPending(new PendingWriteCommand(
+            commandId, userId, blockId, CommandType.CALENDAR_EVENT, Operation.DELETED, externalId,
+            null, STATUS_PENDING));
+        commandPublisher.publish(command, externalId);
+        log.info("Removed agenda block {}: deleting Apple event {} (command {}) for user {}",
+            blockId, externalId, commandId, userId);
+    }
+
+    private static List<UUID> parseUuidArray(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<UUID> ids = new ArrayList<>(node.size());
+        for (JsonNode element : node) {
+            UUID id = parseUuid(element.asText(null));
+            if (id != null) {
+                ids.add(id);
+            }
+        }
+        return ids;
     }
 
     /**

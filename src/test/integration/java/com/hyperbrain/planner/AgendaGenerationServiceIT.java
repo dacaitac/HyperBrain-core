@@ -219,24 +219,75 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("idempotent convergence: regenerating the day replaces the planner blocks, never accumulates")
-    void regeneration_replaces_blocks_without_duplicating() {
-        insertTask("High", 0.9, 60);
-        insertTask("Low", 0.3, 60);
+    @DisplayName("stable identity: regenerating the day keeps each block's id, never accumulating rows")
+    void regeneration_preserves_block_identity() {
+        UUID high = insertTask("High", 0.9, 60);
+        UUID low = insertTask("Low", 0.3, 60);
 
         service.generate(USER, DAY, UTC, NOON, false);
-        Integer afterFirst = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
-            Integer.class);
+        UUID highBlockFirst = blockId(high);
+        UUID lowBlockFirst = blockId(low);
 
-        // A second run on the same day must converge to the same set, not double it.
+        // A second run on the same day converges onto the same rows (identity-stable UPDATE), so the
+        // block keeps its id — and therefore its Apple mapping / EKEvent (no duplication, #15).
         service.generate(USER, DAY, UTC, NOON, false);
         Integer afterSecond = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             Integer.class);
 
-        assertThat(afterFirst).isEqualTo(2);
         assertThat(afterSecond).isEqualTo(2);
+        assertThat(blockId(high)).isEqualTo(highBlockFirst);
+        assertThat(blockId(low)).isEqualTo(lowBlockFirst);
+    }
+
+    @Test
+    @DisplayName("reconciliation: a task dropped from the plan removes its block and stages its id for deletion")
+    void regeneration_removes_dropped_block_and_reports_it() {
+        UUID high = insertTask("High", 0.9, 60);
+        UUID low = insertTask("Low", 0.3, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+        UUID highBlockFirst = blockId(high);
+        UUID lowBlockFirst = blockId(low);
+        // Isolate the second run's outbox event.
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // The low task is completed, so the replan no longer schedules it.
+        jdbcTemplate.update("UPDATE core_executable SET status = 'DONE' WHERE id = ?", low);
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // The high block survives with the same id; the low block row is gone.
+        assertThat(blockId(high)).isEqualTo(highBlockFirst);
+        Integer lowBlocks = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE executable_id = ?", Integer.class, low);
+        assertThat(lowBlocks).isZero();
+
+        // And the staged write-back carries the removed block id so its Apple EKEvent is deleted.
+        String payload = jdbcTemplate.queryForObject(
+            "SELECT payload FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", String.class);
+        assertThat(payload).contains(lowBlockFirst.toString());
+    }
+
+    @Test
+    @DisplayName("reconciliation: a task added on the replan is inserted while the prior block keeps its id")
+    void regeneration_inserts_new_block_without_disturbing_survivors() {
+        UUID high = insertTask("High", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+        UUID highBlockFirst = blockId(high);
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        UUID added = insertTask("Added", 0.5, 60);
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // The prior block is untouched (same id); the new task gets its own fresh block.
+        assertThat(blockId(high)).isEqualTo(highBlockFirst);
+        assertThat(blockId(added)).isNotNull().isNotEqualTo(highBlockFirst);
+        // Nothing was removed, so the staged event carries an empty removed list.
+        Integer removedCount = jdbcTemplate.queryForObject(
+            "SELECT jsonb_array_length(payload -> 'removed_block_ids') FROM outbox_events "
+                + "WHERE aggregate_type = 'AGENDA_BLOCK'", Integer.class);
+        assertThat(removedCount).isZero();
     }
 
     @Test
@@ -287,6 +338,12 @@ class AgendaGenerationServiceIT {
     }
 
     // ─── fixtures ──────────────────────────────────────────────────────────────
+
+    private UUID blockId(UUID executableId) {
+        return jdbcTemplate.queryForObject(
+            "SELECT id FROM core_time_block WHERE executable_id = ? AND origin = 'PLANNER' "
+                + "AND status = 'PLANNED'", UUID.class, executableId);
+    }
 
     private UUID insertTask(String name, double priority, int estimatedMinutes) {
         UUID id = UUID.randomUUID();
