@@ -136,6 +136,31 @@ app:
       # write-back + "HyperBrain" calendar are live on the Mac Mini. Enable in prod via
       # APP_PLANNER_DELIVERY_SCHEDULING_ENABLED=true once the rollout choreography is done.
       scheduling-enabled: false
+    humanize:
+      # H1 humanized deterministic floor (HU-01c): turns the raw back-to-back placement into a day a
+      # human can live, and doubles as the DEGRADED fallback of ADR-019. EVERY value below is a
+      # sanctioned MVP default PENDING DANIEL's ratification (like the H0 tolerances) — not an
+      # invented formula.
+      # Rule 1 — short spacing left after each execution block (never written back to Apple).
+      transition-buffer-minutes: 5
+      # Rule 2 — protected meal anchors the floor never fills with work. Local wall-clock times,
+      # resolved against the user's zone (America/Bogota in prod).
+      meals:
+        - label: lunch
+          start: "12:30"
+          end:   "13:30"
+        - label: dinner
+          start: "19:00"
+          end:   "20:00"
+      # Rule 3 — minimum viable block; shorter placements are dropped as slivers, never fragmenting.
+      min-block-minutes: 15
+      # Rule 4 — DOMAIN FORMULA (pending Daniel): priority-score band within which same-context work is
+      # regrouped adjacently. A tie-break inside a band, never a reordering across priority bands.
+      batch-band-width: 0.10
+      # Rule 6 — occupancy band: the day is never packed past the max; the min is aspirational (the
+      # floor never invents work to reach it).
+      occupancy-min-fraction: 0.75
+      occupancy-max-fraction: 0.85
 
 management:
   endpoints:

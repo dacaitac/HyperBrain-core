@@ -392,6 +392,87 @@ class AgendaGenerationServiceIT {
         assertThat(scheduledExecutableIds()).contains(yesterdayDone);
     }
 
+    @Test
+    @DisplayName("H1 humanized floor: buffers, meal protection, no slivers and an occupancy cap hold together")
+    void humanized_floor_invariants_hold_together() {
+        // A full day of work plus a sliver and a reminder-pinned task, over the cold-start 07:00–23:00
+        // window. The humanized floor must space, protect meals, drop the sliver, cap occupancy — and
+        // still honor the recent pinned-start sanitation (#12).
+        for (int i = 0; i < 16; i++) {
+            insertTask("Work " + i, 0.99 - i * 0.01, 60);
+        }
+        UUID sliver = insertTask("Sliver", 0.95, 10);
+        // Highest priority so it is anchored first, before the cursor fill can reach 15:00.
+        UUID pinned = insertTaskDueAt("Reminder at 15:00", 0.999, 60,
+            OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        List<Map<String, Object>> blocks = jdbcTemplate.queryForList(
+            "SELECT executable_id, date_start, date_end FROM core_time_block "
+                + "WHERE origin = 'PLANNER' AND status = 'PLANNED' ORDER BY date_start");
+
+        // Rule 2 — no block invades either protected meal window (12:30–13:30, 19:00–20:00 UTC).
+        assertNoBlockOverlaps(blocks,
+            OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 13, 30, 0, 0, UTC));
+        assertNoBlockOverlaps(blocks,
+            OffsetDateTime.of(2026, 7, 10, 19, 0, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 20, 0, 0, 0, UTC));
+
+        // Rule 3 — no sub-minimum sliver survives; the 10-min task is left unscheduled.
+        assertThat(blocks).allSatisfy(row ->
+            assertThat(minutesBetween(row)).isGreaterThanOrEqualTo(15));
+        assertThat(blocks).noneMatch(row -> sliver.equals(row.get("executable_id")));
+
+        // Rule 6 — the day is never packed past the 85% occupancy cap of the 960-min window.
+        long busy = blocks.stream().mapToLong(AgendaGenerationServiceIT::minutesBetween).sum();
+        assertThat(busy).isLessThanOrEqualTo(Math.round(960 * 0.85));
+
+        // #12 — the reminder-pinned task still starts exactly at its reminder instant.
+        OffsetDateTime pinnedStart = jdbcTemplate.queryForObject(
+            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, pinned);
+        assertThat(pinnedStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
+    }
+
+    @Test
+    @DisplayName("H1 rule 1: consecutive cursor-placed blocks are spaced by the transition buffer")
+    void consecutive_blocks_carry_a_transition_buffer() {
+        insertTask("High", 0.9, 60);
+        insertTask("Low", 0.3, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        List<OffsetDateTime> bounds = jdbcTemplate.queryForList(
+            "SELECT date_end FROM core_time_block ORDER BY date_start", OffsetDateTime.class);
+        OffsetDateTime firstEnd = bounds.get(0);
+        OffsetDateTime secondStart = jdbcTemplate.queryForObject(
+            "SELECT date_start FROM core_time_block ORDER BY date_start OFFSET 1 LIMIT 1",
+            OffsetDateTime.class);
+        // A 5-min transition buffer separates the two blocks (07:00–08:00 then 08:05–09:05).
+        assertThat(java.time.Duration.between(firstEnd, secondStart).toMinutes()).isEqualTo(5);
+    }
+
+    private static void assertNoBlockOverlaps(List<Map<String, Object>> blocks,
+                                              OffsetDateTime windowStart, OffsetDateTime windowEnd) {
+        assertThat(blocks).allSatisfy(row -> {
+            OffsetDateTime start = toOffsetDateTime(row.get("date_start"));
+            OffsetDateTime end = toOffsetDateTime(row.get("date_end"));
+            assertThat(start.isBefore(windowEnd) && end.isAfter(windowStart))
+                .as("block %s–%s must not overlap %s–%s", start, end, windowStart, windowEnd)
+                .isFalse();
+        });
+    }
+
+    private static long minutesBetween(Map<String, Object> row) {
+        return java.time.Duration.between(
+            toOffsetDateTime(row.get("date_start")), toOffsetDateTime(row.get("date_end"))).toMinutes();
+    }
+
+    private static OffsetDateTime toOffsetDateTime(Object timestamp) {
+        return ((java.sql.Timestamp) timestamp).toInstant().atOffset(UTC);
+    }
+
     // ─── fixtures ──────────────────────────────────────────────────────────────
 
     private List<UUID> scheduledExecutableIds() {
@@ -431,6 +512,20 @@ class AgendaGenerationServiceIT {
             INSERT INTO core_executable (id, user_id, name, type, status, priority_score)
             VALUES (?, ?, ?, 'TASK', 'TODO', ?)
             """, id, USER, name, priority);
+        jdbcTemplate.update("""
+            INSERT INTO core_execution_profile (executable_id, estimated_minutes)
+            VALUES (?, ?)
+            """, id, estimatedMinutes);
+        return id;
+    }
+
+    private UUID insertTaskDueAt(String name, double priority, int estimatedMinutes,
+                                 OffsetDateTime dueInstant) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, end_time)
+            VALUES (?, ?, ?, 'TASK', 'TODO', ?, ?)
+            """, id, USER, name, priority, dueInstant);
         jdbcTemplate.update("""
             INSERT INTO core_execution_profile (executable_id, estimated_minutes)
             VALUES (?, ?)

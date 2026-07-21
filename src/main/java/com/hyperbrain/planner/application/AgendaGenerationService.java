@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
+import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlanningWindow;
@@ -16,9 +17,9 @@ import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.model.ValidatedAgenda;
 import com.hyperbrain.planner.domain.model.ValidationContext;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
-import com.hyperbrain.planner.domain.service.AgendaGenerator;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
+import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
 import com.hyperbrain.shared.outbox.OutboxEvent;
@@ -31,6 +32,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -58,7 +60,8 @@ public class AgendaGenerationService {
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final EnergyResolver energyResolver;
     private final PlanningWindowResolver planningWindowResolver;
-    private final AgendaGenerator agendaGenerator;
+    private final HumanizedAgendaFloor humanizedAgendaFloor;
+    private final HumanizationSettings humanizationSettings;
     private final AgendaValidator agendaValidator;
     private final OutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
@@ -68,7 +71,8 @@ public class AgendaGenerationService {
         SleepFrontierCalculator sleepFrontierCalculator,
         EnergyResolver energyResolver,
         PlanningWindowResolver planningWindowResolver,
-        AgendaGenerator agendaGenerator,
+        HumanizedAgendaFloor humanizedAgendaFloor,
+        HumanizationSettings humanizationSettings,
         AgendaValidator agendaValidator,
         OutboxRepository outboxRepository,
         ObjectMapper objectMapper) {
@@ -76,7 +80,8 @@ public class AgendaGenerationService {
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
         this.planningWindowResolver = planningWindowResolver;
-        this.agendaGenerator = agendaGenerator;
+        this.humanizedAgendaFloor = humanizedAgendaFloor;
+        this.humanizationSettings = humanizationSettings;
         this.agendaValidator = agendaValidator;
         this.outboxRepository = outboxRepository;
         this.objectMapper = objectMapper;
@@ -124,8 +129,11 @@ public class AgendaGenerationService {
                       || e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
             .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
-        List<OccupiedInterval> occupied = repository.loadOccupiedIntervals(
-            userId, window.frontierStart(), window.frontierEnd());
+        List<OccupiedInterval> occupied = new ArrayList<>(repository.loadOccupiedIntervals(
+            userId, window.frontierStart(), window.frontierEnd()));
+        // H1 rule 2: fold the protected meal anchors into the walls so the humanized floor plans around
+        // them (and the validator re-imposes them). Meal walls are never persisted nor written to Apple.
+        occupied.addAll(mealWalls(targetDay, zone));
 
         // The fallback window (07:00–23:00) is always a valid planning frontier; the
         // observed flag only distinguishes learned vs. default, not usable vs. unusable.
@@ -135,7 +143,7 @@ public class AgendaGenerationService {
             window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, occupied, energy,
             dataComplete);
 
-        Agenda agenda = agendaGenerator.generate(state);
+        Agenda agenda = humanizedAgendaFloor.generate(state);
 
         ValidationContext validationContext = new ValidationContext(
             window.frontierStart(), window.frontierEnd(), occupied, energy.highLoadQuota(),
@@ -205,6 +213,17 @@ public class AgendaGenerationService {
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Failed to serialize AgendaBlockPlannedEvent", ex);
         }
+    }
+
+    /**
+     * The protected meal-anchor walls for the target day (H1 rule 2), resolved from the humanized
+     * settings against the user's zone. Windows outside the frontier are harmless — nothing is placed
+     * there — so they are added unconditionally.
+     */
+    private List<OccupiedInterval> mealWalls(LocalDate targetDay, ZoneId zone) {
+        return humanizationSettings.mealWindows().stream()
+            .map(meal -> meal.toWall(targetDay, zone))
+            .toList();
     }
 
     private static Set<UUID> readOnlyAgendaIds(List<OccupiedInterval> occupied) {

@@ -37,6 +37,10 @@ import java.util.UUID;
  *                             constrains placement to the matching calendar day and pins the block's
  *                             end to this instant when within the planning window; null when no due
  *                             date is set
+ * @param cycleId              the {@code core_executable.cycle_id} this executable belongs to; the
+ *                             context key the humanized floor batches on (same Cycle/type placed
+ *                             adjacently to cut context-switching, H1 rule 4); null when the executable
+ *                             hangs off no cycle
  */
 public record SchedulableExecutable(
     UUID id,
@@ -48,7 +52,8 @@ public record SchedulableExecutable(
     int pendingSubtasks,
     Integer estimatedMinutes,
     int settledActualMinutes,
-    OffsetDateTime dueInstant
+    OffsetDateTime dueInstant,
+    UUID cycleId
 ) {
 
     public SchedulableExecutable {
@@ -80,5 +85,15 @@ public record SchedulableExecutable(
      */
     public boolean isHighLoad(int drainFloor) {
         return energyDrain != null && energyDrain >= drainFloor;
+    }
+
+    /**
+     * The context this executable belongs to for batching (H1 rule 4): its cycle when it has one, else
+     * its type. Two executables sharing a context can be placed adjacently to reduce context-switching.
+     *
+     * @return the cycle id when present, otherwise the executable type as the fallback context key
+     */
+    public Object contextKey() {
+        return cycleId != null ? cycleId : type;
     }
 }

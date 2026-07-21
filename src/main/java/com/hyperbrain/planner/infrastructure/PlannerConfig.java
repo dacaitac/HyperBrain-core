@@ -2,11 +2,15 @@ package com.hyperbrain.planner.infrastructure;
 
 import com.hyperbrain.planner.domain.model.AdherenceThresholds;
 import com.hyperbrain.planner.domain.model.EnergyThresholds;
+import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.service.AdherenceCalculator;
 import com.hyperbrain.planner.domain.service.AgendaGenerator;
+import com.hyperbrain.planner.domain.service.AgendaHumanizer;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
+import com.hyperbrain.planner.domain.service.ContextBatcher;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
+import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
@@ -26,7 +30,7 @@ import java.time.Clock;
  * constant hard-coded in a service), falling back to the sanctioned defaults when settings carry none.
  */
 @Configuration
-@EnableConfigurationProperties(AgendaDeliveryProperties.class)
+@EnableConfigurationProperties({AgendaDeliveryProperties.class, HumanizationProperties.class})
 class PlannerConfig {
 
     @Bean
@@ -59,9 +63,44 @@ class PlannerConfig {
         return new PlanningWindowResolver();
     }
 
+    /**
+     * The humanized floor's calibration (H1, HU-01c), from {@code app.planner.humanize.*}. Sanctioned
+     * MVP defaults (pending Daniel) live in {@code application.yml}; the mapper falls back to
+     * {@link HumanizationSettings#DEFAULT} for any absent section.
+     */
     @Bean
-    AgendaGenerator agendaGenerator(PlannerConstraints plannerConstraints) {
-        return new AgendaGenerator(plannerConstraints);
+    HumanizationSettings humanizationSettings(HumanizationProperties properties) {
+        return properties.toSettings();
+    }
+
+    @Bean
+    AgendaGenerator agendaGenerator(PlannerConstraints plannerConstraints,
+                                    HumanizationSettings humanizationSettings) {
+        return new AgendaGenerator(plannerConstraints, humanizationSettings);
+    }
+
+    @Bean
+    ContextBatcher contextBatcher() {
+        return new ContextBatcher();
+    }
+
+    @Bean
+    AgendaHumanizer agendaHumanizer() {
+        return new AgendaHumanizer();
+    }
+
+    /**
+     * The humanized deterministic floor (H1): the single entry point that composes batching, placement
+     * and post-processing. Also the DEGRADED fallback the ADR-019 propose-then-validate orchestrator
+     * will invoke.
+     */
+    @Bean
+    HumanizedAgendaFloor humanizedAgendaFloor(ContextBatcher contextBatcher,
+                                              AgendaGenerator agendaGenerator,
+                                              AgendaHumanizer agendaHumanizer,
+                                              HumanizationSettings humanizationSettings) {
+        return new HumanizedAgendaFloor(
+            contextBatcher, agendaGenerator, agendaHumanizer, humanizationSettings);
     }
 
     @Bean

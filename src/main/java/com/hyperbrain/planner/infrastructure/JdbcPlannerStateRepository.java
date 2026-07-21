@@ -134,6 +134,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     private static final String RANKED_EXECUTABLES_SQL = """
         SELECT e.id,
                e.type,
+               e.cycle_id,
                e.priority_score,
                (e.status = 'IN_PROGRESS')                       AS in_progress,
                p.energy_drain,
@@ -417,7 +418,8 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 rs.getInt("pending_subtasks"),
                 rs.getObject("estimated_minutes", Integer.class),
                 rs.getInt("settled_actual"),
-                rs.getObject("due_instant", OffsetDateTime.class));
+                rs.getObject("due_instant", OffsetDateTime.class),
+                rs.getObject("cycle_id", UUID.class));
         }, userId, dayStart, dayEnd);
     }
 

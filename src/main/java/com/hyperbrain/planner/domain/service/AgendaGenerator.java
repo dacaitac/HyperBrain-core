@@ -5,6 +5,7 @@ import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.ExcludedExecutable;
 import com.hyperbrain.planner.domain.model.ExclusionReason;
 import com.hyperbrain.planner.domain.model.ExecutableType;
+import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
@@ -54,23 +55,42 @@ import java.util.UUID;
 public class AgendaGenerator {
 
     private final PlannerConstraints constraints;
+    private final HumanizationSettings humanization;
     private final WigPortfolioSelector wigPortfolioSelector;
 
-    /** Creates a generator using the sanctioned default constraints. */
+    /** Creates a generator using the sanctioned default constraints and no humanization (raw floor). */
     public AgendaGenerator() {
         this(PlannerConstraints.DEFAULT);
     }
 
     /**
-     * Creates a generator with explicit constraints (calibration seam).
+     * Creates a generator with explicit constraints and no humanization (raw floor, calibration seam).
      *
      * @param constraints the planner constraints; never null
      */
     public AgendaGenerator(PlannerConstraints constraints) {
+        this(constraints, HumanizationSettings.NO_OP);
+    }
+
+    /**
+     * Creates a generator with explicit constraints and humanization settings (H1, HU-01c). The only
+     * placement effect of the humanization here is the transition buffer reserved after each execution
+     * block; meal anchors and occupancy are threaded through the surrounding walls and the
+     * post-processor, keeping this generator a single, focused placement engine.
+     *
+     * @param constraints  the planner constraints; never null
+     * @param humanization the humanization settings; never null (use {@link HumanizationSettings#NO_OP}
+     *                     for the raw floor)
+     */
+    public AgendaGenerator(PlannerConstraints constraints, HumanizationSettings humanization) {
         if (constraints == null) {
             throw new IllegalArgumentException("constraints must not be null");
         }
+        if (humanization == null) {
+            throw new IllegalArgumentException("humanization must not be null");
+        }
         this.constraints = constraints;
+        this.humanization = humanization;
         this.wigPortfolioSelector = new WigPortfolioSelector(constraints);
     }
 
@@ -139,6 +159,7 @@ public class AgendaGenerator {
                     blocks.add(new AgendaBlock(executable.id(), pinnedStart, pinnedEnd, false, highLoad,
                         rankReasonPinned(executable, minutes)));
                     walls.add(new OccupiedInterval(executable.id(), pinnedStart, pinnedEnd, false));
+                    reserveTransitionBuffer(walls, pinnedEnd);
                     placed.add(executable.id());
                     if (highLoad) highLoadUsed++;
                     urgentPlaced++;
@@ -160,6 +181,7 @@ public class AgendaGenerator {
             blocks.add(new AgendaBlock(executable.id(), start, end, false, highLoad,
                 rankReason(executable, minutes)));
             walls.add(new OccupiedInterval(executable.id(), start, end, false));
+            reserveTransitionBuffer(walls, end);
             placed.add(executable.id());
             if (highLoad) {
                 highLoadUsed++;
@@ -196,7 +218,25 @@ public class AgendaGenerator {
         blocks.add(new AgendaBlock(leadMeasureId, start, end, true, highLoad,
             "WIG reserved first (F1): active MCI lead measure, ordered by required pace, never trimmed"));
         walls.add(new OccupiedInterval(leadMeasureId, start, end, false));
+        reserveTransitionBuffer(walls, end);
         placed.add(leadMeasureId);
+    }
+
+    /**
+     * Reserves a short transition buffer immediately after a placed block (H1 rule 1): a spacer wall so
+     * the next block does not start flush against this one, preventing a wall of glued back-to-back
+     * blocks. The buffer is a wall only — never emitted as an {@link AgendaBlock}, so it is never
+     * written back to Apple. A no-op when the humanized buffer is zero (raw floor).
+     *
+     * @param walls  the accumulating wall list; mutated in place
+     * @param blockEnd the just-placed block's end instant, where the buffer begins
+     */
+    private void reserveTransitionBuffer(List<OccupiedInterval> walls, OffsetDateTime blockEnd) {
+        int buffer = humanization.transitionBufferMinutes();
+        if (buffer <= 0) {
+            return;
+        }
+        walls.add(new OccupiedInterval(null, blockEnd, blockEnd.plusMinutes(buffer), false));
     }
 
     private boolean highLoadForWig(PlannerDayState state, UUID leadMeasureId) {
