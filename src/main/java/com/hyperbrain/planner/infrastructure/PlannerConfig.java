@@ -1,7 +1,9 @@
 package com.hyperbrain.planner.infrastructure;
 
+import com.hyperbrain.planner.domain.model.AdherenceThresholds;
 import com.hyperbrain.planner.domain.model.EnergyThresholds;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
+import com.hyperbrain.planner.domain.service.AdherenceCalculator;
 import com.hyperbrain.planner.domain.service.AgendaGenerator;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
@@ -9,6 +11,7 @@ import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -64,6 +67,19 @@ class PlannerConfig {
     @Bean
     AgendaValidator agendaValidator() {
         return new AgendaValidator();
+    }
+
+    /**
+     * H0 adherence rollup (#17). The tolerance and abandonment threshold are sanctioned MVP defaults
+     * (pending Daniel — domain formula), overridable via {@code app.telemetry.rollup.*}.
+     */
+    @Bean
+    AdherenceCalculator adherenceCalculator(
+        @Value("${app.telemetry.rollup.executed-min-minutes:5}") int executedMinMinutes,
+        @Value("${app.telemetry.rollup.abandonment-adherence-threshold:0.5}") double abandonmentThreshold
+    ) {
+        return new AdherenceCalculator(
+            new AdherenceThresholds(executedMinMinutes, abandonmentThreshold));
     }
 
     @Bean

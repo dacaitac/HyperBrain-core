@@ -39,6 +39,10 @@ app:
   timeblock:
     # Tests drive expireDueBlocks() deterministically (TimeBlockExpiryIT).
     scheduling-enabled: false
+  telemetry:
+    rollup:
+      # Tests drive rollup() deterministically (DailyAdherenceRollupServiceIT); scheduler off.
+      scheduling-enabled: false
   prioritizer:
     # Tests drive reflectDailyReprioritization() deterministically (PriorityReflectionIT).
     scheduling-enabled: false

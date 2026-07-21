@@ -104,6 +104,20 @@ app:
     # One-minute cadence is enough — settlement is idempotent and race-safe.
     expiry-poll-ms:     60000
     scheduling-enabled: true
+  telemetry:
+    rollup:
+      # H0 (#17): daily adherence + behavioral lead-measures rollup. Structured JSON line to stdout —
+      # the MVP telemetry sink (ADR-016 raw-first, no new table). Runs early over the PREVIOUS local
+      # day: after the DR-08 expiry sweep has settled yesterday's open blocks and before the
+      # wake-triggered morning dispatch overwrites the ritual proxy.
+      cron:               "0 30 3 * * *"
+      scheduling-enabled: true
+      # DOMAIN FORMULA (pending Daniel): a block counts as executed when its settled actual duration
+      # reaches this floor (temporal tolerance, minutes).
+      executed-min-minutes:            5
+      # DOMAIN FORMULA (pending Daniel): a day whose adherence is below this with zero replans is
+      # flagged abandoned (a day let go, not one actively re-adjusted).
+      abandonment-adherence-threshold: 0.5
   prioritizer:
     # #66a tick (a): recompute the day's Priority Scores as the urgency ramp advances and reflect
     # only the moved rows to the satellites. Hourly, anchored to America/Bogota (see the scheduler).
