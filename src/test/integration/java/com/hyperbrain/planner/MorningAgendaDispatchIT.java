@@ -34,7 +34,12 @@ class MorningAgendaDispatchIT {
     private static final String COMMANDS_QUEUE = "apple-commands.fifo";
     private static final UUID USER = DataFixture.SYSTEM_USER_ID;
     private static final ZoneId ZONE = ZoneOffset.UTC;
-    // Cold-start wake 06:30 + 10-min lead offset = 06:40 trigger; a run at 06:41 is due.
+    // The test seeds its own cold-start wake edge (06:30) via settings.planner_constraints.sleep_window
+    // so the trigger is derived deterministically from a fixture the test owns, not from the
+    // production DEFAULT_WAKE constant. Wake 06:30 + 10-min lead offset = 06:40 trigger; a run at
+    // 06:41 is due.
+    private static final String SLEEP_WINDOW_SETTINGS =
+        "{\"planner_constraints\":{\"sleep_window\":{\"wake\":\"06:30\",\"bedtime\":\"23:00\"}}}";
     private static final OffsetDateTime DUE_NOW = OffsetDateTime.of(2026, 7, 10, 6, 41, 0, 0, ZoneOffset.UTC);
     private static final OffsetDateTime BEFORE_TRIGGER =
         OffsetDateTime.of(2026, 7, 10, 5, 0, 0, 0, ZoneOffset.UTC);
@@ -56,7 +61,9 @@ class MorningAgendaDispatchIT {
         try (var conn = jdbcTemplate.getDataSource().getConnection()) {
             DataFixture.insertSystemUser(conn);
         }
-        jdbcTemplate.update("UPDATE sys_user SET timezone = 'UTC', settings = '{}'::jsonb WHERE id = ?", USER);
+        jdbcTemplate.update(
+            "UPDATE sys_user SET timezone = 'UTC', settings = ?::jsonb WHERE id = ?",
+            SLEEP_WINDOW_SETTINGS, USER);
         drainQueue(COMMANDS_QUEUE);
     }
 
