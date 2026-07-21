@@ -122,7 +122,15 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                e.priority_score,
                (e.status = 'IN_PROGRESS')                       AS in_progress,
                p.energy_drain,
-               p.estimated_minutes,
+               COALESCE(
+                   p.estimated_minutes,
+                   CASE WHEN e.end_time IS NOT NULL
+                             AND e.start_time IS NOT NULL
+                             AND e.end_time > e.start_time
+                        THEN GREATEST(1, (EXTRACT(EPOCH FROM (e.end_time - e.start_time)) / 60)::integer)
+                        ELSE NULL
+                   END
+               )                                                AS estimated_minutes,
                (SELECT count(*) FROM core_executable sub
                 WHERE sub.parent_id = e.id
                   AND sub.system_generated = false

@@ -240,10 +240,11 @@ class AgendaGeneratorTest {
     }
 
     @Test
-    @DisplayName("no remaining effort: the executable is excluded with NO_REMAINING_EFFORT")
+    @DisplayName("no remaining effort: a fully-settled task (estimated=0) is excluded with NO_REMAINING_EFFORT")
     void excludes_zero_effort() {
+        // estimated=0 means fully overrun; the calculator returns 0 → the generator excludes it.
         SchedulableExecutable zero = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, null, 0);
+            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 0, 0);
         PlannerDayState state = state(List.of(zero), List.of(), List.of(), NEUTRAL, true);
 
         Agenda agenda = generator.generate(state);

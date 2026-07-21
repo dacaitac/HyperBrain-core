@@ -47,12 +47,13 @@ class RemainingEffortCalculatorTest {
     }
 
     @Test
-    @DisplayName("no cu and no estimate: no signal, zero effort")
-    void no_signal_is_zero() {
+    @DisplayName("no cu and no estimate: falls back to COLD_START_MINUTES so the task is schedulable")
+    void no_signal_falls_back_to_cold_start() {
         SchedulableExecutable executable = new SchedulableExecutable(
             ID, ExecutableType.TASK, 0.5, false, null, null, 0, null, 0);
 
-        assertThat(RemainingEffortCalculator.remainingMinutes(executable)).isZero();
+        assertThat(RemainingEffortCalculator.remainingMinutes(executable))
+            .isEqualTo(RemainingEffortCalculator.COLD_START_MINUTES);
     }
 
     private static SchedulableExecutable withSubtasks(int pending, double cu) {
