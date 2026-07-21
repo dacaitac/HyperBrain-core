@@ -74,6 +74,9 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * drops them, and the freshness guard also ignores them ({@code fresh.end_time IS NOT NULL}) so
      * a fresh manual score can never vouch for stale hour history — the frontier stays fed
      * exclusively by records that observed real bedtime/wake instants.
+     *
+     * <p>Both freshness bounds are measured from the caller's injected {@code now} (bound as a
+     * parameter), never the DB server clock, so the read is a pure function of the reference instant.
      */
     private static final String SLEEP_SAMPLES_SQL = """
         SELECT EXTRACT(HOUR   FROM (s.end_time   AT TIME ZONE ?))::int * 60
@@ -83,13 +86,13 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         FROM tel_sleep_record s
         WHERE s.user_id = ?
           AND s.end_time IS NOT NULL
-          AND s.start_time >= now() - make_interval(days => ?)
+          AND s.start_time >= ? - make_interval(days => ?)
           AND EXISTS (
               SELECT 1 FROM tel_sleep_record fresh
               WHERE fresh.user_id = s.user_id
                 AND fresh.end_time IS NOT NULL
               GROUP BY fresh.user_id
-              HAVING max(fresh.collected_at) >= now() - make_interval(hours => ?)
+              HAVING max(fresh.collected_at) >= ? - make_interval(hours => ?)
           )
         """;
 
@@ -97,14 +100,15 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * Last night's score for the energy resolution. Device precedence (Daniel, 2026-07-11):
      * within the freshness bound, a record with real hours ({@code end_time IS NOT NULL}, e.g.
      * future HealthKit) wins over a manual score-only marker even when the marker's
-     * {@code collected_at} is fresher — recency only breaks ties within the same class.
+     * {@code collected_at} is fresher — recency only breaks ties within the same class. The
+     * freshness bound is measured from the caller's injected {@code now}, never the DB server clock.
      */
     private static final String LAST_NIGHT_SCORE_SQL = """
         SELECT s.sleep_score
         FROM tel_sleep_record s
         WHERE s.user_id = ?
           AND s.sleep_score IS NOT NULL
-          AND s.collected_at >= now() - make_interval(hours => ?)
+          AND s.collected_at >= ? - make_interval(hours => ?)
         ORDER BY (s.end_time IS NOT NULL) DESC, s.collected_at DESC
         LIMIT 1
         """;
@@ -344,7 +348,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             wakeSamples.add(new LocalTimeOfDay(rs.getInt("wake_minutes")));
             bedtimeSamples.add(new LocalTimeOfDay(rs.getInt("bedtime_minutes")));
         }, timezone, timezone, timezone, timezone, userId,
-            constraints.sleepHistoryDays(), constraints.sleepFreshnessHours());
+            now, constraints.sleepHistoryDays(), now, constraints.sleepFreshnessHours());
 
         return new SleepFrontierInputs(wakeSamples, bedtimeSamples, loadFallbackWindow(userId));
     }
@@ -353,7 +357,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     public Integer loadLastNightSleepScore(UUID userId, OffsetDateTime now) {
         return jdbcTemplate.query(LAST_NIGHT_SCORE_SQL,
                 (rs, rowNum) -> rs.getObject("sleep_score", Integer.class),
-                userId, constraints.sleepFreshnessHours())
+                userId, now, constraints.sleepFreshnessHours())
             .stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
     }
 

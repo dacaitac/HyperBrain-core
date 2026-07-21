@@ -166,14 +166,15 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("observed sleep frontier: enough fresh records shift the window off the cold-start default")
+    @DisplayName("observed sleep frontier: fresh records (relative to the injected clock) shift the window off the cold-start default")
     void observed_frontier_replaces_cold_start() {
-        // Five fresh nights waking at 05:00 UTC, well before the 06:30 cold-start default.
-        // Dates are relative to now() so records always fall within the 14-day history window,
-        // regardless of when the test runs.
-        OffsetDateTime collectedAt = OffsetDateTime.now(UTC).minusHours(2);
+        // Five nights waking at 05:00 UTC, well before the cold-start default. Everything is seeded
+        // relative to the injected reference instant (NOON), not the wall clock: collected 2 h before
+        // NOON they are fresh only against the injected clock — against the DB server clock they would
+        // be many days stale and dropped. The freshness cut is therefore deterministic and pinned.
+        OffsetDateTime collectedAt = NOON.minusHours(2);
         for (int i = 1; i <= 5; i++) {
-            OffsetDateTime wake = OffsetDateTime.now(UTC).minusDays(i)
+            OffsetDateTime wake = NOON.minusDays(i)
                 .withHour(5).withMinute(0).withSecond(0).withNano(0);
             insertSleepRecord(wake.withHour(0), wake, 80, collectedAt);
         }
@@ -184,8 +185,37 @@ class AgendaGenerationServiceIT {
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
             "SELECT date_start FROM core_time_block WHERE executable_id = ?",
             OffsetDateTime.class, task);
-        // Wake observed at 05:00 lets the block start earlier than the 06:30 cold-start default would.
+        // Wake observed at 05:00 lets the block start earlier than the cold-start default would.
         assertThat(blockStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 5, 0, 0, 0, UTC));
+    }
+
+    @Test
+    @DisplayName("stale sleep frontier: records past the freshness bound (injected clock) fall back to the settings window")
+    void stale_frontier_falls_back_to_settings_window() {
+        // An explicit settings wake so the fallback is deterministic and independent of the hard
+        // default constant.
+        jdbcTemplate.update(
+            "UPDATE sys_user SET settings = ?::jsonb WHERE id = ?",
+            "{\"planner_constraints\":{\"sleep_window\":{\"wake\":\"08:00\",\"bedtime\":\"23:00\"}}}",
+            USER);
+        // Same 05:00 wake history, but collected 40 h before NOON — past the 36 h freshness bound
+        // measured from the injected clock, so the whole history is dropped and the settings window
+        // wins. (A DB-server-clock guard could not tell this case apart from the fresh one above.)
+        OffsetDateTime collectedAt = NOON.minusHours(40);
+        for (int i = 1; i <= 5; i++) {
+            OffsetDateTime wake = NOON.minusDays(i)
+                .withHour(5).withMinute(0).withSecond(0).withNano(0);
+            insertSleepRecord(wake.withHour(0), wake, 80, collectedAt);
+        }
+        UUID task = insertTask("Sleeper", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        OffsetDateTime blockStart = jdbcTemplate.queryForObject(
+            "SELECT date_start FROM core_time_block WHERE executable_id = ?",
+            OffsetDateTime.class, task);
+        // The stale 05:00 observations are ignored; the block opens at the settings wake of 08:00.
+        assertThat(blockStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC));
     }
 
     @Test
