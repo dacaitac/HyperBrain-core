@@ -1,5 +1,6 @@
 package com.hyperbrain.planner.application;
 
+import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
@@ -16,6 +17,8 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -103,9 +106,23 @@ public class UserCommandService {
             return;
         }
         ZoneId zone = plannerStateRepository.loadUserZone(userId);
-        LocalDate today = occurredAt.atZoneSameInstant(zone).toLocalDate();
-        agendaGenerationService.generate(userId, today, zone, occurredAt, true);
-        log.info("Manual replan executed for user {} on {} from {}", userId, today, occurredAt);
+        LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
+        LocalDate lastDay = occurredAt.plusHours(48).atZoneSameInstant(zone).toLocalDate();
+
+        // Cross-day dedup: non-WIG tasks placed on an earlier day are excluded from later days so
+        // the same task is never double-booked across the 48h window. WIG lead measures are exempt
+        // (they are a daily recurring commitment, not a one-off task).
+        Set<UUID> placed = new LinkedHashSet<>();
+        for (LocalDate day = startDay; !day.isAfter(lastDay); day = day.plusDays(1)) {
+            boolean fromNow = day.equals(startDay);
+            Agenda agenda = agendaGenerationService.generate(userId, day, zone, occurredAt, fromNow, placed);
+            agenda.blocks().stream()
+                .filter(b -> !b.wig())
+                .map(b -> b.executableId())
+                .forEach(placed::add);
+        }
+        log.info("Manual replan executed for user {} on {} days ({} → {}) from {}",
+            userId, lastDay.toEpochDay() - startDay.toEpochDay() + 1, startDay, lastDay, occurredAt);
     }
 
     private void recordSleepScore(UUID userId, SleepScoreInput input, OffsetDateTime occurredAt) {

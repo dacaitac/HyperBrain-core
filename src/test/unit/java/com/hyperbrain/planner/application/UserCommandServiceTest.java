@@ -1,5 +1,6 @@
 package com.hyperbrain.planner.application;
 
+import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.model.UserCommandType;
@@ -16,9 +17,15 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -51,41 +58,50 @@ class UserCommandServiceTest {
     }
 
     @Test
-    @DisplayName("REPLAN_AGENDA replans from occurred_at with fromNow=true on the user's local day")
+    @DisplayName("REPLAN_AGENDA covers 48 h: fromNow=true on startDay, fromNow=false on subsequent days")
     void replan_generates_from_now() {
-        // Given a replan issued 2026-07-11T02:00Z = 2026-07-10 21:00 in Bogota (local day is the
-        // 10th), one hour before the pinned now — inside the staleness bound
+        // occurredAt = 2026-07-11T02:00Z = 2026-07-10 21:00 Bogota → startDay = July 10
+        // horizon   = 2026-07-13T02:00Z = 2026-07-12 21:00 Bogota → lastDay  = July 12
+        // → 3 calls: July 10 (fromNow=true), July 11, July 12 (fromNow=false each)
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
+        Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        when(agendaGenerationService.generate(eq(USER_ID), any(), eq(BOGOTA), eq(occurredAt), anyBoolean(), any()))
+            .thenReturn(empty);
 
         // When
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
 
-        // Then the day is derived in the user's zone and the reference instant is occurred_at
+        // Then: startDay gets fromNow=true; the window spans 3 days total
         verify(agendaGenerationService).generate(
-            USER_ID, LocalDate.of(2026, 7, 10), BOGOTA, occurredAt, true);
+            eq(USER_ID), eq(LocalDate.of(2026, 7, 10)), eq(BOGOTA), eq(occurredAt), eq(true), any(Set.class));
+        verify(agendaGenerationService, times(3)).generate(
+            eq(USER_ID), any(LocalDate.class), eq(BOGOTA), eq(occurredAt), anyBoolean(), any(Set.class));
         verifyNoInteractions(sleepScoreStore);
     }
 
     @Test
     @DisplayName("a replan exactly at the staleness bound still fires (guard is strictly older-than)")
     void replan_at_the_bound_still_fires() {
-        // Given a replan exactly 2 h old
+        // Given a replan exactly 2 h old — edge of the staleness window, must still fire
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 1, 0, 0, 0, ZoneOffset.UTC);
+        Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        when(agendaGenerationService.generate(eq(USER_ID), any(), eq(BOGOTA), eq(occurredAt), anyBoolean(), any()))
+            .thenReturn(empty);
 
         // When
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
 
-        // Then
+        // Then startDay (July 10) receives a fromNow=true call — the guard did not block it
         verify(agendaGenerationService).generate(
-            USER_ID, LocalDate.of(2026, 7, 10), BOGOTA, occurredAt, true);
+            eq(USER_ID), eq(LocalDate.of(2026, 7, 10)), eq(BOGOTA), eq(occurredAt), eq(true), any(Set.class));
     }
 
     @Test

@@ -84,16 +84,28 @@ public class AgendaGenerationService {
     /**
      * Generates the day's agenda for a user and persists the validated blocks.
      *
-     * @param userId   the user whose day to plan; never null
+     * @param userId    the user whose day to plan; never null
      * @param targetDay the calendar day being planned; never null
-     * @param zone     the user's timezone; never null
-     * @param now      the reference instant; never null
-     * @param fromNow  true for replan-from-now, false for a full-day run
+     * @param zone      the user's timezone; never null
+     * @param now       the reference instant; never null
+     * @param fromNow   true for replan-from-now, false for a full-day run
      * @return the generated agenda (blocks, exclusions, paused tasks, energy criterion, degraded flag)
      */
     @Transactional
     public Agenda generate(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
                            boolean fromNow) {
+        return generate(userId, targetDay, zone, now, fromNow, Set.of());
+    }
+
+    /**
+     * Generates the day's agenda excluding tasks already placed on a previous day in the same
+     * multi-day run. WIG lead measures are never excluded so they repeat daily as intended.
+     *
+     * @param excludedIds executable IDs already placed on an earlier day; never null
+     */
+    @Transactional
+    Agenda generate(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
+                    boolean fromNow, Set<UUID> excludedIds) {
         SleepWindow sleepWindow = sleepFrontierCalculator.computeWindow(
             repository.loadSleepFrontierInputs(userId, now));
         EnergyProfile energy = energyResolver.resolve(
@@ -102,7 +114,10 @@ public class AgendaGenerationService {
         PlanningWindow window =
             planningWindowResolver.resolve(sleepWindow, targetDay, zone, now, fromNow);
 
-        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId);
+        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId)
+            .stream()
+            .filter(e -> !excludedIds.contains(e.id()))
+            .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
         List<OccupiedInterval> occupied = repository.loadOccupiedIntervals(
             userId, window.frontierStart(), window.frontierEnd());
