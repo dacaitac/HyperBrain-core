@@ -107,7 +107,9 @@ public class AgendaGenerationService {
         List<OccupiedInterval> occupied = repository.loadOccupiedIntervals(
             userId, window.frontierStart(), window.frontierEnd());
 
-        boolean dataComplete = sleepWindow.observed();
+        // The fallback window (07:00–23:00) is always a valid planning frontier; the
+        // observed flag only distinguishes learned vs. default, not usable vs. unusable.
+        boolean dataComplete = true;
 
         PlannerDayState state = new PlannerDayState(
             window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, occupied, energy,

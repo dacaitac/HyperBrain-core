@@ -44,7 +44,7 @@ import java.util.UUID;
 @Repository
 class JdbcPlannerStateRepository implements PlannerStateRepository {
 
-    private static final LocalTime DEFAULT_WAKE = LocalTime.of(6, 30);
+    private static final LocalTime DEFAULT_WAKE = LocalTime.of(7, 0);
     private static final LocalTime DEFAULT_BEDTIME = LocalTime.of(23, 0);
 
     /**
