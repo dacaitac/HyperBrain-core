@@ -254,10 +254,11 @@ class AgendaGeneratorTest {
     }
 
     @Test
-    @DisplayName("pinned end: a task with dueInstant inside the window ends exactly at dueInstant")
-    void pinned_end_within_window_anchors_block_end() {
-        // Given: a task due at 22:00 (1h before bedtime) with 60 min of effort
-        OffsetDateTime due = BEDTIME.minusHours(1); // 22:00 UTC
+    @DisplayName("pinned start: a task with dueInstant inside the window starts exactly at dueInstant")
+    void pinned_start_within_window_anchors_block_start() {
+        // Given: a task whose reminder time is 15:00 (well inside the window) with 60 min of effort.
+        // The reminder time is when to START, so the block runs 15:00-16:00.
+        OffsetDateTime due = OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, ZoneOffset.UTC);
         SchedulableExecutable executable = new SchedulableExecutable(
             UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, due);
         PlannerDayState state = state(List.of(executable), List.of(), List.of(), NEUTRAL, true);
@@ -265,16 +266,16 @@ class AgendaGeneratorTest {
         // When
         Agenda agenda = generator.generate(state);
 
-        // Then: exactly one block, ending at due and starting 60 min before
+        // Then: exactly one block, starting at the reminder time and ending 60 min later
         assertThat(agenda.blocks()).hasSize(1);
         AgendaBlock block = agenda.blocks().get(0);
-        assertThat(block.end()).isEqualTo(due);
-        assertThat(block.start()).isEqualTo(due.minusMinutes(60));
+        assertThat(block.start()).isEqualTo(due);
+        assertThat(block.end()).isEqualTo(due.plusMinutes(60));
     }
 
     @Test
-    @DisplayName("pinned end: a dueInstant outside the window falls back to cursor placement")
-    void pinned_end_outside_window_falls_back_to_cursor() {
+    @DisplayName("pinned start: a dueInstant outside the window falls back to cursor placement")
+    void pinned_start_outside_window_falls_back_to_cursor() {
         // Given: a task due at midnight (00:00 on targetDay) — before the 07:00 window start
         OffsetDateTime midnight = OffsetDateTime.of(2026, 7, 10, 0, 0, 0, 0, ZoneOffset.UTC);
         SchedulableExecutable executable = new SchedulableExecutable(
@@ -284,11 +285,31 @@ class AgendaGeneratorTest {
         // When
         Agenda agenda = generator.generate(state);
 
-        // Then: the task is still placed (cursor fallback), but not ending at midnight
+        // Then: the task is still placed (cursor fallback), but not starting at midnight
         assertThat(agenda.blocks()).hasSize(1);
         AgendaBlock block = agenda.blocks().get(0);
-        assertThat(block.end()).isNotEqualTo(midnight);
+        assertThat(block.start()).isNotEqualTo(midnight);
         assertThat(block.start()).isAfterOrEqualTo(WAKE);
+    }
+
+    @Test
+    @DisplayName("pinned start: a reminder whose block would run past bedtime falls back to cursor")
+    void pinned_start_past_bedtime_falls_back_to_cursor() {
+        // Given: a task whose reminder is 22:30, 60 min of effort → 22:30-23:30 would spill past the
+        // 23:00 bedtime, so the pinned placement is rejected and the cursor fallback keeps it in-window.
+        OffsetDateTime due = BEDTIME.minusMinutes(30); // 22:30 UTC
+        SchedulableExecutable executable = new SchedulableExecutable(
+            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, due);
+        PlannerDayState state = state(List.of(executable), List.of(), List.of(), NEUTRAL, true);
+
+        // When
+        Agenda agenda = generator.generate(state);
+
+        // Then: the task is still placed (cursor fallback) and never runs past bedtime
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.start()).isNotEqualTo(due);
+        assertThat(block.end()).isBeforeOrEqualTo(BEDTIME);
     }
 
     private static PlannerDayState state(

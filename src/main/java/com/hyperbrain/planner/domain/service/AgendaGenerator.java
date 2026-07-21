@@ -128,12 +128,13 @@ public class AgendaGenerator {
                 continue;
             }
 
-            // Pinned-end placement: when the executable has a due instant that falls within the
-            // planning window, anchor the block's end to that instant (deadline-driven scheduling).
+            // Pinned-start placement: the reminder time is when to START. When the executable has a
+            // due instant that falls within the planning window, anchor the block's start to that
+            // instant and let it run for its remaining effort (reminder-driven scheduling).
             OffsetDateTime dueInstant = executable.dueInstant();
             if (dueInstant != null) {
-                OffsetDateTime pinnedEnd = dueInstant;
-                OffsetDateTime pinnedStart = pinnedEnd.minusMinutes(minutes);
+                OffsetDateTime pinnedStart = dueInstant;
+                OffsetDateTime pinnedEnd = pinnedStart.plusMinutes(minutes);
                 if (!pinnedStart.isBefore(state.windowStart()) && !pinnedEnd.isAfter(state.windowEnd())) {
                     blocks.add(new AgendaBlock(executable.id(), pinnedStart, pinnedEnd, false, highLoad,
                         rankReasonPinned(executable, minutes)));
@@ -143,7 +144,8 @@ public class AgendaGenerator {
                     urgentPlaced++;
                     continue;
                 }
-                // Due instant outside window (e.g. midnight) — fall through to cursor-based placement.
+                // Due instant outside window, or the block would run past bedtime (e.g. midnight) —
+                // fall through to cursor-based placement.
             }
 
             Optional<OffsetDateTime> slot =
@@ -261,7 +263,7 @@ public class AgendaGenerator {
     private String rankReasonPinned(SchedulableExecutable executable, int minutes) {
         String load = executable.isHighLoad(constraints.highLoadDrainFloor()) ? "high-load" : "standard";
         return String.format(
-            "Pinned to due time %s, %d min remaining effort, priority %.3f, %s",
+            "Pinned to start at reminder time %s, %d min remaining effort, priority %.3f, %s",
             executable.dueInstant(), minutes, executable.rankingScore(), load);
     }
 }
