@@ -122,6 +122,14 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * the user's schedulable work; the AGENDA windows re-enter as walls via
      * {@link #loadOccupiedIntervals}. {@code pending_subtasks} and {@code settled_actual} are derived
      * so the domain can size each block by remaining effort without a second round-trip.
+     *
+     * <p><b>Completed work is dropped so a (re)plan never re-schedules what is already done.</b> Two
+     * completion signals are honoured: a terminal {@code status = DONE} (a checked-off task), and a
+     * {@code last_completed_at} inside the target day (the completion clock stamped when work is done).
+     * The second guard is the intraday-replan fix: a recurring/habit executable checked off today keeps
+     * a live status but must not reappear on today's plan, while staying schedulable on future days
+     * (then its completion clock is before the day). Both {@code dayStart}/{@code dayEnd} bound the
+     * day in the caller's timezone, so the read is a pure function of the target day.
      */
     private static final String RANKED_EXECUTABLES_SQL = """
         SELECT e.id,
@@ -155,6 +163,9 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND e.status IN ('TODO', 'IN_PROGRESS')
           AND e.type <> 'AGENDA'
           AND e.system_generated = false
+          AND (e.last_completed_at IS NULL
+               OR e.last_completed_at <  ?
+               OR e.last_completed_at >= ?)
         ORDER BY e.priority_score DESC NULLS LAST, e.id
         """;
 
@@ -390,7 +401,8 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     }
 
     @Override
-    public List<SchedulableExecutable> loadRankedExecutables(UUID userId) {
+    public List<SchedulableExecutable> loadRankedExecutables(UUID userId, OffsetDateTime dayStart,
+                                                             OffsetDateTime dayEnd) {
         return jdbcTemplate.query(RANKED_EXECUTABLES_SQL, (rs, rowNum) -> {
             UUID id = rs.getObject("id", UUID.class);
             int totalSubtasks = rs.getInt("total_subtasks");
@@ -406,7 +418,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 rs.getObject("estimated_minutes", Integer.class),
                 rs.getInt("settled_actual"),
                 rs.getObject("due_instant", OffsetDateTime.class));
-        }, userId);
+        }, userId, dayStart, dayEnd);
     }
 
     @Override

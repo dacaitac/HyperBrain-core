@@ -59,14 +59,24 @@ public interface PlannerStateRepository {
     Integer loadLastNightSleepScore(UUID userId, OffsetDateTime now);
 
     /**
-     * Reads the day's schedulable executables ranked by their persisted {@code priority_score}
+     * Reads the target day's schedulable executables ranked by their persisted {@code priority_score}
      * (highest first — the floor reads the score, never recomputes the Prioritizer), each carrying its
      * remaining-effort inputs and {@code energy_drain}.
      *
-     * @param userId the owning user
+     * <p>Completed work is dropped so a (re)plan never re-schedules what is already done: a terminal
+     * {@code DONE} status is excluded, and so is any executable whose completion clock
+     * ({@code last_completed_at}) falls inside the target day — the latter keeps a recurring executable
+     * that was checked off today from reappearing on today's plan while leaving it schedulable on future
+     * days (its completion clock is then before the day). This is the intraday-replan case: in the
+     * morning nothing is completed yet, so the guard is a no-op there.
+     *
+     * @param userId   the owning user
+     * @param dayStart the target day's start instant (inclusive), for the completed-today guard
+     * @param dayEnd   the target day's end instant (exclusive), for the completed-today guard
      * @return the ranked schedulables; never null, may be empty
      */
-    List<SchedulableExecutable> loadRankedExecutables(UUID userId);
+    List<SchedulableExecutable> loadRankedExecutables(UUID userId, OffsetDateTime dayStart,
+                                                      OffsetDateTime dayEnd);
 
     /**
      * Reads the day's WIG portfolio: the {@code ACTIVE MCI} cycles ({@code CoreCycle type=MCI}), each

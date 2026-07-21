@@ -115,7 +115,9 @@ public class AgendaGenerationService {
         PlanningWindow window =
             planningWindowResolver.resolve(sleepWindow, targetDay, zone, now, fromNow);
 
-        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId)
+        OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
+        OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
+        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd)
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
             .filter(e -> e.dueInstant() == null

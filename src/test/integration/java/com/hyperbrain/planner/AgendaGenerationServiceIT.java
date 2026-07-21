@@ -337,7 +337,87 @@ class AgendaGenerationServiceIT {
         assertThat(blockStart).isAfterOrEqualTo(NOON);
     }
 
+    @Test
+    @DisplayName("replan excludes an executable completed today even while it keeps a live status")
+    void replan_excludes_executable_completed_today() {
+        UUID pending = insertTask("Still pending", 0.9, 60);
+        // A live (IN_PROGRESS) executable whose completion clock is stamped earlier today: a recurring
+        // item checked off this morning must not be re-planned in the afternoon.
+        UUID doneToday = insertTask("Done this morning", 0.8, 60);
+        stampCompletedAt(doneToday, OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC));
+
+        service.generate(USER, DAY, UTC, NOON, true);
+
+        assertThat(scheduledExecutableIds()).contains(pending).doesNotContain(doneToday);
+    }
+
+    @Test
+    @DisplayName("replan still schedules an executable that was not completed today")
+    void replan_schedules_uncompleted_executable() {
+        UUID pending = insertTask("Not done", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, true);
+
+        assertThat(scheduledExecutableIds()).contains(pending);
+    }
+
+    @Test
+    @DisplayName("a habit completed today is dropped today but returns on a future day")
+    void habit_completed_today_returns_on_future_days() {
+        // A daily habit with no fixed time, checked off this morning: it stays alive (IN_PROGRESS)
+        // and its completion clock lands on the target day.
+        UUID habit = insertHabit("Daily exercise", 0.9, 45);
+        stampCompletedAt(habit, OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC));
+
+        // Today's replan must not re-schedule the habit already done today.
+        service.generate(USER, DAY, UTC, NOON, true);
+        assertThat(scheduledExecutableIds()).doesNotContain(habit);
+
+        // The next day it is due again: its completion clock is now before the day, so it returns.
+        LocalDate nextDay = DAY.plusDays(1);
+        service.generate(USER, nextDay, UTC,
+            OffsetDateTime.of(2026, 7, 11, 12, 0, 0, 0, UTC), false);
+        assertThat(scheduledExecutableIds()).contains(habit);
+    }
+
+    @Test
+    @DisplayName("morning generation is unaffected by completions from prior days")
+    void morning_generation_ignores_prior_day_completions() {
+        UUID yesterdayDone = insertTask("Done yesterday", 0.9, 60);
+        stampCompletedAt(yesterdayDone, OffsetDateTime.of(2026, 7, 9, 20, 0, 0, 0, UTC));
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // A prior-day completion never blocks today's plan.
+        assertThat(scheduledExecutableIds()).contains(yesterdayDone);
+    }
+
     // ─── fixtures ──────────────────────────────────────────────────────────────
+
+    private List<UUID> scheduledExecutableIds() {
+        return jdbcTemplate.queryForList(
+            "SELECT executable_id FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            UUID.class);
+    }
+
+    private void stampCompletedAt(UUID executableId, OffsetDateTime instant) {
+        jdbcTemplate.update(
+            "UPDATE core_executable SET last_completed_at = ?, status = 'IN_PROGRESS' WHERE id = ?",
+            instant, executableId);
+    }
+
+    private UUID insertHabit(String name, double priority, int estimatedMinutes) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, frequency)
+            VALUES (?, ?, ?, 'HABIT', 'IN_PROGRESS', ?, 1)
+            """, id, USER, name, priority);
+        jdbcTemplate.update("""
+            INSERT INTO core_execution_profile (executable_id, estimated_minutes)
+            VALUES (?, ?)
+            """, id, estimatedMinutes);
+        return id;
+    }
 
     private UUID blockId(UUID executableId) {
         return jdbcTemplate.queryForObject(
