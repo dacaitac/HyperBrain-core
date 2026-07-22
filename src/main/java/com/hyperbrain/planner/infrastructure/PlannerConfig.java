@@ -7,6 +7,7 @@ import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.service.AdherenceCalculator;
 import com.hyperbrain.planner.domain.service.AgendaGenerator;
 import com.hyperbrain.planner.domain.service.AgendaHumanizer;
+import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
 import com.hyperbrain.planner.domain.service.ContextBatcher;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
@@ -106,6 +107,15 @@ class PlannerConfig {
     @Bean
     AgendaValidator agendaValidator() {
         return new AgendaValidator();
+    }
+
+    /**
+     * The stable digest of a day's generation input (HU-01c H2). Framework-free like the other domain
+     * services; the single-owner materialization claims {@code (user, day, hash)} before generating.
+     */
+    @Bean
+    AgendaInputHasher agendaInputHasher() {
+        return new AgendaInputHasher();
     }
 
     /**

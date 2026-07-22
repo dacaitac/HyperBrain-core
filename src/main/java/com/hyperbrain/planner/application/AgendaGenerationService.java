@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
+import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
@@ -16,7 +17,9 @@ import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.model.ValidatedAgenda;
 import com.hyperbrain.planner.domain.model.ValidationContext;
+import com.hyperbrain.planner.domain.port.out.AgendaMaterializationLedger;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
@@ -33,7 +36,9 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -45,9 +50,15 @@ import java.util.stream.Collectors;
  * in one transaction so the day is planned against a single consistent snapshot.
  *
  * <p>The same verb serves both modes via {@code fromNow}: a full-day run (lower bound = wake) and a
- * replan-from-now run (lower bound = {@code max(wake, now)}, for the future «calcular» button / HU-02).
- * The dispatch of this generation at {@code wake + 10min} and the write-back to iOS are separate
- * delivery slices — out of this scope.
+ * replan-from-now run (lower bound = {@code max(wake, now)}).
+ *
+ * <p><b>Two entry points.</b> {@link #generate} is the synchronous verb the legacy path uses (morning
+ * scheduler and the manual replan loop) — it always materializes. {@link #materializeIfNew} is the
+ * idempotent verb the single-owner {@code AgendaJobConsumer} uses (HU-01c H2): it claims the
+ * {@code (user, day, input_hash)} slot first and only materializes when the input is new, so an
+ * at-least-once redelivery — or a replan from an unchanged state — is a no-op. Both share the same
+ * {@code prepare → floor → finalize} core, so the plan they produce is identical; only the
+ * idempotency guard differs.
  */
 @Service
 public class AgendaGenerationService {
@@ -63,6 +74,8 @@ public class AgendaGenerationService {
     private final HumanizedAgendaFloor humanizedAgendaFloor;
     private final HumanizationSettings humanizationSettings;
     private final AgendaValidator agendaValidator;
+    private final AgendaInputHasher inputHasher;
+    private final AgendaMaterializationLedger materializationLedger;
     private final OutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
 
@@ -74,6 +87,8 @@ public class AgendaGenerationService {
         HumanizedAgendaFloor humanizedAgendaFloor,
         HumanizationSettings humanizationSettings,
         AgendaValidator agendaValidator,
+        AgendaInputHasher inputHasher,
+        AgendaMaterializationLedger materializationLedger,
         OutboxRepository outboxRepository,
         ObjectMapper objectMapper) {
         this.repository = repository;
@@ -83,6 +98,8 @@ public class AgendaGenerationService {
         this.humanizedAgendaFloor = humanizedAgendaFloor;
         this.humanizationSettings = humanizationSettings;
         this.agendaValidator = agendaValidator;
+        this.inputHasher = inputHasher;
+        this.materializationLedger = materializationLedger;
         this.outboxRepository = outboxRepository;
         this.objectMapper = objectMapper;
     }
@@ -112,6 +129,113 @@ public class AgendaGenerationService {
     @Transactional
     Agenda generate(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
                     boolean fromNow, Set<UUID> excludedIds) {
+        PreparedDay prepared = prepare(userId, targetDay, zone, now, fromNow, excludedIds);
+        Agenda floorAgenda = humanizedAgendaFloor.generate(prepared.state());
+        return finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, floorAgenda);
+    }
+
+    /**
+     * Idempotent single-owner materialization (HU-01c H2): claims the {@code (user, day, input_hash)}
+     * slot and materializes only when the input is new. Runs in one transaction so the claim, the
+     * persisted blocks and the staged {@code AgendaBlockPlannedEvent} commit atomically — a rollback
+     * releases the claim and lets SQS redeliver.
+     *
+     * @param userId      the user whose day to materialize; never null
+     * @param targetDay   the calendar day being materialized; never null
+     * @param zone        the user's timezone; never null
+     * @param now         the reference instant (frozen at dispatch); never null
+     * @param fromNow     true for replan-from-now, false for a full-day run
+     * @param excludedIds executable IDs already placed on an earlier day of the same run; never null
+     * @return the materialized agenda, or empty when the input was already materialized (deduplicated)
+     */
+    @Transactional
+    public Optional<Agenda> materializeIfNew(UUID userId, LocalDate targetDay, ZoneId zone,
+                                             OffsetDateTime now, boolean fromNow,
+                                             Set<UUID> excludedIds) {
+        PreparedDay prepared = prepare(userId, targetDay, zone, now, fromNow, excludedIds);
+        String inputHash = inputHasher.hash(prepared.state(),
+            hashableWalls(userId, targetDay, zone, prepared.occupied()));
+        if (!materializationLedger.claim(userId, targetDay, inputHash)) {
+            log.info("Agenda materialization skipped for user {} on {}: input {} already materialized",
+                userId, targetDay, inputHash);
+            return Optional.empty();
+        }
+        Agenda floorAgenda = humanizedAgendaFloor.generate(prepared.state());
+        Agenda result =
+            finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, floorAgenda);
+        // Negative case (morning only): an empty day must tell the user it was planned for tomorrow.
+        // Stage it in this same transaction as the claim (Transactional Outbox), so the notice is
+        // exactly-once — atomic with the materialization, never a post-commit publish that a crash
+        // could drop. A replan day (fromNow) never proposes the next day.
+        if (!fromNow && result.blocks().isEmpty()) {
+            stageEmptyAgendaProposal(userId, targetDay, zone, result.energyCriterion(), now);
+        }
+        return Optional.of(result);
+    }
+
+    /**
+     * Replans the 48 h window from {@code occurredAt}: the start day is planned from now
+     * ({@code fromNow = true}), each subsequent day as a full day, and non-WIG tasks placed on an
+     * earlier day are excluded from later days so the same task is never double-booked across the
+     * window (WIG lead measures are exempt — a daily recurring commitment). Each day's
+     * delete-before-persist keeps repeats convergent.
+     *
+     * @param userId     the user whose window to replan; never null
+     * @param occurredAt the instant the replan is anchored to; never null
+     * @param zone       the user's timezone; never null
+     */
+    void replanAcrossWindow(UUID userId, OffsetDateTime occurredAt, ZoneId zone) {
+        LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
+        LocalDate lastDay = occurredAt.plusHours(48).atZoneSameInstant(zone).toLocalDate();
+        Set<UUID> placed = new LinkedHashSet<>();
+        for (LocalDate day = startDay; !day.isAfter(lastDay); day = day.plusDays(1)) {
+            boolean fromNow = day.equals(startDay);
+            Agenda agenda = generate(userId, day, zone, occurredAt, fromNow, placed);
+            agenda.blocks().stream()
+                .filter(block -> !block.wig())
+                .map(block -> block.executableId())
+                .forEach(placed::add);
+        }
+        log.info("Replan executed for user {} on {} days ({} → {}) from {}",
+            userId, lastDay.toEpochDay() - startDay.toEpochDay() + 1, startDay, lastDay, occurredAt);
+    }
+
+    /**
+     * Idempotent single-owner replan (HU-01c H2): claims the start day's {@code input_hash} and runs
+     * the whole 48 h {@link #replanAcrossWindow} only when the input is new. A single claim guards the
+     * whole run (not each day) so a redelivery of the same replan job is a clean no-op — re-running the
+     * loop per day would rebuild the cross-day exclusions from an empty set and double-book. A genuine
+     * replan whose start-day input moved (a later temporal frontier, a completed task) hashes anew and
+     * runs. The claim and every day's blocks commit in one transaction.
+     *
+     * @param userId     the user whose window to replan; never null
+     * @param occurredAt the instant the replan is anchored to; never null
+     * @param zone       the user's timezone; never null
+     * @return true when this call replanned, false when the replan was deduplicated
+     */
+    @Transactional
+    public boolean materializeReplanIfNew(UUID userId, OffsetDateTime occurredAt, ZoneId zone) {
+        LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
+        PreparedDay prepared = prepare(userId, startDay, zone, occurredAt, true, Set.of());
+        String inputHash = inputHasher.hash(prepared.state(),
+            hashableWalls(userId, startDay, zone, prepared.occupied()));
+        if (!materializationLedger.claim(userId, startDay, inputHash)) {
+            log.info("Replan skipped for user {} from {}: input {} already materialized",
+                userId, startDay, inputHash);
+            return false;
+        }
+        replanAcrossWindow(userId, occurredAt, zone);
+        return true;
+    }
+
+    /**
+     * Resolves the concrete-day planning state from the aggregates: the sleep frontier and energy, the
+     * planning window, the ranked executables (filtered by the cross-day exclusions and the due-day
+     * constraint), the WIG portfolio and the hard walls (existing blocks + meal anchors). Pure reads —
+     * no persistence side effects — so it is safe to run before the idempotency claim.
+     */
+    private PreparedDay prepare(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
+                                boolean fromNow, Set<UUID> excludedIds) {
         SleepWindow sleepWindow = sleepFrontierCalculator.computeWindow(
             repository.loadSleepFrontierInputs(userId, now));
         EnergyProfile energy = energyResolver.resolve(
@@ -142,11 +266,22 @@ public class AgendaGenerationService {
         PlannerDayState state = new PlannerDayState(
             window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, occupied, energy,
             dataComplete);
+        return new PreparedDay(state, window, occupied);
+    }
 
-        Agenda agenda = humanizedAgendaFloor.generate(state);
+    /**
+     * Re-imposes the hard walls, reconciles the day's blocks preserving identity (#15), stages the
+     * write-back and returns the accepted agenda. Runs inside the caller's transaction.
+     */
+    private Agenda finalizeMaterialization(UUID userId, LocalDate targetDay, ZoneId zone,
+                                           OffsetDateTime now, boolean fromNow, PreparedDay prepared,
+                                           Agenda agenda) {
+        PlannerDayState state = prepared.state();
+        List<OccupiedInterval> occupied = prepared.occupied();
+        PlanningWindow window = prepared.window();
 
         ValidationContext validationContext = new ValidationContext(
-            window.frontierStart(), window.frontierEnd(), occupied, energy.highLoadQuota(),
+            window.frontierStart(), window.frontierEnd(), occupied, state.energyProfile().highLoadQuota(),
             readOnlyAgendaIds(occupied));
         ValidatedAgenda validated = agendaValidator.validate(agenda.blocks(), validationContext);
 
@@ -200,6 +335,39 @@ public class AgendaGenerationService {
             now));
     }
 
+    /**
+     * Stages the empty-day next-day proposal in the same transaction as the idempotency claim
+     * (Transactional Outbox). The {@code SYSTEM} origin keeps it eligible for outbound propagation, so
+     * the {@code AgendaBlockPropagator} emits the notice reminder to Apple on drain.
+     */
+    private void stageEmptyAgendaProposal(UUID userId, LocalDate targetDay, ZoneId zone,
+                                          String energyCriterion, OffsetDateTime now) {
+        EmptyAgendaProposedEvent event = new EmptyAgendaProposedEvent(
+            userId, targetDay, zone.getId(), energyCriterion, now);
+        outboxRepository.append(new OutboxEvent(
+            UUID.randomUUID(),
+            EmptyAgendaProposedEvent.AGGREGATE_TYPE,
+            userId.toString(),
+            EmptyAgendaProposedEvent.EVENT_TYPE,
+            serialize(event),
+            SOURCE_SYSTEM,
+            now));
+    }
+
+    private String serialize(EmptyAgendaProposedEvent event) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("user_id", event.userId().toString());
+        node.put("target_day", event.targetDay().toString());
+        node.put("zone_id", event.zoneId());
+        node.put("energy_criterion", event.energyCriterion());
+        node.put("reference_instant", event.referenceInstant().toString());
+        try {
+            return objectMapper.writeValueAsString(node);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Failed to serialize EmptyAgendaProposedEvent", ex);
+        }
+    }
+
     private String serialize(AgendaBlockPlannedEvent event) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("user_id", event.userId().toString());
@@ -226,11 +394,44 @@ public class AgendaGenerationService {
             .toList();
     }
 
+    /**
+     * The walls to feed the idempotency hash: the full occupancy minus the run's own regenerable
+     * blocks (same-day {@code PLANNER}/{@code PLANNED}). A prior materialization persists those blocks,
+     * and they are then re-read as occupied walls; folding them into the hash would make a redelivery
+     * hash differently and re-materialize. Excluding them keeps the digest stable across redeliveries
+     * while the floor still plans against the full occupancy. Only queried on the idempotent path, so
+     * the synchronous {@link #generate} carries no extra read.
+     */
+    private List<OccupiedInterval> hashableWalls(UUID userId, LocalDate targetDay, ZoneId zone,
+                                                 List<OccupiedInterval> occupied) {
+        Set<String> regenerable = repository.loadPlannedBlocksForDay(userId, targetDay, zone).stream()
+            .map(block -> wallKey(block.executableId(), block.start(), block.end()))
+            .collect(Collectors.toSet());
+        if (regenerable.isEmpty()) {
+            return occupied;
+        }
+        return occupied.stream()
+            .filter(wall -> !regenerable.contains(wallKey(wall.executableId(), wall.start(), wall.end())))
+            .toList();
+    }
+
+    private static String wallKey(UUID executableId, OffsetDateTime start, OffsetDateTime end) {
+        return executableId + "|" + start + "|" + end;
+    }
+
     private static Set<UUID> readOnlyAgendaIds(List<OccupiedInterval> occupied) {
         return occupied.stream()
             .filter(OccupiedInterval::readOnlyAgenda)
             .map(OccupiedInterval::executableId)
             .filter(id -> id != null)
             .collect(Collectors.toSet());
+    }
+
+    /** The resolved, side-effect-free inputs the floor and the finalize step share for one day. */
+    private record PreparedDay(
+        PlannerDayState state,
+        PlanningWindow window,
+        List<OccupiedInterval> occupied
+    ) {
     }
 }

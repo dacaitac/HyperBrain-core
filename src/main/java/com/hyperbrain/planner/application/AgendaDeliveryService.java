@@ -9,19 +9,11 @@ import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
 import com.hyperbrain.planner.infrastructure.AgendaDeliveryProperties;
-import com.hyperbrain.sync.domain.model.CommandType;
-import com.hyperbrain.sync.domain.model.Operation;
-import com.hyperbrain.sync.domain.model.PendingWriteCommand;
-import com.hyperbrain.sync.domain.model.ReminderPayload;
-import com.hyperbrain.sync.domain.model.WriteCommand;
-import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
-import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
-import com.hyperbrain.sync.infrastructure.WriteCommandWireMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -31,40 +23,40 @@ import java.util.UUID;
 
 /**
  * Orchestrates the morning agenda dispatch (HU-01b delivery slice): decides whether the trigger
- * minute has arrived for the user's day, and if so generates the day and lets the outbox carry the
- * blocks to iOS. The scheduler ({@code MorningAgendaScheduler}) calls {@link #dispatchIfDue} on a
- * short cadence; the once-per-day guard and the ±hysteresis clamp live here (and in the pure
- * {@link MorningTriggerCalculator}), keeping the scheduler thin.
+ * minute has arrived for the user's day, and if so hands the day off for generation. The scheduler
+ * ({@code MorningAgendaScheduler}) calls {@link #dispatchIfDue} on a short cadence; the once-per-day
+ * guard and the ±hysteresis clamp live here (and in the pure {@link MorningTriggerCalculator}),
+ * keeping the scheduler thin.
  *
- * <p><b>Negative case.</b> When the day yields no useful blocks (e.g. a run after bedtime), the
- * service never delivers empty reminders: it proposes the next day and emits a single readable
- * "no blocks today" signal reminder so the user is told, not left with silence (Triángulo de
- * Control). This orchestration concern lives here, not in the deterministic generator.
+ * <p><b>Materialization cut-over (HU-01c H2).</b> Where the day is materialized depends on
+ * {@code app.planner.materialization.async-enabled}:
+ * <ul>
+ *   <li><b>off (default)</b> — the legacy synchronous path: generate in-process, save the guard, and
+ *       emit the empty-day proposal here when the window is empty. Byte-for-byte the previous
+ *       behavior, so the cut-over deploys inert;</li>
+ *   <li><b>on</b> — emit a {@code DailyAgendaRequestedEvent} to {@code ia-jobs} (guard + job committed
+ *       atomically by {@link AgendaJobEmitter}); the single-owner {@code AgendaJobConsumer}
+ *       materializes and owns the empty-day proposal.</li>
+ * </ul>
+ * The trigger guards (once-per-day, minute hysteresis) stay here in both modes — the emitter must
+ * enqueue a job only when the minute is due, never one per poll.
  */
 @Service
 public class AgendaDeliveryService {
 
     private static final Logger log = LoggerFactory.getLogger(AgendaDeliveryService.class);
 
-    private static final String COMMAND_ID_NAMESPACE = "hyperbrain-agenda-empty-command:";
-    private static final String SIGNAL_LOCAL_ID_NAMESPACE = "hyperbrain-agenda-empty-signal:";
-    private static final String STATUS_PENDING = "PENDING";
-    private static final String REMINDER_LIST_NAME = "HyperBrain";
-    private static final String EMPTY_DAY_TITLE = "No agenda blocks today";
-    private static final String EMPTY_DAY_BODY =
-        "No useful blocks fit today's window — planned for tomorrow instead.";
-
     /** How close to the trigger minute the scheduler cadence must land to fire (its own period). */
     private final Duration triggerTolerance;
+    private final boolean asyncMaterializationEnabled;
 
     private final AgendaGenerationService agendaGenerationService;
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final MorningTriggerCalculator morningTriggerCalculator;
     private final MorningTriggerStore morningTriggerStore;
     private final PlannerStateRepository plannerStateRepository;
-    private final WriteCommandPublisher commandPublisher;
-    private final WriteCommandLogRepository commandLogRepo;
-    private final WriteCommandWireMapper wireMapper;
+    private final EmptyAgendaNotifier emptyAgendaNotifier;
+    private final AgendaJobEmitter agendaJobEmitter;
 
     public AgendaDeliveryService(
         AgendaGenerationService agendaGenerationService,
@@ -72,27 +64,26 @@ public class AgendaDeliveryService {
         MorningTriggerCalculator morningTriggerCalculator,
         MorningTriggerStore morningTriggerStore,
         PlannerStateRepository plannerStateRepository,
-        WriteCommandPublisher commandPublisher,
-        WriteCommandLogRepository commandLogRepo,
-        WriteCommandWireMapper wireMapper,
-        AgendaDeliveryProperties properties
+        EmptyAgendaNotifier emptyAgendaNotifier,
+        AgendaJobEmitter agendaJobEmitter,
+        AgendaDeliveryProperties properties,
+        @Value("${app.planner.materialization.async-enabled:false}") boolean asyncMaterializationEnabled
     ) {
         this.agendaGenerationService = agendaGenerationService;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.morningTriggerCalculator = morningTriggerCalculator;
         this.morningTriggerStore = morningTriggerStore;
         this.plannerStateRepository = plannerStateRepository;
-        this.commandPublisher = commandPublisher;
-        this.commandLogRepo = commandLogRepo;
-        this.wireMapper = wireMapper;
+        this.emptyAgendaNotifier = emptyAgendaNotifier;
+        this.agendaJobEmitter = agendaJobEmitter;
         this.triggerTolerance = Duration.ofMinutes(properties.triggerToleranceMinutes());
+        this.asyncMaterializationEnabled = asyncMaterializationEnabled;
     }
 
     /**
      * Dispatches the morning agenda for a user if the trigger minute for today has arrived and the
      * day has not been dispatched yet. Idempotent per user+day: a repeat call after the day has
-     * fired is a no-op, and the underlying generation replaces the day's blocks rather than
-     * accumulating them.
+     * fired is a no-op.
      *
      * @param userId the user whose day to dispatch; never null
      * @param zone   the user's timezone; never null
@@ -113,14 +104,24 @@ public class AgendaDeliveryService {
             return false;
         }
 
-        // The blocks + AgendaBlockPlannedEvent commit atomically inside generate (its own
-        // transaction). The trigger-state save and the negative-case signal run afterwards, outside
-        // any multi-statement transaction, so no SQS publish happens inside a domain transaction.
-        Agenda agenda = agendaGenerationService.generate(userId, today, zone, now, false);
-        morningTriggerStore.save(userId, new MorningTriggerState(trigger, today));
+        MorningTriggerState firedState = new MorningTriggerState(trigger, today);
+        if (asyncMaterializationEnabled) {
+            // The guard save and the ia-jobs enqueue commit atomically; the single-owner consumer
+            // materializes and owns the empty-day proposal.
+            agendaJobEmitter.emitMorningJob(userId, today, zone, now, firedState);
+            log.info("Morning dispatch enqueued for user {} on {} (trigger {})",
+                userId, today, trigger.minutesOfDay());
+            return true;
+        }
 
+        // Legacy synchronous path. The blocks + AgendaBlockPlannedEvent commit atomically inside
+        // generate (its own transaction). The trigger-state save and the negative-case signal run
+        // afterwards, outside any multi-statement transaction, so no SQS publish happens inside a
+        // domain transaction.
+        Agenda agenda = agendaGenerationService.generate(userId, today, zone, now, false);
+        morningTriggerStore.save(userId, firedState);
         if (agenda.blocks().isEmpty()) {
-            proposeNextDay(userId, today, agenda.energyCriterion(), now);
+            emptyAgendaNotifier.proposeNextDay(userId, today, agenda.energyCriterion(), now);
         }
         log.info("Morning dispatch fired for user {} on {} (trigger {}); {} block(s) delivered",
             userId, today, trigger.minutesOfDay(), agenda.blocks().size());
@@ -138,35 +139,5 @@ public class AgendaDeliveryService {
         int triggerMinutes = trigger.minutesOfDay();
         int toleranceMinutes = (int) triggerTolerance.toMinutes();
         return nowMinutes >= triggerMinutes && nowMinutes <= triggerMinutes + toleranceMinutes;
-    }
-
-    /**
-     * Emits the "no blocks today, planned for tomorrow" signal reminder directly, bypassing the
-     * block outbox path (there are no blocks to carry). The command id is deterministic per user+day
-     * so a retried dispatch never doubles the signal.
-     */
-    private void proposeNextDay(UUID userId, LocalDate today, String energyCriterion,
-                                OffsetDateTime now) {
-        UUID commandId = deterministicId(COMMAND_ID_NAMESPACE, userId, today);
-        UUID signalLocalId = deterministicId(SIGNAL_LOCAL_ID_NAMESPACE, userId, today);
-        String body = energyCriterion != null && !energyCriterion.isBlank()
-            ? EMPTY_DAY_BODY + "\n\n" + energyCriterion.trim()
-            : EMPTY_DAY_BODY;
-        ReminderPayload payload = new ReminderPayload(
-            EMPTY_DAY_TITLE, body, now, false, 0, "", REMINDER_LIST_NAME);
-        WriteCommand command =
-            new WriteCommand(commandId, CommandType.REMINDER, Operation.CREATED, null, payload);
-
-        commandLogRepo.upsertPending(new PendingWriteCommand(
-            commandId, userId, signalLocalId, CommandType.REMINDER, Operation.CREATED, null,
-            wireMapper.payloadJson(payload), STATUS_PENDING));
-        commandPublisher.publish(command, signalLocalId.toString());
-        log.info("No blocks fit today for user {} on {}; emitted next-day proposal signal {}",
-            userId, today, commandId);
-    }
-
-    private static UUID deterministicId(String namespace, UUID userId, LocalDate day) {
-        return UUID.nameUUIDFromBytes(
-            (namespace + userId + ":" + day).getBytes(StandardCharsets.UTF_8));
     }
 }

@@ -1,6 +1,5 @@
 package com.hyperbrain.planner.application;
 
-import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.model.UserCommandType;
@@ -17,15 +16,9 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -42,6 +35,7 @@ class UserCommandServiceTest {
 
     private ProcessedMessageStore processedMessageStore;
     private AgendaGenerationService agendaGenerationService;
+    private AgendaJobEmitter agendaJobEmitter;
     private PlannerStateRepository plannerStateRepository;
     private SleepScoreStore sleepScoreStore;
     private UserCommandService service;
@@ -50,37 +44,53 @@ class UserCommandServiceTest {
     void setUp() {
         processedMessageStore = mock(ProcessedMessageStore.class);
         agendaGenerationService = mock(AgendaGenerationService.class);
+        agendaJobEmitter = mock(AgendaJobEmitter.class);
         plannerStateRepository = mock(PlannerStateRepository.class);
         sleepScoreStore = mock(SleepScoreStore.class);
-        service = new UserCommandService(
-            processedMessageStore, agendaGenerationService, plannerStateRepository, sleepScoreStore,
-            Clock.fixed(NOW, ZoneOffset.UTC), STALENESS_HOURS);
+        service = newService(false);
+    }
+
+    private UserCommandService newService(boolean asyncMaterializationEnabled) {
+        return new UserCommandService(
+            processedMessageStore, agendaGenerationService, agendaJobEmitter, plannerStateRepository,
+            sleepScoreStore, Clock.fixed(NOW, ZoneOffset.UTC), STALENESS_HOURS,
+            asyncMaterializationEnabled);
     }
 
     @Test
-    @DisplayName("REPLAN_AGENDA covers 48 h: fromNow=true on startDay, fromNow=false on subsequent days")
-    void replan_generates_from_now() {
-        // occurredAt = 2026-07-11T02:00Z = 2026-07-10 21:00 Bogota → startDay = July 10
-        // horizon   = 2026-07-13T02:00Z = 2026-07-12 21:00 Bogota → lastDay  = July 12
-        // → 3 calls: July 10 (fromNow=true), July 11, July 12 (fromNow=false each)
+    @DisplayName("sync path (flag off): a live REPLAN_AGENDA delegates the 48 h window to the generator")
+    void replan_delegates_to_window_when_sync() {
+        // occurredAt within the staleness bound (1 h old vs pinned now)
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
-        Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        when(agendaGenerationService.generate(eq(USER_ID), any(), eq(BOGOTA), eq(occurredAt), anyBoolean(), any()))
-            .thenReturn(empty);
 
         // When
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
 
-        // Then: startDay gets fromNow=true; the window spans 3 days total
-        verify(agendaGenerationService).generate(
-            eq(USER_ID), eq(LocalDate.of(2026, 7, 10)), eq(BOGOTA), eq(occurredAt), eq(true), any(Set.class));
-        verify(agendaGenerationService, times(3)).generate(
-            eq(USER_ID), any(LocalDate.class), eq(BOGOTA), eq(occurredAt), anyBoolean(), any(Set.class));
-        verifyNoInteractions(sleepScoreStore);
+        // Then the whole-window replan runs in-process; the async emitter is never touched
+        verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
+        verifyNoInteractions(agendaJobEmitter, sleepScoreStore);
+    }
+
+    @Test
+    @DisplayName("async path (flag on): a live REPLAN_AGENDA enqueues a job and never generates in-process")
+    void replan_emits_job_when_async() {
+        service = newService(true);
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
+        when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
+            .thenReturn(true);
+        when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+
+        // When
+        service.handle(USER_ID, new UserCommand(
+            COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
+
+        // Then a replan job is enqueued (start day = July 10 in Bogota) and nothing materializes here
+        verify(agendaJobEmitter).emitReplanJob(USER_ID, LocalDate.of(2026, 7, 10), BOGOTA, occurredAt);
+        verifyNoInteractions(agendaGenerationService, sleepScoreStore);
     }
 
     @Test
@@ -88,20 +98,16 @@ class UserCommandServiceTest {
     void replan_at_the_bound_still_fires() {
         // Given a replan exactly 2 h old — edge of the staleness window, must still fire
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 1, 0, 0, 0, ZoneOffset.UTC);
-        Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        when(agendaGenerationService.generate(eq(USER_ID), any(), eq(BOGOTA), eq(occurredAt), anyBoolean(), any()))
-            .thenReturn(empty);
 
         // When
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
 
-        // Then startDay (July 10) receives a fromNow=true call — the guard did not block it
-        verify(agendaGenerationService).generate(
-            eq(USER_ID), eq(LocalDate.of(2026, 7, 10)), eq(BOGOTA), eq(occurredAt), eq(true), any(Set.class));
+        // Then the replan ran — the guard did not block it
+        verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
     }
 
     @Test
@@ -117,7 +123,8 @@ class UserCommandServiceTest {
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
 
         // Then nothing replans — but the command stays marked processed (dedup ran first)
-        verifyNoInteractions(agendaGenerationService, plannerStateRepository, sleepScoreStore);
+        verifyNoInteractions(
+            agendaGenerationService, agendaJobEmitter, plannerStateRepository, sleepScoreStore);
         verify(processedMessageStore).markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA");
     }
 
@@ -176,6 +183,7 @@ class UserCommandServiceTest {
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null));
 
         // Then nothing downstream runs
-        verifyNoInteractions(agendaGenerationService, plannerStateRepository, sleepScoreStore);
+        verifyNoInteractions(
+            agendaGenerationService, agendaJobEmitter, plannerStateRepository, sleepScoreStore);
     }
 }

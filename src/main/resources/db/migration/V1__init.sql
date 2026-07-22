@@ -419,6 +419,25 @@ CREATE TABLE processed_message (
     processed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Single-owner agenda materialization idempotency (HU-01c H2). The AgendaJobConsumer claims a
+-- (user_id, agenda_date, input_hash) slot before generating so an at-least-once SQS redelivery — or
+-- a redundant replan from an identical state — is a no-op, while a replan whose input moved gets a
+-- fresh hash and materializes. input_hash is a stable digest of the generator input (see
+-- AgendaInputHasher): no wall clock enters it beyond the minute-quantized planning frontier.
+-- Mirrors HyperBrain-Infra/supabase/migrations/<pending>_planner_agenda_materialization.sql (S0-07).
+CREATE TABLE planner_agenda_materialization (
+    user_id          UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
+    agenda_date      DATE NOT NULL,
+    input_hash       TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'MATERIALIZED'
+                         CHECK (status IN ('MATERIALIZED', 'DEGRADED')),
+    materialized_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, agenda_date, input_hash)
+);
+
+CREATE INDEX idx_planner_agenda_materialization_day
+    ON planner_agenda_materialization (user_id, agenda_date);
+
 -- Correlation log of WriteCommands emitted to apple-commands.fifo (HU-09c, ADR-010).
 -- Mirrors HyperBrain-Infra/supabase/migrations/20260706130000_sync_write_commands.sql (S0-07).
 CREATE TABLE sync_write_commands (

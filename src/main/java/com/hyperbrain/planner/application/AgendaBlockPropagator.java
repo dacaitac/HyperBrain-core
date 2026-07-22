@@ -3,6 +3,7 @@ package com.hyperbrain.planner.application;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
+import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
@@ -80,6 +82,7 @@ public class AgendaBlockPropagator implements IEventPropagator {
     private final WriteCommandLogRepository commandLogRepo;
     private final WriteCommandPublisher commandPublisher;
     private final WriteCommandWireMapper wireMapper;
+    private final EmptyAgendaNotifier emptyAgendaNotifier;
     private final ObjectMapper objectMapper;
 
     public AgendaBlockPropagator(
@@ -88,6 +91,7 @@ public class AgendaBlockPropagator implements IEventPropagator {
         WriteCommandLogRepository commandLogRepo,
         WriteCommandPublisher commandPublisher,
         WriteCommandWireMapper wireMapper,
+        EmptyAgendaNotifier emptyAgendaNotifier,
         ObjectMapper objectMapper
     ) {
         this.plannerStateRepository = plannerStateRepository;
@@ -95,6 +99,7 @@ public class AgendaBlockPropagator implements IEventPropagator {
         this.commandLogRepo = commandLogRepo;
         this.commandPublisher = commandPublisher;
         this.wireMapper = wireMapper;
+        this.emptyAgendaNotifier = emptyAgendaNotifier;
         this.objectMapper = objectMapper;
     }
 
@@ -111,6 +116,10 @@ public class AgendaBlockPropagator implements IEventPropagator {
     @Override
     public void propagate(OutboxEvent event) {
         if (!AgendaBlockPlannedEvent.AGGREGATE_TYPE.equals(event.aggregateType())) {
+            return;
+        }
+        if (EmptyAgendaProposedEvent.EVENT_TYPE.equals(event.eventType())) {
+            propagateEmptyDayProposal(event);
             return;
         }
         JsonNode payload = parsePayload(event.payload());
@@ -144,6 +153,30 @@ public class AgendaBlockPropagator implements IEventPropagator {
         }
         log.info("Delivered {} agenda block(s) and {} removal(s) as calendar events for user {} on {} (event {})",
             blocks.size(), removedBlockIds.size(), userId, targetDay, event.id());
+    }
+
+    /**
+     * Emits the empty-day next-day proposal (HU-01c H2 negative case). The notice was staged in the
+     * Transactional Outbox atomically with the materialization claim; here — post-commit, off the drain
+     * transaction — it is turned into the reminder. {@link EmptyAgendaNotifier} derives the command id
+     * deterministically from {@code (user, day)}, so an at-least-once drain re-emits the same command
+     * (SQS FIFO + SentinelAPI dedup absorb it) rather than doubling the notice.
+     */
+    private void propagateEmptyDayProposal(OutboxEvent event) {
+        JsonNode payload = parsePayload(event.payload());
+        if (payload == null) {
+            log.warn("EmptyAgendaProposedEvent {} has unparseable payload; skipping notice", event.id());
+            return;
+        }
+        UUID userId = parseUuid(payload.path("user_id").asText(null));
+        LocalDate targetDay = parseDate(payload.path("target_day").asText(null));
+        String energyCriterion = payload.path("energy_criterion").asText("");
+        OffsetDateTime referenceInstant = parseTimestamp(payload.path("reference_instant").asText(null));
+        if (userId == null || targetDay == null || referenceInstant == null) {
+            log.warn("EmptyAgendaProposedEvent {} has incomplete coordinates; skipping notice", event.id());
+            return;
+        }
+        emptyAgendaNotifier.proposeNextDay(userId, targetDay, energyCriterion, referenceInstant);
     }
 
     private void emitBlock(OutboxEvent event, UUID userId, PlannedBlockRecord block,
@@ -269,6 +302,17 @@ public class AgendaBlockPropagator implements IEventPropagator {
         }
         try {
             return LocalDate.parse(value);
+        } catch (java.time.format.DateTimeParseException ex) {
+            return null;
+        }
+    }
+
+    private static OffsetDateTime parseTimestamp(String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(value);
         } catch (java.time.format.DateTimeParseException ex) {
             return null;
         }

@@ -124,6 +124,21 @@ app:
     tick-cron:          "0 0 * * * *"
     scheduling-enabled: true
   planner:
+    materialization:
+      # HU-01c H2 single-owner cut-over. OFF (default) = legacy synchronous path intact (the morning
+      # dispatch and the manual replan generate in-process) — the cut-over deploys inert. ON = the
+      # triggers emit a DailyAgendaRequestedEvent to ia-jobs and AgendaJobConsumer is the sole
+      # materializer. Flip is a gated decision by Daniel, paired with agenda-job-consumer.enabled.
+      async-enabled: ${APP_PLANNER_MATERIALIZATION_ASYNC_ENABLED:false}
+    agenda-job-consumer:
+      # Listener of ia-jobs for DailyAgendaRequestedEvent (HU-01c H2). Deploy-safe default OFF: the
+      # single-owner path stays dark until the cut-over. Enable in prod via
+      # APP_PLANNER_AGENDA_JOB_CONSUMER_ENABLED=true together with the async-enabled flip.
+      enabled: ${APP_PLANNER_AGENDA_JOB_CONSUMER_ENABLED:false}
+      # Visibility margin the consumer extends each job to on receipt (heartbeat seam): matches the
+      # ia-jobs queue sizing (120 s) so a long run (LLM tier, H3+) is not redelivered mid-flight. The
+      # listener factory default is 30 s (see app.sync.consumer.visibility-timeout-seconds).
+      visibility-timeout-seconds: 120
     delivery:
       # HU-01b morning dispatch: fire at estimated-wake + lead-offset, clamped ±hysteresis vs.
       # yesterday's trigger (the 5-night wake median carries ~±40 min error). The poll cron cadence

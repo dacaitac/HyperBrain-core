@@ -1,6 +1,5 @@
 package com.hyperbrain.planner.application;
 
-import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
@@ -17,8 +16,6 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
-import java.util.LinkedHashSet;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -56,25 +53,31 @@ public class UserCommandService {
 
     private final ProcessedMessageStore processedMessageStore;
     private final AgendaGenerationService agendaGenerationService;
+    private final AgendaJobEmitter agendaJobEmitter;
     private final PlannerStateRepository plannerStateRepository;
     private final SleepScoreStore sleepScoreStore;
     private final Clock clock;
     private final Duration replanStalenessBound;
+    private final boolean asyncMaterializationEnabled;
 
     public UserCommandService(
         ProcessedMessageStore processedMessageStore,
         AgendaGenerationService agendaGenerationService,
+        AgendaJobEmitter agendaJobEmitter,
         PlannerStateRepository plannerStateRepository,
         SleepScoreStore sleepScoreStore,
         Clock clock,
-        @Value("${app.user-commands.replan-staleness-hours:2}") long replanStalenessHours
+        @Value("${app.user-commands.replan-staleness-hours:2}") long replanStalenessHours,
+        @Value("${app.planner.materialization.async-enabled:false}") boolean asyncMaterializationEnabled
     ) {
         this.processedMessageStore = processedMessageStore;
         this.agendaGenerationService = agendaGenerationService;
+        this.agendaJobEmitter = agendaJobEmitter;
         this.plannerStateRepository = plannerStateRepository;
         this.sleepScoreStore = sleepScoreStore;
         this.clock = clock;
         this.replanStalenessBound = Duration.ofHours(replanStalenessHours);
+        this.asyncMaterializationEnabled = asyncMaterializationEnabled;
     }
 
     /**
@@ -106,23 +109,15 @@ public class UserCommandService {
             return;
         }
         ZoneId zone = plannerStateRepository.loadUserZone(userId);
-        LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
-        LocalDate lastDay = occurredAt.plusHours(48).atZoneSameInstant(zone).toLocalDate();
-
-        // Cross-day dedup: non-WIG tasks placed on an earlier day are excluded from later days so
-        // the same task is never double-booked across the 48h window. WIG lead measures are exempt
-        // (they are a daily recurring commitment, not a one-off task).
-        Set<UUID> placed = new LinkedHashSet<>();
-        for (LocalDate day = startDay; !day.isAfter(lastDay); day = day.plusDays(1)) {
-            boolean fromNow = day.equals(startDay);
-            Agenda agenda = agendaGenerationService.generate(userId, day, zone, occurredAt, fromNow, placed);
-            agenda.blocks().stream()
-                .filter(b -> !b.wig())
-                .map(b -> b.executableId())
-                .forEach(placed::add);
+        if (asyncMaterializationEnabled) {
+            // Single-owner cut-over (HU-01c H2): hand the replan to ia-jobs. The enqueue commits in
+            // this same dedup transaction, so a redelivery of the command neither re-emits nor
+            // re-materializes. The AgendaJobConsumer runs the 48h window.
+            LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
+            agendaJobEmitter.emitReplanJob(userId, startDay, zone, occurredAt);
+            return;
         }
-        log.info("Manual replan executed for user {} on {} days ({} → {}) from {}",
-            userId, lastDay.toEpochDay() - startDay.toEpochDay() + 1, startDay, lastDay, occurredAt);
+        agendaGenerationService.replanAcrossWindow(userId, occurredAt, zone);
     }
 
     private void recordSleepScore(UUID userId, SleepScoreInput input, OffsetDateTime occurredAt) {
