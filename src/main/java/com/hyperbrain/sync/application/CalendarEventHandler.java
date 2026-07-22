@@ -16,7 +16,6 @@ import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.PlannerBlockDeletionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
-import com.hyperbrain.sync.domain.service.ICloudIdMutationGuard;
 import com.hyperbrain.sync.domain.service.SourceAwareMerge;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
 import org.slf4j.Logger;
@@ -24,7 +23,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.UUID;
@@ -49,13 +47,6 @@ public class CalendarEventHandler implements IEventHandler {
     private static final String AGGREGATE_TYPE = "SYNC_APPLE";
     private static final String SYNC_STATUS = "SYNCED";
 
-    /**
-     * How recently a mapping must have been written for an inbound DELETE to be treated as a suspected
-     * iCloud id mutation rather than a real user deletion. Deliberately conservative; a constant until
-     * empirical validation on the Mac Mini says whether "HyperBrain" calendar ids mutate and how soon.
-     */
-    private static final Duration ICLOUD_ID_MUTATION_WINDOW = Duration.ofMinutes(10);
-
     private final CoreExecutableRepository executableRepo;
     private final SyncSnapshotRepository snapshotRepo;
     private final SyncMappingRepository syncMappingRepo;
@@ -64,7 +55,6 @@ public class CalendarEventHandler implements IEventHandler {
     private final OnIngestionPriorityReflector priorityReflector;
     private final PayloadParser payloadParser;
     private final PlannerBlockDeletionPort plannerBlockDeletionPort;
-    private final ICloudIdMutationGuard idMutationGuard;
     private final UUID defaultUserId;
 
     public CalendarEventHandler(
@@ -86,7 +76,6 @@ public class CalendarEventHandler implements IEventHandler {
         this.priorityReflector = priorityReflector;
         this.payloadParser = payloadParser;
         this.plannerBlockDeletionPort = plannerBlockDeletionPort;
-        this.idMutationGuard = new ICloudIdMutationGuard(ICLOUD_ID_MUTATION_WINDOW);
         this.defaultUserId = defaultUserId;
     }
 
@@ -146,8 +135,14 @@ public class CalendarEventHandler implements IEventHandler {
      * Applies an inbound calendar-event delete. The mapping's {@code local_id} is either a
      * {@code core_executable} (an ACTIVITY/AGENDA event) or a {@code core_time_block} (a morning-agenda
      * block written to Apple by {@code AgendaBlockPropagator}, #13). Executables are resolved first;
-     * anything else is routed to the planner-block delete path, which is shielded by the iCloud id
-     * mutation guard because a lost planner block is unrecoverable (Apple-only, not mirrored in Notion).
+     * anything else is routed to the planner-block delete path.
+     *
+     * <p>An inbound delete is always propagated, regardless of the mapping's age. An earlier version
+     * skipped very recent mappings on the theory that an EKEvent's {@code eventIdentifier} could mutate
+     * shortly after creation (a spurious {@code DELETED(oldId) + CREATED(newId)} pair). Empirical
+     * validation on the Mac Mini disproved it: a manual deletion of 23 "HyperBrain" calendar blocks
+     * produced 23 genuine DELETEs and zero re-mapping CREATEs — the ids do not mutate in this setup, so
+     * the guard only suppressed real user deletions and left the DB pointing at dead events.
      */
     private void handleDeleted(SentinelEvent event) {
         Optional<SyncMapping> existing = syncMappingRepo.findByExternalSystemAndId(
@@ -159,8 +154,7 @@ public class CalendarEventHandler implements IEventHandler {
             return;
         }
 
-        SyncMapping mapping = existing.get();
-        UUID localId = mapping.localId();
+        UUID localId = existing.get().localId();
 
         if (executableRepo.findById(localId).isPresent()) {
             executableRepo.deleteById(localId);
@@ -170,17 +164,10 @@ public class CalendarEventHandler implements IEventHandler {
             return;
         }
 
-        deletePlannerBlock(event, mapping, localId);
+        deletePlannerBlock(event, localId);
     }
 
-    private void deletePlannerBlock(SentinelEvent event, SyncMapping mapping, UUID blockId) {
-        if (idMutationGuard.withinMutationWindow(mapping.lastSyncedAt(), OffsetDateTime.now())) {
-            log.warn("CALENDAR_EVENT {} DELETE ignored: block {} was mapped within the iCloud id "
-                    + "mutation window; treating as a spurious id mutation, not a user deletion",
-                event.entityId(), blockId);
-            return;
-        }
-
+    private void deletePlannerBlock(SentinelEvent event, UUID blockId) {
         if (plannerBlockDeletionPort.deletePlannedBlock(blockId)) {
             syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
             log.info("CALENDAR_EVENT {} deleted (planner block {})", event.entityId(), blockId);

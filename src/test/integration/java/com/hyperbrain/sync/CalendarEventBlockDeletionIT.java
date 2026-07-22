@@ -19,8 +19,9 @@ import static org.awaitility.Awaitility.await;
 
 /**
  * Inbound DELETE of a calendar event mapped to a morning-agenda block (#13): a user removing the
- * EKEvent of a {@code PLANNER} block in iOS must drop the {@code core_time_block}, while executable
- * events and freshly mapped blocks (suspected iCloud id mutation) are handled correctly.
+ * EKEvent of a {@code PLANNER} block in iOS must drop the {@code core_time_block} — always, regardless
+ * of the mapping's age (empirical validation showed the ids do not mutate) — while executable-backed
+ * events and unmapped events are handled correctly.
  */
 @IntegrationTest
 @TestPropertySource(properties = "app.sync.consumer.enabled=true")
@@ -63,19 +64,21 @@ class CalendarEventBlockDeletionIT {
     }
 
     @Test
-    @DisplayName("DELETE of a freshly mapped block: id-mutation guard keeps the block and its mapping")
-    void guard_keeps_freshly_mapped_block() {
+    @DisplayName("DELETE of a freshly mapped block: still propagates — removes the block and its mapping")
+    void delete_removes_freshly_mapped_block() {
         UUID executableId = insertExecutable("Deep work");
         UUID blockId = insertPlannerBlock(executableId);
         String entityId = "EKEvent-fresh-" + UUID.randomUUID();
+        // A mapping written "just now": the removed id-mutation guard used to skip this; it must not.
         insertMapping(blockId, entityId, OffsetDateTime.now());
 
         send(deletedCalendarEvent(entityId), entityId);
 
-        await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
-            assertThat(countProcessed()).isGreaterThanOrEqualTo(1));
-        assertThat(countTimeBlock(blockId)).isEqualTo(1);
-        assertThat(countMapping(entityId)).isEqualTo(1);
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            assertThat(countTimeBlock(blockId)).isZero();
+            assertThat(countMapping(entityId)).isZero();
+        });
+        assertThat(countExecutable(executableId)).isEqualTo(1);
     }
 
     @Test

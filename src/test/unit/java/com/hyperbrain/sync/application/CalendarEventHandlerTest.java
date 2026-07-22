@@ -161,18 +161,19 @@ class CalendarEventHandlerTest {
     }
 
     @Test
-    @DisplayName("DELETED of a freshly mapped block: id-mutation guard skips the destructive delete")
-    void deleted_freshly_mapped_block_is_guarded() {
+    @DisplayName("DELETED of a freshly mapped block: still deletes it (no id-mutation guard)")
+    void deleted_freshly_mapped_block_is_removed() {
         UUID blockId = UUID.randomUUID();
         OffsetDateTime mappedJustNow = OffsetDateTime.now().minusMinutes(1);
         when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-8"))
             .thenReturn(Optional.of(syncMapping("EKEvent-8", blockId, "x", mappedJustNow)));
         when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
+        when(plannerBlockDeletionPort.deletePlannedBlock(blockId)).thenReturn(true);
 
         handler.handle(calendarEvent("EKEvent-8", Operation.DELETED, null));
 
-        verifyNoInteractions(plannerBlockDeletionPort, outboxRepo);
-        verify(syncMappingRepo, never()).deleteByExternalSystemAndId(any(), any());
+        verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
+        verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-8");
         verify(executableRepo, never()).deleteById(any());
     }
 
