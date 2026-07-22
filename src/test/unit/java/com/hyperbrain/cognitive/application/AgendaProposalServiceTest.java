@@ -41,7 +41,7 @@ class AgendaProposalServiceTest {
     private final ProposalTelemetry telemetry = mock(ProposalTelemetry.class);
 
     private AgendaProposalService service(LlmGateway gateway) {
-        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, telemetry);
+        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, telemetry, 0.8);
     }
 
     @Test
@@ -81,6 +81,24 @@ class AgendaProposalServiceTest {
         assertThat(result).isPresent();
         assertThat(result.get().blocks()).singleElement()
             .satisfies(b -> assertThat(b.executableId()).isEqualTo(A));
+    }
+
+    @Test
+    @DisplayName("backstop: dropping more than the max-drop fraction of non-WIG blocks degrades (gutted day)")
+    void excessive_drop_degrades() {
+        // Both non-WIG candidates dropped = 100% > 0.8 threshold → a gutted day → DEGRADED to the floor.
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"DROP"},
+              {"block_id":"22222222-2222-2222-2222-222222222222","placement":"DROP"}
+            ]}""";
+
+        Optional<Agenda> result = service(prompt -> json).propose(twoBlockContext());
+
+        assertThat(result).isEmpty();
+        verify(telemetry).degraded(org.mockito.ArgumentMatchers.eq(twoBlockContext()),
+            org.mockito.ArgumentMatchers.eq(DegradeReason.EXCESSIVE_DROP),
+            org.mockito.ArgumentMatchers.anyString());
     }
 
     @Test

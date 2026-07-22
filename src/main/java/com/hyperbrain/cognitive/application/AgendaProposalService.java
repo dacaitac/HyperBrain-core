@@ -45,15 +45,17 @@ public class AgendaProposalService implements AgendaProposer {
     private final AgendaPropuestaParser parser;
     private final ProposalWallGuard wallGuard;
     private final ProposalTelemetry telemetry;
+    private final double maxDropFraction;
 
     public AgendaProposalService(LlmGateway gateway, AgendaProposalPromptBuilder promptBuilder,
                                  AgendaPropuestaParser parser, ProposalWallGuard wallGuard,
-                                 ProposalTelemetry telemetry) {
+                                 ProposalTelemetry telemetry, double maxDropFraction) {
         this.gateway = gateway;
         this.promptBuilder = promptBuilder;
         this.parser = parser;
         this.wallGuard = wallGuard;
         this.telemetry = telemetry;
+        this.maxDropFraction = maxDropFraction;
     }
 
     @Override
@@ -92,9 +94,40 @@ public class AgendaProposalService implements AgendaProposer {
             return Optional.empty();
         }
 
+        // Catastrophic-over-drop backstop: the floor already sized and capped the day, so dropping most
+        // of it is a broken proposal, not a coherent plan (it would leave the day near-empty and dump
+        // everything on tomorrow). A high threshold (not a tight one) — legitimate spreading is the
+        // LLM's authority and must not be clamped; this only catches the "gutted day" pathology.
+        if (dropsTooMuch(propuesta, context)) {
+            log.warn("LLM proposal degraded (excessive drop): dropped > {} of non-WIG blocks",
+                maxDropFraction);
+            telemetry.degraded(context, DegradeReason.EXCESSIVE_DROP, "fraction>" + maxDropFraction);
+            return Optional.empty();
+        }
+
         Agenda arranged = applyArrangement(propuesta, context);
         telemetry.accepted(context);
         return Optional.of(arranged);
+    }
+
+    /**
+     * Whether the proposal drops more than {@code maxDropFraction} of the day's non-WIG candidate
+     * blocks — the catastrophic-over-drop signal. WIG blocks are never counted (they can never be
+     * dropped). A day with no non-WIG candidates can never trip the guard.
+     */
+    private boolean dropsTooMuch(AgendaPropuesta propuesta, AgendaProposalContext context) {
+        long nonWigCandidates = context.candidateBlocks().stream()
+            .filter(block -> !block.wig())
+            .count();
+        if (nonWigCandidates == 0) {
+            return false;
+        }
+        long droppedNonWig = propuesta.decisions().stream()
+            .filter(decision -> decision.placement() == Placement.DROP)
+            .map(decision -> context.candidate(decision.blockId()))
+            .filter(candidate -> candidate != null && !candidate.wig())
+            .count();
+        return (double) droppedNonWig / nonWigCandidates > maxDropFraction;
     }
 
     /**

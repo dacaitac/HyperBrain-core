@@ -136,14 +136,32 @@ public class AgendaGenerationService {
     @Transactional
     Agenda generate(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
                     boolean fromNow, Set<UUID> excludedIds) {
+        return generateDay(userId, targetDay, zone, now, fromNow, excludedIds).agenda();
+    }
+
+    /**
+     * Materializes one day and reports the executables the <b>deterministic floor</b> scheduled for it
+     * (excluding the WIG). The multi-day replan keys its cross-day exclusion on this floor set — not on
+     * the possibly LLM-arranged result — so the day distribution stays the floor's coherent one (today
+     * filled to the cap, only the genuine overflow carried to the next day): an LLM drop humanizes the
+     * day but never blindly dumps the day's blocks onto tomorrow.
+     */
+    DayResult generateDay(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
+                          boolean fromNow, Set<UUID> excludedIds) {
         PreparedDay prepared = prepare(userId, targetDay, zone, now, fromNow, excludedIds);
         if (!prepared.plannable()) {
             log.debug("No forward window to plan for user {} on {} (replan at/after bedtime); "
                 + "empty day, moving on", userId, targetDay);
-            return emptyAgenda(prepared.energyCriterion());
+            return new DayResult(emptyAgenda(prepared.energyCriterion()), List.of());
         }
         MaterializationInput input = proposeOrFloor(prepared);
-        return finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, input);
+        Agenda materialized =
+            finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, input);
+        List<UUID> floorScheduled = input.floorAgenda().blocks().stream()
+            .filter(block -> !block.wig())
+            .map(AgendaBlock::executableId)
+            .toList();
+        return new DayResult(materialized, floorScheduled);
     }
 
     /**
@@ -207,11 +225,11 @@ public class AgendaGenerationService {
         Set<UUID> placed = new LinkedHashSet<>();
         for (LocalDate day = startDay; !day.isAfter(lastDay); day = day.plusDays(1)) {
             boolean fromNow = day.equals(startDay);
-            Agenda agenda = generate(userId, day, zone, occurredAt, fromNow, placed);
-            agenda.blocks().stream()
-                .filter(block -> !block.wig())
-                .map(block -> block.executableId())
-                .forEach(placed::add);
+            DayResult result = generateDay(userId, day, zone, occurredAt, fromNow, placed);
+            // Exclude from later days what the FLOOR scheduled today (not what the LLM kept), so the
+            // cross-day distribution follows the floor's coherent spreading and an LLM drop never
+            // cascades the whole day onto tomorrow.
+            placed.addAll(result.floorScheduled());
         }
         log.info("Replan executed for user {} on {} days ({} → {}) from {}",
             userId, lastDay.toEpochDay() - startDay.toEpochDay() + 1, startDay, lastDay, occurredAt);
@@ -281,8 +299,12 @@ public class AgendaGenerationService {
         List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd)
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
+            // A dated executable is schedulable once its due day has arrived: on its due day, or — when
+            // already overdue — from today onward (an overdue task must be replanned, not dropped from
+            // every day). A future-dated one waits for its day. The multi-day replan's cross-day
+            // exclusion keeps it on a single day (the first that schedules it), never duplicated.
             .filter(e -> e.dueInstant() == null
-                      || e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
+                      || !e.dueInstant().atZoneSameInstant(zone).toLocalDate().isAfter(targetDay))
             .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
         List<OccupiedInterval> occupied = new ArrayList<>(repository.loadOccupiedIntervals(
@@ -324,14 +346,14 @@ public class AgendaGenerationService {
         Agenda floorAgenda = humanizedAgendaFloor.generate(prepared.state());
         AgendaProposer proposer = agendaProposerProvider.getIfAvailable();
         if (proposer == null || floorAgenda.blocks().isEmpty()) {
-            return new MaterializationInput(floorAgenda, false);
+            return new MaterializationInput(floorAgenda, false, floorAgenda);
         }
         return proposer.propose(buildProposalContext(prepared, floorAgenda))
             .map(arranged -> new MaterializationInput(
                 new Agenda(arranged.blocks(), floorAgenda.excluded(), floorAgenda.paused(),
                     floorAgenda.energyCriterion(), floorAgenda.degraded()),
-                true))
-            .orElse(new MaterializationInput(floorAgenda, false));
+                true, floorAgenda))
+            .orElse(new MaterializationInput(floorAgenda, false, floorAgenda));
     }
 
     /**
@@ -568,8 +590,17 @@ public class AgendaGenerationService {
      * The agenda to materialize plus its provenance: {@code fromAcceptedLlm} is true only for an LLM
      * proposal the {@code ProposalWallGuard} accepted, selecting the validator-bypass disposition in
      * {@link #finalizeMaterialization} (ADR-019 amendment). A DEGRADED or deterministic day carries
-     * false, so it runs the floor's {@code AgendaValidator}.
+     * false, so it runs the floor's {@code AgendaValidator}. {@code floorAgenda} is always the
+     * deterministic floor's output for the day (equal to {@code agenda} on the floor path), so the
+     * multi-day replan can key its cross-day exclusion on the floor's coherent distribution.
      */
-    private record MaterializationInput(Agenda agenda, boolean fromAcceptedLlm) {
+    private record MaterializationInput(Agenda agenda, boolean fromAcceptedLlm, Agenda floorAgenda) {
+    }
+
+    /**
+     * One day's materialized agenda plus the executables the deterministic floor scheduled for it
+     * (non-WIG), the anchor for the multi-day replan's cross-day exclusion.
+     */
+    record DayResult(Agenda agenda, List<UUID> floorScheduled) {
     }
 }

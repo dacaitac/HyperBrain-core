@@ -50,10 +50,13 @@ public class AgendaProposalPromptBuilder {
         4. STRUCTURE: every decision's "block_id" MUST be one of the given candidate ids (never invent \
         an id), and you MUST return exactly one decision per candidate id (cover them all).
 
-        You order the day — that is your authority: move ACTIVITY blocks as needed, and drop a non-WIG \
-        block only when the day is genuinely overloaded. Keep a block at its preferred time with KEEP; \
-        shift it with MOVE only when it improves the day. The F6 high-load quota and spacing are \
-        guidance, not hard rules.
+        The day is already sized and capped to a realistic load — the blocks you are given all fit the \
+        day. Your job is to HUMANIZE them (reorder, retime, group by context, add breathing room, write \
+        the coach notes), not to prune them. KEEP is the default for every block; MOVE a block only when \
+        a new time improves the day; move ACTIVITY blocks as needed. Do NOT drop blocks to lighten a day \
+        that is already capped. DROP a non-WIG block ONLY when it genuinely cannot fit today within the \
+        hard walls (sleep frontier, AGENDA windows) — and that block will simply carry to the next day. \
+        The F6 high-load quota and spacing are guidance, not hard rules.
 
         Return ONLY a JSON object, no prose, of the form:
         {"decisions":[{"block_id":"<uuid>","placement":"KEEP|MOVE|DROP",\

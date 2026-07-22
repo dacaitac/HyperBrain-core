@@ -115,6 +115,57 @@ class AgendaProposalCycleIT {
     }
 
     @Test
+    @DisplayName("multi-day replan (prod case): an over-dropping LLM degrades each day to the floor — "
+        + "today stays full, not 2 blocks")
+    void replan_over_drop_keeps_today_full() {
+        jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
+        jdbcTemplate.update("DELETE FROM planner_agenda_materialization");
+        java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
+        for (int i = 0; i < 15; i++) {
+            insertTask("NoDate " + i, 0.90 - i * 0.01, 30);
+        }
+        // The LLM drops every candidate every day (the pathology that produced "today → 2"). The backstop
+        // sees > max-drop-fraction and degrades each day to the humanized floor, which fills today.
+        gateway.respondWith(this::dropAll);
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 9, 23, 36, 0, UTC); // 04:23 Bogota
+
+        service.materializeReplanIfNew(USER, occurredAt, bogota);
+
+        int today = localDayCount(bogota, 2026, 7, 22);
+        int tomorrow = localDayCount(bogota, 2026, 7, 23);
+        assertThat(today).isGreaterThan(tomorrow);   // bulk on today, coherent overflow to tomorrow
+        assertThat(today).isGreaterThan(5);           // a full-ish day — never the gutted 2
+    }
+
+    @Test
+    @DisplayName("multi-day replan: a keep-all LLM keeps the floor's coherent distribution — bulk today, "
+        + "overflow tomorrow (drops never cascade the whole day)")
+    void replan_keep_all_spreads_coherently() {
+        jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
+        jdbcTemplate.update("DELETE FROM planner_agenda_materialization");
+        java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
+        for (int i = 0; i < 15; i++) {
+            insertTask("NoDate " + i, 0.90 - i * 0.01, 30);
+        }
+        gateway.respondWith(prompt -> keepAll(prompt, null));
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 9, 23, 36, 0, UTC); // 04:23 Bogota
+
+        service.materializeReplanIfNew(USER, occurredAt, bogota);
+
+        assertThat(localDayCount(bogota, 2026, 7, 22))
+            .isGreaterThan(localDayCount(bogota, 2026, 7, 23));
+        assertThat(localDayCount(bogota, 2026, 7, 22)).isGreaterThan(5);
+    }
+
+    private int localDayCount(java.time.ZoneId zone, int year, int month, int day) {
+        OffsetDateTime start = java.time.LocalDate.of(year, month, day).atStartOfDay(zone).toOffsetDateTime();
+        Integer n = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
+                + "AND date_start >= ? AND date_start < ?", Integer.class, start, start.plusDays(1));
+        return n == null ? 0 : n;
+    }
+
+    @Test
     @DisplayName("bypass: an accepted LLM arrangement with overlapping blocks materializes as-is "
         + "(the floor validator never re-shuffles it)")
     void accepted_llm_overlap_materializes_as_is() {

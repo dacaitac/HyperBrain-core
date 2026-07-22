@@ -40,7 +40,9 @@ public class ProposalTelemetry {
         /** The completion was not a well-formed, schema-valid proposal. */
         INVALID_JSON,
         /** The proposal breached one or more bounded hard walls. */
-        WALL_BREACH
+        WALL_BREACH,
+        /** The proposal dropped a catastrophic fraction of the day's non-WIG blocks (gutted the day). */
+        EXCESSIVE_DROP
     }
 
     private final ObjectMapper objectMapper;

@@ -26,6 +26,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.retry.support.RetryTemplate;
@@ -141,11 +142,14 @@ public class CognitiveLlmAutoConfiguration {
     @Bean
     @ConditionalOnBean(LlmGateway.class)
     @ConditionalOnMissingBean(AgendaProposer.class)
-    public AgendaProposer agendaProposalService(LlmGateway gateway,
-                                                AgendaProposalPromptBuilder promptBuilder,
-                                                AgendaPropuestaParser parser,
-                                                ProposalWallGuard wallGuard,
-                                                ProposalTelemetry telemetry) {
-        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, telemetry);
+    public AgendaProposer agendaProposalService(
+            LlmGateway gateway,
+            AgendaProposalPromptBuilder promptBuilder,
+            AgendaPropuestaParser parser,
+            ProposalWallGuard wallGuard,
+            ProposalTelemetry telemetry,
+            @Value("${app.cognitive.max-drop-fraction:0.8}") double maxDropFraction) {
+        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, telemetry,
+            maxDropFraction);
     }
 }

@@ -80,14 +80,16 @@ class AgendaGenerationServiceTest {
         // horizon    = 2026-07-13T02:00Z = 2026-07-12 21:00 Bogota → lastDay  = July 12 → 3 days
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
         Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
-        doReturn(empty).when(service)
-            .generate(eq(USER), any(LocalDate.class), eq(BOGOTA), eq(occurredAt), anyBoolean(), any());
+        AgendaGenerationService.DayResult emptyResult =
+            new AgendaGenerationService.DayResult(empty, List.of());
+        doReturn(emptyResult).when(service)
+            .generateDay(eq(USER), any(LocalDate.class), eq(BOGOTA), eq(occurredAt), anyBoolean(), any());
 
         service.replanAcrossWindow(USER, occurredAt, BOGOTA);
 
-        verify(service).generate(
+        verify(service).generateDay(
             eq(USER), eq(LocalDate.of(2026, 7, 10)), eq(BOGOTA), eq(occurredAt), eq(true), any(Set.class));
-        verify(service, times(3)).generate(
+        verify(service, times(3)).generateDay(
             eq(USER), any(LocalDate.class), eq(BOGOTA), eq(occurredAt), anyBoolean(), any(Set.class));
     }
 }

@@ -81,6 +81,11 @@ app:
       # APP_COGNITIVE_LLM_PROPOSE_ENABLED=true, together with spring.ai.model.chat=anthropic and
       # SPRING_AI_ANTHROPIC_API_KEY. Local/CI never turn it on against a real provider.
       enabled: ${APP_COGNITIVE_LLM_PROPOSE_ENABLED:false}
+    # Catastrophic-over-drop backstop: if the LLM drops more than this fraction of a day's non-WIG
+    # blocks it gutted the floor's already-capped day, so that day degrades to the humanized floor.
+    # Deliberately HIGH — legitimate multi-day spreading is the LLM's authority and must not be
+    # clamped; this only catches the "near-empty day" pathology. Tunable by Daniel.
+    max-drop-fraction: ${APP_COGNITIVE_MAX_DROP_FRACTION:0.8}
   sync:
     consumer:
       enabled: true

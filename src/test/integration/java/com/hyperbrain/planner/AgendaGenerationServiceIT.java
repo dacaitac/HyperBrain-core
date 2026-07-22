@@ -375,6 +375,23 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("overdue task (due in the past) is replanned today, not filtered from every day")
+    void overdue_task_is_replanned_today() {
+        jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
+        java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
+        UUID overdue = insertTask("Overdue", 0.9, 30);
+        jdbcTemplate.update("UPDATE core_executable SET end_time = ? WHERE id = ?",
+            OffsetDateTime.of(2026, 7, 21, 17, 0, 0, 0, UTC), overdue); // due yesterday
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 12, 0, 0, 0, UTC); // 07:00 Bogota
+
+        service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, true);
+
+        Integer blocks = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE executable_id = ?", Integer.class, overdue);
+        assertThat(blocks).isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("end-of-day replan: a zero-width window for today yields an empty day, never throwing")
     void replan_at_bedtime_yields_empty_today_without_throwing() {
         insertTask("Work", 0.9, 60);
