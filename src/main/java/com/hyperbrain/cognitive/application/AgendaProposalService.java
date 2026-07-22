@@ -13,8 +13,6 @@ import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,14 +27,15 @@ import java.util.Optional;
  * the planner degrades to the deterministic humanized floor.
  *
  * <p>Implements the planner's {@code AgendaProposer} port (dependency inversion: the only module edge is
- * {@code cognitive → planner}). Wired only when {@code app.cognitive.llm-propose.enabled} is on; with the
- * flag off no bean exists and the planner never leaves the humanized floor (H1/H2, zero regression).
+ * {@code cognitive → planner}). It is instantiated by {@link
+ * com.hyperbrain.cognitive.infrastructure.CognitiveLlmAutoConfiguration} only when the feature flag is on
+ * <b>and</b> an {@code LlmGateway} bean actually exists — so a mis-wired or absent provider degrades to
+ * the humanized floor instead of failing the context (H1/H2, zero regression). It is a plain class (no
+ * stereotype) precisely so its existence is gated by the gateway's, order-safely, in the autoconfig.
  *
  * <p>Design pattern: Strategy behind a port — the deterministic floor and this LLM strategy both produce
  * an {@code Agenda}, selected by configuration, and the caller is agnostic to which ran.
  */
-@Service
-@ConditionalOnProperty(name = "app.cognitive.llm-propose.enabled", havingValue = "true")
 public class AgendaProposalService implements AgendaProposer {
 
     private static final Logger log = LoggerFactory.getLogger(AgendaProposalService.class);
