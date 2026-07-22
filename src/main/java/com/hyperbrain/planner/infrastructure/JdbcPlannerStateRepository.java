@@ -123,6 +123,12 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * {@link #loadOccupiedIntervals}. {@code pending_subtasks} and {@code settled_actual} are derived
      * so the domain can size each block by remaining effort without a second round-trip.
      *
+     * <p><b>Due instant.</b> The target date is {@code COALESCE(end_time, start_time)}, mirroring the
+     * outbound projection {@code end_time ?? start_time}: a TASK keeps its due date in {@code start_time}
+     * (DR-01 forbids {@code end_time} on TASK), so reading {@code end_time} alone would miss it and plan
+     * a future-dated task today. Calendar-backed rows carry {@code end_time}, so the coalesce is a no-op
+     * for them.
+     *
      * <p><b>Completed work is dropped so a (re)plan never re-schedules what is already done.</b> Two
      * completion signals are honoured: a terminal {@code status = DONE} (a checked-off task), and a
      * {@code last_completed_at} inside the target day (the completion clock stamped when work is done).
@@ -157,7 +163,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                COALESCE((SELECT sum(b.actual_duration_minutes) FROM core_time_block b
                 WHERE b.executable_id = e.id
                   AND b.actual_duration_minutes IS NOT NULL), 0) AS settled_actual,
-               e.end_time                                        AS due_instant
+               COALESCE(e.end_time, e.start_time)                AS due_instant
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
         WHERE e.user_id = ?

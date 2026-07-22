@@ -398,6 +398,33 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("a TASK whose due date lives in start_time (DR-01) is scheduled on that day, not today")
+    void task_due_in_start_time_is_scheduled_on_its_due_day() {
+        jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
+        java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
+        UUID undated = insertTask("Undated task", 0.90, 30);
+        UUID dueTomorrow = insertTask("Sleep management", 0.95, 30);
+        // DR-01: a TASK's due date lives in start_time (end_time is forbidden). Due tomorrow.
+        jdbcTemplate.update("UPDATE core_executable SET start_time = ?, end_time = NULL WHERE id = ?",
+            OffsetDateTime.of(2026, 7, 23, 15, 0, 0, 0, UTC), dueTomorrow); // 10:00 Bogota tomorrow
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 12, 0, 0, 0, UTC); // 07:00 Bogota today
+
+        service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, false);
+
+        // The tomorrow-due task is not scheduled today (its start_time due date is respected)...
+        assertThat(count("SELECT count(*) FROM core_time_block WHERE executable_id = ?", dueTomorrow))
+            .isZero();
+        // ...while the undated task is planned today.
+        assertThat(count("SELECT count(*) FROM core_time_block WHERE executable_id = ?", undated))
+            .isEqualTo(1);
+    }
+
+    private int count(String sql, Object arg) {
+        Integer n = jdbcTemplate.queryForObject(sql, Integer.class, arg);
+        return n == null ? 0 : n;
+    }
+
+    @Test
     @DisplayName("overdue task (due in the past) is replanned today, not filtered from every day")
     void overdue_task_is_replanned_today() {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
