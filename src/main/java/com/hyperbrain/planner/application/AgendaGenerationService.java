@@ -188,8 +188,9 @@ public class AgendaGenerationService {
             // day, never a thrown zero-width window. A multi-day replan reaches the next day separately.
             return Optional.of(emptyAgenda(prepared.energyCriterion()));
         }
-        String inputHash = inputHasher.hash(prepared.state(),
-            hashableWalls(userId, targetDay, zone, prepared.occupied()));
+        // prepared.occupied() already excludes the run's own regenerable blocks (see prepare), so it is
+        // the stable wall set the idempotency digest needs.
+        String inputHash = inputHasher.hash(prepared.state(), prepared.occupied());
         if (!materializationLedger.claim(userId, targetDay, inputHash)) {
             log.info("Agenda materialization skipped for user {} on {}: input {} already materialized",
                 userId, targetDay, inputHash);
@@ -257,8 +258,7 @@ public class AgendaGenerationService {
         // falls back to the replan anchor (user + start day + frozen instant), which dedupes redeliveries
         // just the same while a genuinely later button press hashes anew.
         String inputHash = prepared.plannable()
-            ? inputHasher.hash(prepared.state(),
-                hashableWalls(userId, startDay, zone, prepared.occupied()))
+            ? inputHasher.hash(prepared.state(), prepared.occupied())
             : inputHasher.replanAnchorHash(userId, startDay, occurredAt);
         if (!materializationLedger.claim(userId, startDay, inputHash)) {
             log.info("Replan skipped for user {} from {}: input {} already materialized",
@@ -313,14 +313,23 @@ public class AgendaGenerationService {
         // them (and the validator re-imposes them). Meal walls are never persisted nor written to Apple.
         occupied.addAll(mealWalls(targetDay, zone));
 
+        // The floor plans against occupancy MINUS the run's OWN regenerable blocks (same-day
+        // PLANNER/PLANNED). Those blocks are exactly the ones this run re-creates: treating them as walls
+        // would leave a replan of an already-materialized day (e.g. after the morning dispatch) no room
+        // to re-place its own tasks — it would exclude them, and reconciliation would then delete their
+        // blocks, pushing the tasks onto future days. Ignoring them lets the generator re-place the tasks
+        // fresh from now, and reconciliation converges them by stable id. Existing AGENDA / USER / FOCUS /
+        // ACTIVE / SETTLED blocks remain walls.
+        List<OccupiedInterval> planningWalls = withoutRegenerable(userId, targetDay, zone, occupied);
+
         // The fallback window (07:00–23:00) is always a valid planning frontier; the
         // observed flag only distinguishes learned vs. default, not usable vs. unusable.
         boolean dataComplete = true;
 
         PlannerDayState state = new PlannerDayState(
-            window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, occupied, energy,
+            window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, planningWalls, energy,
             dataComplete);
-        return new PreparedDay(state, window, occupied, energy.criterion());
+        return new PreparedDay(state, window, planningWalls, energy.criterion());
     }
 
     /**
@@ -531,15 +540,15 @@ public class AgendaGenerationService {
     }
 
     /**
-     * The walls to feed the idempotency hash: the full occupancy minus the run's own regenerable
-     * blocks (same-day {@code PLANNER}/{@code PLANNED}). A prior materialization persists those blocks,
-     * and they are then re-read as occupied walls; folding them into the hash would make a redelivery
-     * hash differently and re-materialize. Excluding them keeps the digest stable across redeliveries
-     * while the floor still plans against the full occupancy. Only queried on the idempotent path, so
-     * the synchronous {@link #generate} carries no extra read.
+     * The occupancy minus the run's own regenerable blocks (same-day {@code PLANNER}/{@code PLANNED}).
+     * A prior materialization persists those blocks and they are re-read as occupied walls; both the
+     * generator and the idempotency hash must exclude them — the generator so a replan can re-place its
+     * own tasks instead of walling itself out, and the hash so a redelivery of the same input digests
+     * identically (folding in the run's own output would re-materialize on every redelivery). Existing
+     * non-regenerable blocks (AGENDA, USER/FOCUS, ACTIVE/SETTLED) are preserved.
      */
-    private List<OccupiedInterval> hashableWalls(UUID userId, LocalDate targetDay, ZoneId zone,
-                                                 List<OccupiedInterval> occupied) {
+    private List<OccupiedInterval> withoutRegenerable(UUID userId, LocalDate targetDay, ZoneId zone,
+                                                      List<OccupiedInterval> occupied) {
         Set<String> regenerable = repository.loadPlannedBlocksForDay(userId, targetDay, zone).stream()
             .map(block -> wallKey(block.executableId(), block.start(), block.end()))
             .collect(Collectors.toSet());

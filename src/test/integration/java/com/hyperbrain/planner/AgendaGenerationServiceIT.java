@@ -375,6 +375,29 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("replan of the current day keeps it full: the dispatch's own PLANNED blocks are not walls")
+    void replan_of_already_planned_day_keeps_today_full() {
+        jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
+        java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
+        for (int i = 0; i < 20; i++) {
+            insertTask("Task " + i, 0.99 - i * 0.01, 60);
+        }
+        // Morning dispatch (full-day) fills today near the occupancy cap.
+        OffsetDateTime dispatch = OffsetDateTime.of(2026, 7, 22, 12, 0, 0, 0, UTC); // 07:00 Bogota
+        service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, dispatch, false);
+        int afterDispatch = localDayCount(bogota, 2026, 7, 22);
+
+        // ~30 min later, a replan-from-now must keep today just as full — not exclude the tasks it
+        // already materialized (treating their own dispatch blocks as walls) and push them to tomorrow.
+        OffsetDateTime replan = OffsetDateTime.of(2026, 7, 22, 12, 39, 0, 0, UTC); // 07:39 Bogota
+        service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, replan, true);
+        int afterReplan = localDayCount(bogota, 2026, 7, 22);
+
+        assertThat(afterDispatch).isGreaterThan(8); // the dispatch filled the day
+        assertThat(afterReplan).isGreaterThanOrEqualTo(afterDispatch - 2); // the replan keeps it full
+    }
+
+    @Test
     @DisplayName("overdue task (due in the past) is replanned today, not filtered from every day")
     void overdue_task_is_replanned_today() {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
