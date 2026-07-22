@@ -338,6 +338,43 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("before-wake replan plans the full day on TODAY in the user timezone (not shifted to tomorrow)")
+    void replan_before_wake_plans_full_day_today_in_user_timezone() {
+        // The user is in America/Bogota (UTC-5). A replan fired at 04:23 local — before the ~07:00 wake —
+        // must plan the whole of TODAY, whose window still lies ahead. Resolving in UTC instead would
+        // read 04:23 local as 09:23 UTC (mid-morning), clamp today's window and shift blocks to tomorrow.
+        jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
+        java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
+        for (int i = 0; i < 15; i++) {
+            insertTask("Task " + i, 0.99 - i * 0.02, 60);
+        }
+        // 2026-07-22T09:23:36Z = 2026-07-22 04:23 America/Bogota → today = 07-22.
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 9, 23, 36, 0, UTC);
+
+        service.materializeReplanIfNew(USER, occurredAt, bogota);
+
+        int todayBlocks = localDayCount(bogota, 2026, 7, 22);
+        int tomorrowBlocks = localDayCount(bogota, 2026, 7, 23);
+        // Today gets the bulk (its full window lies ahead), tomorrow only the overflow.
+        assertThat(todayBlocks).isGreaterThan(tomorrowBlocks);
+        // The first block opens at the local wake (07:00 Bogota), never in the pre-wake hours.
+        OffsetDateTime firstStartLocal = jdbcTemplate.queryForObject(
+            "SELECT min(date_start) FROM core_time_block WHERE origin = 'PLANNER'", OffsetDateTime.class)
+            .atZoneSameInstant(bogota).toOffsetDateTime();
+        assertThat(firstStartLocal.toLocalTime()).isEqualTo(java.time.LocalTime.of(7, 0));
+        assertThat(firstStartLocal.toLocalDate()).isEqualTo(java.time.LocalDate.of(2026, 7, 22));
+    }
+
+    private int localDayCount(java.time.ZoneId zone, int year, int month, int day) {
+        OffsetDateTime start = java.time.LocalDate.of(year, month, day).atStartOfDay(zone).toOffsetDateTime();
+        OffsetDateTime end = start.plusDays(1);
+        Integer n = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
+                + "AND date_start >= ? AND date_start < ?", Integer.class, start, end);
+        return n == null ? 0 : n;
+    }
+
+    @Test
     @DisplayName("end-of-day replan: a zero-width window for today yields an empty day, never throwing")
     void replan_at_bedtime_yields_empty_today_without_throwing() {
         insertTask("Work", 0.9, 60);
