@@ -137,6 +137,11 @@ public class AgendaGenerationService {
     Agenda generate(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
                     boolean fromNow, Set<UUID> excludedIds) {
         PreparedDay prepared = prepare(userId, targetDay, zone, now, fromNow, excludedIds);
+        if (!prepared.plannable()) {
+            log.debug("No forward window to plan for user {} on {} (replan at/after bedtime); "
+                + "empty day, moving on", userId, targetDay);
+            return emptyAgenda(prepared.energyCriterion());
+        }
         MaterializationInput input = proposeOrFloor(prepared);
         return finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, input);
     }
@@ -160,6 +165,11 @@ public class AgendaGenerationService {
                                              OffsetDateTime now, boolean fromNow,
                                              Set<UUID> excludedIds) {
         PreparedDay prepared = prepare(userId, targetDay, zone, now, fromNow, excludedIds);
+        if (!prepared.plannable()) {
+            // No forward window (a replan at/after bedtime landing on this single day): a graceful empty
+            // day, never a thrown zero-width window. A multi-day replan reaches the next day separately.
+            return Optional.of(emptyAgenda(prepared.energyCriterion()));
+        }
         String inputHash = inputHasher.hash(prepared.state(),
             hashableWalls(userId, targetDay, zone, prepared.occupied()));
         if (!materializationLedger.claim(userId, targetDay, inputHash)) {
@@ -224,8 +234,14 @@ public class AgendaGenerationService {
     public boolean materializeReplanIfNew(UUID userId, OffsetDateTime occurredAt, ZoneId zone) {
         LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
         PreparedDay prepared = prepare(userId, startDay, zone, occurredAt, true, Set.of());
-        String inputHash = inputHasher.hash(prepared.state(),
-            hashableWalls(userId, startDay, zone, prepared.occupied()));
+        // A late replan whose start day has no forward window still replans the rest of the horizon
+        // (tomorrow onward), so it must run — but its start-day state is absent, so the idempotency key
+        // falls back to the replan anchor (user + start day + frozen instant), which dedupes redeliveries
+        // just the same while a genuinely later button press hashes anew.
+        String inputHash = prepared.plannable()
+            ? inputHasher.hash(prepared.state(),
+                hashableWalls(userId, startDay, zone, prepared.occupied()))
+            : inputHasher.replanAnchorHash(userId, startDay, occurredAt);
         if (!materializationLedger.claim(userId, startDay, inputHash)) {
             log.info("Replan skipped for user {} from {}: input {} already materialized",
                 userId, startDay, inputHash);
@@ -251,6 +267,15 @@ public class AgendaGenerationService {
         PlanningWindow window =
             planningWindowResolver.resolve(sleepWindow, targetDay, zone, now, fromNow);
 
+        // A replan issued at or after bedtime leaves no forward window for this day (lowerBound clamps
+        // up to the frontier end, so the window has zero width). Rather than let PlannerDayState throw on
+        // a zero-width window — which would fail the SQS listener and loop the message to the DLQ — yield
+        // an unplannable prepared day. The caller produces an empty agenda for this day; a multi-day
+        // replan simply moves on to the next day, whose window is valid (planning tomorrow, as intended).
+        if (!window.lowerBound().isBefore(window.frontierEnd())) {
+            return PreparedDay.unplannable(window, energy.criterion());
+        }
+
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
         List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd)
@@ -273,7 +298,7 @@ public class AgendaGenerationService {
         PlannerDayState state = new PlannerDayState(
             window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, occupied, energy,
             dataComplete);
-        return new PreparedDay(state, window, occupied);
+        return new PreparedDay(state, window, occupied, energy.criterion());
     }
 
     /**
@@ -335,6 +360,16 @@ public class AgendaGenerationService {
             prepared.state().energyProfile().highLoadQuota(),
             floorAgenda.energyCriterion(),
             repository.loadExecutableTitles(candidateIds));
+    }
+
+    /**
+     * The empty agenda for a day with no plannable forward window (a replan at/after bedtime). It
+     * carries no blocks and no exclusions but keeps the readable energy criterion, and it deliberately
+     * skips reconciliation so an end-of-day replan never wipes the day's existing plan — it simply plans
+     * nothing new for today and moves on to the next day.
+     */
+    private static Agenda emptyAgenda(String energyCriterion) {
+        return new Agenda(List.of(), List.of(), List.of(), energyCriterion, false);
     }
 
     /**
@@ -506,12 +541,27 @@ public class AgendaGenerationService {
             .collect(Collectors.toSet());
     }
 
-    /** The resolved, side-effect-free inputs the floor and the finalize step share for one day. */
+    /**
+     * The resolved, side-effect-free inputs the floor and the finalize step share for one day.
+     * {@code state} is null when the day has no plannable forward window (a replan at/after bedtime);
+     * {@link #plannable()} guards that case and {@code energyCriterion} still carries the readable
+     * criterion for the empty agenda.
+     */
     private record PreparedDay(
         PlannerDayState state,
         PlanningWindow window,
-        List<OccupiedInterval> occupied
+        List<OccupiedInterval> occupied,
+        String energyCriterion
     ) {
+        /** @return true when a forward window exists to plan (state is present) */
+        boolean plannable() {
+            return state != null;
+        }
+
+        /** An unplannable day (zero-width forward window): no state, no walls, criterion preserved. */
+        static PreparedDay unplannable(PlanningWindow window, String energyCriterion) {
+            return new PreparedDay(null, window, List.of(), energyCriterion);
+        }
     }
 
     /**

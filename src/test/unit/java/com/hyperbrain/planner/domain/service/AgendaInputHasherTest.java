@@ -39,6 +39,25 @@ class AgendaInputHasherTest {
     }
 
     @Test
+    @DisplayName("replan anchor: identical (user, day, minute) hashes the same; a later minute or a "
+        + "different user/day differs")
+    void replan_anchor_is_stable_and_discriminating() {
+        UUID user = UUID.fromString("22222222-2222-2222-2222-222222222222");
+        LocalDate day = LocalDate.of(2026, 7, 10);
+        OffsetDateTime at = OffsetDateTime.of(2026, 7, 10, 23, 0, 0, 0, ZoneOffset.UTC);
+
+        String base = hasher.replanAnchorHash(user, day, at);
+
+        // Deterministic and sub-minute-stable (a redelivery of the same frozen instant dedupes).
+        assertThat(hasher.replanAnchorHash(user, day, at.plusSeconds(31))).isEqualTo(base);
+        // A genuinely later button press (a new minute) hashes anew, so it replans.
+        assertThat(hasher.replanAnchorHash(user, day, at.plusMinutes(1))).isNotEqualTo(base);
+        // Different user or day never collide.
+        assertThat(hasher.replanAnchorHash(UUID.randomUUID(), day, at)).isNotEqualTo(base);
+        assertThat(hasher.replanAnchorHash(user, day.plusDays(1), at)).isNotEqualTo(base);
+    }
+
+    @Test
     @DisplayName("sub-minute jitter of the frontier is ignored (window bounds truncated to the minute)")
     void ignores_sub_minute_jitter() {
         PlannerDayState onTheMinute = state(WINDOW_START, List.of(task(TASK, 0.9)));

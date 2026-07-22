@@ -338,6 +338,44 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("end-of-day replan: a zero-width window for today yields an empty day, never throwing")
+    void replan_at_bedtime_yields_empty_today_without_throwing() {
+        insertTask("Work", 0.9, 60);
+        // T at the cold-start bedtime (23:00): the forward window for today is [23:00, 23:00] — zero width.
+        OffsetDateTime bedtime = OffsetDateTime.of(2026, 7, 10, 23, 0, 0, 0, UTC);
+
+        Agenda agenda = service.generate(USER, DAY, UTC, bedtime, true);
+
+        // No exception, an empty day, and nothing persisted (today's plan, if any, is left untouched).
+        assertThat(agenda.blocks()).isEmpty();
+        Integer todayBlocks = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block", Integer.class);
+        assertThat(todayBlocks).isZero();
+    }
+
+    @Test
+    @DisplayName("end-of-day replan plans the NEXT day: the 48h window skips today's empty window and "
+        + "materializes tomorrow")
+    void replan_at_bedtime_plans_the_next_day() {
+        UUID task = insertTask("Work", 0.9, 60);
+        OffsetDateTime bedtime = OffsetDateTime.of(2026, 7, 10, 23, 0, 0, 0, UTC);
+
+        boolean replanned = service.materializeReplanIfNew(USER, bedtime, UTC);
+
+        assertThat(replanned).isTrue();
+        // Nothing is planned for today (its forward window was empty)...
+        Integer todayBlocks = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block WHERE date_start < ?", Integer.class,
+            OffsetDateTime.of(2026, 7, 11, 0, 0, 0, 0, UTC));
+        assertThat(todayBlocks).isZero();
+        // ...but tomorrow (2026-07-11) is planned as a full day: the task lands within its frontier.
+        OffsetDateTime tomorrowBlockStart = jdbcTemplate.queryForObject(
+            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, task);
+        assertThat(tomorrowBlockStart)
+            .isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 11, 7, 0, 0, 0, UTC));
+    }
+
+    @Test
     @DisplayName("replan excludes an executable completed today even while it keeps a live status")
     void replan_excludes_executable_completed_today() {
         UUID pending = insertTask("Still pending", 0.9, 60);

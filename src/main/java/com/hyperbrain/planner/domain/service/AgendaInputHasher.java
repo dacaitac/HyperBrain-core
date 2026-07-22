@@ -9,11 +9,14 @@ import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.StringJoiner;
+import java.util.UUID;
 
 /**
  * Pure, deterministic digest of a day's generation input (HU-01c H2 idempotency key). The single
@@ -65,6 +68,28 @@ public class AgendaInputHasher {
         appendWalls(canonical, walls);
         appendWig(canonical, state);
         return digest(canonical.toString());
+    }
+
+    /**
+     * The idempotency digest for a replan whose start day has no forward window (a late replan at/after
+     * bedtime): there is no {@link PlannerDayState} to hash, yet the 48 h run still plans the following
+     * days, so the claim needs a stable key. It digests the replan anchor — the user, the start day, and
+     * the frozen reference instant truncated to the minute — so a redelivery of the same job dedupes
+     * while a genuinely later button press (a new minute) hashes anew and replans.
+     *
+     * @param userId     the replanning user; never null
+     * @param startDay   the local start day of the horizon; never null
+     * @param occurredAt the frozen reference instant of the replan; never null
+     * @return a lowercase hex SHA-256 digest; never null
+     */
+    public String replanAnchorHash(UUID userId, LocalDate startDay, OffsetDateTime occurredAt) {
+        String canonical = new StringJoiner(String.valueOf(FIELD))
+            .add("REPLAN-EMPTY")
+            .add(userId.toString())
+            .add(startDay.toString())
+            .add(occurredAt.truncatedTo(ChronoUnit.MINUTES).toString())
+            .toString();
+        return digest(canonical);
     }
 
     private void appendEnergy(StringBuilder canonical, EnergyProfile energy) {
