@@ -68,7 +68,10 @@ spring:
           # (Opus 4.8, Sonnet 5) reject the deprecated `temperature` param, and Spring AI would otherwise
           # send its 0.8 default. CognitiveLlmAutoConfiguration builds the model with a null-temperature
           # default so the outgoing request omits the field (see the temperature-free ChatModel there).
-          max-tokens: 8192
+          # max-tokens is the OUTPUT budget: a full-day prompt (15-20+ blocks) with Sonnet 5 exhausted
+          # the old 8192 and returned an empty completion (stop_reason=max_tokens, no text block), so it
+          # degraded to the floor on every large run. Raised with ample headroom; env-tunable.
+          max-tokens: ${SPRING_AI_ANTHROPIC_MAX_TOKENS:16000}
 
 app:
   cognitive:
