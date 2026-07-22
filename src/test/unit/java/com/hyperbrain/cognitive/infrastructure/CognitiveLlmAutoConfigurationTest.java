@@ -9,7 +9,9 @@ import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatProperties;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
@@ -83,6 +85,21 @@ class CognitiveLlmAutoConfigurationTest {
                 assertThat(context).doesNotHaveBean(LlmGateway.class);
                 assertThat(context).doesNotHaveBean(AgendaProposer.class);
             });
+    }
+
+    @Test
+    @DisplayName("temperature-free options: the deprecated temperature is stripped, model and max-tokens kept")
+    void temperature_free_options_strip_temperature() {
+        AnthropicChatProperties props = new AnthropicChatProperties();
+        props.getOptions().setModel("claude-sonnet-5");
+        props.getOptions().setMaxTokens(8192);
+        props.getOptions().setTemperature(0.8); // Spring AI's default that Sonnet/Opus reject
+
+        AnthropicChatOptions result = CognitiveLlmAutoConfiguration.temperatureFreeOptions(props);
+
+        assertThat(result.getTemperature()).isNull();
+        assertThat(result.getModel()).isEqualTo("claude-sonnet-5");
+        assertThat(result.getMaxTokens()).isEqualTo(8192);
     }
 
     /** The stateless cognitive collaborators the proposer needs, mirroring their component scan. */

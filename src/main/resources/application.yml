@@ -62,9 +62,12 @@ spring:
       api-key: ${SPRING_AI_ANTHROPIC_API_KEY:}
       chat:
         options:
-          model: ${SPRING_AI_ANTHROPIC_MODEL:claude-opus-4-8}
+          model: ${SPRING_AI_ANTHROPIC_MODEL:claude-sonnet-5}
           # Reproducibility comes from bounding the output space (closed blockId set + JSON schema +
-          # ProposalWallGuard), not from sampling — temperature is deliberately left untuned (ratified).
+          # ProposalWallGuard), not from sampling. Temperature is NOT sent at all: newer Claude models
+          # (Opus 4.8, Sonnet 5) reject the deprecated `temperature` param, and Spring AI would otherwise
+          # send its 0.8 default. CognitiveLlmAutoConfiguration builds the model with a null-temperature
+          # default so the outgoing request omits the field (see the temperature-free ChatModel there).
           max-tokens: 8192
 
 app:

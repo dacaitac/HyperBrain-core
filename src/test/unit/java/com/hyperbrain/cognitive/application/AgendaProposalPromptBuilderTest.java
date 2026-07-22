@@ -39,6 +39,17 @@ class AgendaProposalPromptBuilderTest {
     }
 
     @Test
+    @DisplayName("the system message frames the block times as the user's tentative preference, not free placement")
+    void system_frames_times_as_user_preference() {
+        LlmPrompt prompt = builder.build(context("Write the report"));
+
+        assertThat(prompt.system())
+            .contains("TENTATIVE PREFERENCE")
+            .contains("preferred time")
+            .doesNotContain("freely reorder and retime");
+    }
+
+    @Test
     @DisplayName("the user message carries the control data (block ids, frontier) and fences the titles")
     void user_carries_control_data_and_fences_titles() {
         LlmPrompt prompt = builder.build(context("Write the report"));

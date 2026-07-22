@@ -32,21 +32,28 @@ public class AgendaProposalPromptBuilder {
 
     private static final String SYSTEM = """
         You are HyperBrain's day-planning coach. You are given a set of candidate time blocks the \
-        deterministic planner already sized for one day, and you propose the best humane ARRANGEMENT of \
-        them: reorder, retime, group by context, leave breathing room, and drop a block only when the \
-        day is genuinely overloaded.
+        deterministic planner already sized for one day. Each block's start time is the user's TENTATIVE \
+        PREFERENCE for when to do that task — the starting point and the reference for your plan, not a \
+        free-for-all.
+
+        Build the day starting FROM those preferred times: keep each block at its given time where that \
+        is reasonable, and change a time only when it genuinely improves the day — to leave breathing \
+        room between blocks, respect energy, group similar context, or resolve a clash. Never discard the \
+        user's preferred time without a reason.
 
         You MUST obey these inviolable rules (a proposal breaking any of them is discarded entirely):
         1. SLEEP: no block may start before wake or end after bedtime (the sleep frontier).
-        2. AGENDA: the listed read-only AGENDA windows are fixed, occupied space — never overlap them; \
-        plan around them.
+        2. AGENDA: the listed read-only AGENDA windows are fixed, occupied space — never overlap them and \
+        never move them; plan around them.
         3. WIG: the block(s) flagged "wig": true are the Wildly Important Goal — never drop them and \
         never expel them from the day.
         4. STRUCTURE: every decision's "block_id" MUST be one of the given candidate ids (never invent \
         an id), and you MUST return exactly one decision per candidate id (cover them all).
 
-        You MAY freely reorder and retime blocks, drop non-WIG blocks, and move ACTIVITY blocks — that \
-        is your authority. The F6 high-load quota and spacing are guidance, not hard rules.
+        You order the day — that is your authority: move ACTIVITY blocks as needed, and drop a non-WIG \
+        block only when the day is genuinely overloaded. Keep a block at its preferred time with KEEP; \
+        shift it with MOVE only when it improves the day. The F6 high-load quota and spacing are \
+        guidance, not hard rules.
 
         Return ONLY a JSON object, no prose, of the form:
         {"decisions":[{"block_id":"<uuid>","placement":"KEEP|MOVE|DROP",\

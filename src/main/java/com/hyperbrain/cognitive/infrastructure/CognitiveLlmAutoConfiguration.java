@@ -7,16 +7,28 @@ import com.hyperbrain.cognitive.application.ProposalTelemetry;
 import com.hyperbrain.cognitive.application.ProposalWallGuard;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.domain.port.out.AgendaProposer;
+import io.micrometer.observation.ObservationRegistry;
+import org.springframework.ai.anthropic.AnthropicChatModel;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.observation.ChatModelObservationConvention;
 import org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatAutoConfiguration;
+import org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatProperties;
 import org.springframework.ai.model.chat.client.autoconfigure.ChatClientAutoConfiguration;
+import org.springframework.ai.model.tool.DefaultToolExecutionEligibilityPredicate;
+import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.model.tool.ToolExecutionEligibilityPredicate;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
+import org.springframework.retry.support.RetryTemplate;
 
 /**
  * Wires the LLM propose tier (HU-01c H3/H4) order-safely and resiliently. Two invariants, learned from a
@@ -49,6 +61,56 @@ import org.springframework.context.annotation.Bean;
 @ConditionalOnClass(ChatClient.class)
 @ConditionalOnProperty(name = "app.cognitive.llm-propose.enabled", havingValue = "true")
 public class CognitiveLlmAutoConfiguration {
+
+    /**
+     * The provider's chat model, rebuilt so its default options carry <b>no</b> {@code temperature}.
+     * Newer Claude models (Opus 4.8, Sonnet 5) reject the deprecated {@code temperature} parameter, yet
+     * Spring AI seeds every request from {@code AnthropicChatModel}'s default {@code temperature} (0.8 by
+     * default) — a null runtime option cannot override it, because the option merge ignores nulls. So the
+     * fix must live in the model's <em>default</em> options: this bean mirrors the provider
+     * autoconfiguration's wiring but strips the temperature, and is {@link Primary} so the
+     * {@code ChatClient} uses it. Model and max-tokens still come from {@code spring.ai.anthropic.chat.*},
+     * so the outgoing request carries {@code claude-sonnet-5} + max-tokens and omits {@code temperature}
+     * ({@code ChatCompletionRequest} is {@code @JsonInclude(NON_NULL)}). Reproducibility is by output-space
+     * bounding, never sampling — no {@code top_p}/{@code top_k} is set either.
+     */
+    @Bean
+    @Primary
+    @ConditionalOnBean(AnthropicApi.class)
+    public ChatModel temperatureFreeAnthropicChatModel(
+            AnthropicApi anthropicApi,
+            AnthropicChatProperties chatProperties,
+            RetryTemplate retryTemplate,
+            ToolCallingManager toolCallingManager,
+            ObjectProvider<ObservationRegistry> observationRegistry,
+            ObjectProvider<ChatModelObservationConvention> observationConvention,
+            ObjectProvider<ToolExecutionEligibilityPredicate> toolExecutionEligibilityPredicate) {
+        AnthropicChatModel model = AnthropicChatModel.builder()
+            .anthropicApi(anthropicApi)
+            .defaultOptions(temperatureFreeOptions(chatProperties))
+            .toolCallingManager(toolCallingManager)
+            .toolExecutionEligibilityPredicate(toolExecutionEligibilityPredicate
+                .getIfUnique(DefaultToolExecutionEligibilityPredicate::new))
+            .retryTemplate(retryTemplate)
+            .observationRegistry(observationRegistry.getIfUnique(() -> ObservationRegistry.NOOP))
+            .build();
+        observationConvention.ifAvailable(model::setObservationConvention);
+        return model;
+    }
+
+    /**
+     * The provider's configured chat options with the deprecated {@code temperature} stripped to null,
+     * preserving everything else (model, max-tokens). Package-visible so it can be unit-tested without a
+     * live provider.
+     *
+     * @param chatProperties the bound Anthropic chat properties; never null
+     * @return options identical to the configured ones but with {@code temperature == null}
+     */
+    static AnthropicChatOptions temperatureFreeOptions(AnthropicChatProperties chatProperties) {
+        AnthropicChatOptions options = AnthropicChatOptions.fromOptions(chatProperties.getOptions());
+        options.setTemperature(null);
+        return options;
+    }
 
     /**
      * The real Spring AI adapter — created only when a {@link ChatModel} bean is present (the provider is
