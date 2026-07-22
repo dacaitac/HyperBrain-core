@@ -69,8 +69,13 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
 
-    // ── AI (core; provider autoconfiguration added with cognitive module) ─────
-    implementation 'org.springframework.ai:spring-ai-core:1.0.0-M6'
+    // ── AI (GA 1.0.0, BOM-managed) ────────────────────────────────────────────
+    // Spring AI 1.0.0 GA split the old monolithic spring-ai-core into focused modules;
+    // spring-ai-client-chat carries the provider-agnostic ChatClient the cognitive adapter
+    // targets. The concrete provider starter (spring-ai-starter-model-anthropic) is deferred
+    // to H4 so no model autoconfiguration runs — and no API key is required — until the real
+    // LLM is switched on; H3 builds and tests entirely against a deterministic gateway stub.
+    implementation 'org.springframework.ai:spring-ai-client-chat'
 
     // ── Unit tests ────────────────────────────────────────────────────────────
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

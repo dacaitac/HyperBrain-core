@@ -10,7 +10,9 @@ import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -144,4 +146,16 @@ public interface PlannerStateRepository {
      * @return the day's planner blocks with their executable names; never null, may be empty
      */
     List<PlannedBlockRecord> loadPlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone);
+
+    /**
+     * Reads the display names of the given executables for the LLM-facing read model (#61, H3): the
+     * {@code core_executable.name} of each candidate block, so the cognitive proposer can present the
+     * titles to the model as <b>untrusted, delimited</b> content (anti prompt-injection). Only queried
+     * on the LLM path (when {@code app.cognitive.llm-propose.enabled} is on), so the floor path carries
+     * no extra read.
+     *
+     * @param executableIds the executables whose titles to read; never null, may be empty
+     * @return a map from executable id to display name; never null, missing ids simply absent
+     */
+    Map<UUID, String> loadExecutableTitles(Collection<UUID> executableIds);
 }

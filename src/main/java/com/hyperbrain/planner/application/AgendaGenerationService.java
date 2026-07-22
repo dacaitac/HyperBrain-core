@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.Agenda;
+import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
+import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
@@ -18,6 +20,7 @@ import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.model.ValidatedAgenda;
 import com.hyperbrain.planner.domain.model.ValidationContext;
 import com.hyperbrain.planner.domain.port.out.AgendaMaterializationLedger;
+import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
@@ -29,6 +32,7 @@ import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -78,6 +82,7 @@ public class AgendaGenerationService {
     private final AgendaMaterializationLedger materializationLedger;
     private final OutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
+    private final ObjectProvider<AgendaProposer> agendaProposerProvider;
 
     AgendaGenerationService(
         PlannerStateRepository repository,
@@ -90,7 +95,8 @@ public class AgendaGenerationService {
         AgendaInputHasher inputHasher,
         AgendaMaterializationLedger materializationLedger,
         OutboxRepository outboxRepository,
-        ObjectMapper objectMapper) {
+        ObjectMapper objectMapper,
+        ObjectProvider<AgendaProposer> agendaProposerProvider) {
         this.repository = repository;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
@@ -102,6 +108,7 @@ public class AgendaGenerationService {
         this.materializationLedger = materializationLedger;
         this.outboxRepository = outboxRepository;
         this.objectMapper = objectMapper;
+        this.agendaProposerProvider = agendaProposerProvider;
     }
 
     /**
@@ -130,8 +137,8 @@ public class AgendaGenerationService {
     Agenda generate(UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime now,
                     boolean fromNow, Set<UUID> excludedIds) {
         PreparedDay prepared = prepare(userId, targetDay, zone, now, fromNow, excludedIds);
-        Agenda floorAgenda = humanizedAgendaFloor.generate(prepared.state());
-        return finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, floorAgenda);
+        MaterializationInput input = proposeOrFloor(prepared);
+        return finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, input);
     }
 
     /**
@@ -160,9 +167,9 @@ public class AgendaGenerationService {
                 userId, targetDay, inputHash);
             return Optional.empty();
         }
-        Agenda floorAgenda = humanizedAgendaFloor.generate(prepared.state());
+        MaterializationInput input = proposeOrFloor(prepared);
         Agenda result =
-            finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, floorAgenda);
+            finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, input);
         // Negative case (morning only): an empty day must tell the user it was planned for tomorrow.
         // Stage it in this same transaction as the claim (Transactional Outbox), so the notice is
         // exactly-once — atomic with the materialization, never a post-commit publish that a crash
@@ -270,24 +277,96 @@ public class AgendaGenerationService {
     }
 
     /**
+     * The propose-then-validate seam (ADR-019, HU-01c H3): runs the deterministic humanized floor, then
+     * — only when the LLM tier is switched on ({@code app.cognitive.llm-propose.enabled}, surfaced as a
+     * present {@link AgendaProposer} bean) — offers its blocks to the {@link AgendaProposer}. The
+     * proposer returns an arranged agenda when the LLM cleared every bounded hard wall, or empty to
+     * signal DEGRADED; either way the day materializes. With the flag off no proposer bean exists, so
+     * this returns the floor unchanged (H1/H2, zero regression) and reads no titles.
+     *
+     * <p>The proposer only rearranges the floor's blocks, so the floor's exclusions/paused account and
+     * energy criterion (its legibility record) are re-attached to the arranged blocks here.
+     *
+     * <p><b>Disposition authority (ADR-019 amendment, Daniel 2026-07-21).</b> The returned
+     * {@link MaterializationInput} carries whether the day came from an <em>accepted</em> LLM proposal.
+     * An accepted arrangement has already passed the bounded {@code ProposalWallGuard} (its only gate),
+     * so the deterministic floor's {@code AgendaValidator} is bypassed for it — the LLM owns the
+     * arrangement and the determinist never re-shuffles it. Every DEGRADED path (flag off, guard
+     * rejection, LLM failure) materializes the humanized floor and still runs through the floor
+     * validator, its usual safety net.
+     */
+    private MaterializationInput proposeOrFloor(PreparedDay prepared) {
+        Agenda floorAgenda = humanizedAgendaFloor.generate(prepared.state());
+        AgendaProposer proposer = agendaProposerProvider.getIfAvailable();
+        if (proposer == null || floorAgenda.blocks().isEmpty()) {
+            return new MaterializationInput(floorAgenda, false);
+        }
+        return proposer.propose(buildProposalContext(prepared, floorAgenda))
+            .map(arranged -> new MaterializationInput(
+                new Agenda(arranged.blocks(), floorAgenda.excluded(), floorAgenda.paused(),
+                    floorAgenda.energyCriterion(), floorAgenda.degraded()),
+                true))
+            .orElse(new MaterializationInput(floorAgenda, false));
+    }
+
+    /**
+     * Assembles the LLM-facing read model (#61) from the resolved day and the floor's block set: the
+     * candidate blocks, the sleep frontier, the read-only AGENDA walls (ACTIVITY stays a movable
+     * candidate, never a wall), the WIG ids, the F6 quota and the untrusted executable titles (the only
+     * extra read, done here on the LLM path so the floor path stays untouched).
+     */
+    private AgendaProposalContext buildProposalContext(PreparedDay prepared, Agenda floorAgenda) {
+        List<OccupiedInterval> agendaWalls = prepared.occupied().stream()
+            .filter(OccupiedInterval::readOnlyAgenda)
+            .toList();
+        Set<UUID> wigIds = floorAgenda.blocks().stream()
+            .filter(AgendaBlock::wig)
+            .map(AgendaBlock::executableId)
+            .collect(Collectors.toSet());
+        Set<UUID> candidateIds = floorAgenda.blocks().stream()
+            .map(AgendaBlock::executableId)
+            .collect(Collectors.toSet());
+        return new AgendaProposalContext(
+            floorAgenda.blocks(),
+            prepared.window().frontierStart(),
+            prepared.window().frontierEnd(),
+            agendaWalls,
+            wigIds,
+            prepared.state().energyProfile().highLoadQuota(),
+            floorAgenda.energyCriterion(),
+            repository.loadExecutableTitles(candidateIds));
+    }
+
+    /**
      * Re-imposes the hard walls, reconciles the day's blocks preserving identity (#15), stages the
      * write-back and returns the accepted agenda. Runs inside the caller's transaction.
+     *
+     * <p><b>Validator disposition (ADR-019 amendment).</b> When the day came from an accepted LLM
+     * proposal ({@code input.fromAcceptedLlm()}), the floor's {@code AgendaValidator} is bypassed: the
+     * bounded {@code ProposalWallGuard} ({sleep, AGENDA, WIG, structural}) already gated it and the LLM
+     * owns the arrangement, so block spacing and F6 shaping materialize exactly as proposed. Every
+     * DEGRADED/deterministic day still runs the floor validator as its non-negotiable safety net.
      */
     private Agenda finalizeMaterialization(UUID userId, LocalDate targetDay, ZoneId zone,
                                            OffsetDateTime now, boolean fromNow, PreparedDay prepared,
-                                           Agenda agenda) {
+                                           MaterializationInput input) {
+        Agenda agenda = input.agenda();
         PlannerDayState state = prepared.state();
         List<OccupiedInterval> occupied = prepared.occupied();
         PlanningWindow window = prepared.window();
 
-        ValidationContext validationContext = new ValidationContext(
-            window.frontierStart(), window.frontierEnd(), occupied, state.energyProfile().highLoadQuota(),
-            readOnlyAgendaIds(occupied));
-        ValidatedAgenda validated = agendaValidator.validate(agenda.blocks(), validationContext);
-
-        if (!validated.isClean()) {
-            log.warn("AgendaValidator rejected {} block(s) for user {}: {}",
-                validated.violations().size(), userId, validated.violations());
+        ValidatedAgenda validated;
+        if (input.fromAcceptedLlm()) {
+            validated = new ValidatedAgenda(agenda.blocks(), List.of());
+        } else {
+            ValidationContext validationContext = new ValidationContext(
+                window.frontierStart(), window.frontierEnd(), occupied,
+                state.energyProfile().highLoadQuota(), readOnlyAgendaIds(occupied));
+            validated = agendaValidator.validate(agenda.blocks(), validationContext);
+            if (!validated.isClean()) {
+                log.warn("AgendaValidator rejected {} block(s) for user {}: {}",
+                    validated.violations().size(), userId, validated.violations());
+            }
         }
 
         // Identity-stable reconciliation (#15): a regeneration keeps a surviving block's id (so its
@@ -433,5 +512,14 @@ public class AgendaGenerationService {
         PlanningWindow window,
         List<OccupiedInterval> occupied
     ) {
+    }
+
+    /**
+     * The agenda to materialize plus its provenance: {@code fromAcceptedLlm} is true only for an LLM
+     * proposal the {@code ProposalWallGuard} accepted, selecting the validator-bypass disposition in
+     * {@link #finalizeMaterialization} (ADR-019 amendment). A DEGRADED or deterministic day carries
+     * false, so it runs the floor's {@code AgendaValidator}.
+     */
+    private record MaterializationInput(Agenda agenda, boolean fromAcceptedLlm) {
     }
 }

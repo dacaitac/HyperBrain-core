@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.port.out.AgendaMaterializationLedger;
+import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
@@ -13,6 +14,7 @@ import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.ObjectProvider;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -60,7 +62,15 @@ class AgendaGenerationServiceTest {
             mock(AgendaInputHasher.class),
             mock(AgendaMaterializationLedger.class),
             mock(OutboxRepository.class),
-            new ObjectMapper()));
+            new ObjectMapper(),
+            emptyProvider()));
+    }
+
+    /** An {@link ObjectProvider} with no {@link AgendaProposer} — the LLM tier is off (H1/H2 path). */
+    @SuppressWarnings("unchecked")
+    private static ObjectProvider<AgendaProposer> emptyProvider() {
+        ObjectProvider<AgendaProposer> provider = mock(ObjectProvider.class);
+        return provider;
     }
 
     @Test

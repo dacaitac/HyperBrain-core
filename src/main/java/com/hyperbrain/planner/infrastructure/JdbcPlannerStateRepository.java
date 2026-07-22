@@ -358,6 +358,10 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         ORDER BY b.date_start, b.id
         """;
 
+    /** Display names of a set of executables for the LLM-facing read model (#61, H3). */
+    private static final String EXECUTABLE_TITLES_SQL =
+        "SELECT id, name FROM core_executable WHERE id IN (%s)";
+
     private final JdbcTemplate jdbcTemplate;
     private final LearnedCostRepository learnedCostRepository;
     private final LearnedUnitCostCalculator learnedUnitCostCalculator;
@@ -542,6 +546,21 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 rs.getObject("date_end", OffsetDateTime.class),
                 rs.getString("reason")),
             userId, dayStart, dayEnd);
+    }
+
+    @Override
+    public java.util.Map<UUID, String> loadExecutableTitles(java.util.Collection<UUID> executableIds) {
+        if (executableIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        List<UUID> ids = List.copyOf(executableIds);
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        String sql = String.format(EXECUTABLE_TITLES_SQL, placeholders);
+        java.util.Map<UUID, String> titles = new java.util.HashMap<>();
+        jdbcTemplate.query(sql, rs -> {
+            titles.put(rs.getObject("id", UUID.class), rs.getString("name"));
+        }, ids.toArray());
+        return titles;
     }
 
     private Double resolveCu(UUID taskId) {

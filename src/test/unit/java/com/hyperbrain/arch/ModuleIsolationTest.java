@@ -63,6 +63,19 @@ class ModuleIsolationTest {
             );
 
     /**
+     * The planner must never depend on the cognitive module. The propose-then-validate seam (ADR-019,
+     * HU-01c H3) inverts the dependency: the planner exposes the {@code AgendaProposer} port and the
+     * cognitive orchestrator implements it, so the only module edge is {@code cognitive → planner}.
+     * Forbidding the reverse edge keeps the two modules acyclic.
+     */
+    @ArchTest
+    static final ArchRule planner_does_not_depend_on_cognitive =
+        noClasses()
+            .that().resideInAPackage("com.hyperbrain.planner..")
+            .should().dependOnClassesThat()
+            .resideInAPackage("com.hyperbrain.cognitive..");
+
+    /**
      * The shared pipeline (outbox relay, messaging ports) is a leaf: feature modules depend on it,
      * never the other way around. This also enforces that the OutboxWorker holds no business logic —
      * it structurally cannot reach into any module.
