@@ -39,6 +39,14 @@ class AgendaProposalPromptBuilderTest {
     }
 
     @Test
+    @DisplayName("the system message instructs the coach_note to be written in Spanish")
+    void system_requests_spanish_coach_note() {
+        LlmPrompt prompt = builder.build(context("Write the report"));
+
+        assertThat(prompt.system()).contains("SPANISH");
+    }
+
+    @Test
     @DisplayName("the system message frames the block times as the user's tentative preference, not free placement")
     void system_frames_times_as_user_preference() {
         LlmPrompt prompt = builder.build(context("Write the report"));
