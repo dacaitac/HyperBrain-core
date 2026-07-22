@@ -50,7 +50,31 @@ spring:
           apple-commands-results: ${SQS_QUEUE_APPLE_COMMANDS_RESULTS:apple-commands-results.fifo}
           user-commands:          ${SQS_QUEUE_USER_COMMANDS:user-commands.fifo}
 
+  # Spring AI (HU-01c H3/H4). The Anthropic provider autoconfiguration is DISABLED by default via
+  # spring.ai.model.chat=none, so the app and the whole test suite boot WITHOUT an API key (local/CI
+  # never hold SPRING_AI_ANTHROPIC_API_KEY). Production turns the live LLM on by overriding
+  # spring.ai.model.chat=anthropic together with SPRING_AI_ANTHROPIC_API_KEY and the
+  # app.cognitive.llm-propose flag. Tests always drive a deterministic stub — never a real call.
+  ai:
+    model:
+      chat: ${SPRING_AI_MODEL_CHAT:none}
+    anthropic:
+      api-key: ${SPRING_AI_ANTHROPIC_API_KEY:}
+      chat:
+        options:
+          model: ${SPRING_AI_ANTHROPIC_MODEL:claude-opus-4-8}
+          # Reproducibility comes from bounding the output space (closed blockId set + JSON schema +
+          # ProposalWallGuard), not from sampling — temperature is deliberately left untuned (ratified).
+          max-tokens: 8192
+
 app:
+  cognitive:
+    llm-propose:
+      # HU-01c H3: the LLM propose-then-validate tier. Deploy-safe default OFF — the planner
+      # materializes the humanized floor exactly as H1/H2 (zero regression). Enable in prod via
+      # APP_COGNITIVE_LLM_PROPOSE_ENABLED=true, together with spring.ai.model.chat=anthropic and
+      # SPRING_AI_ANTHROPIC_API_KEY. Local/CI never turn it on against a real provider.
+      enabled: ${APP_COGNITIVE_LLM_PROPOSE_ENABLED:false}
   sync:
     consumer:
       enabled: true
