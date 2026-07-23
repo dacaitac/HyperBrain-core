@@ -438,6 +438,31 @@ CREATE TABLE planner_agenda_materialization (
 CREATE INDEX idx_planner_agenda_materialization_day
     ON planner_agenda_materialization (user_id, agenda_date);
 
+-- Narrow persisted projection of DailyAdherenceReport that DailyAdherenceRollupService upserts after
+-- logging (ADR-025 D4): single-sources the adherence formula of AdherenceCalculator for the iOS
+-- Scoreboard (read through the api.v_daily_adherence view), instead of reimplementing it in SQL. An
+-- acotada, additive amendment to the raw-first telemetry of ADR-016 (the log stays; this is not the
+-- full #59 stack). Columns map the record's persisted measures 1:1; `zone` is NOT stored (only used
+-- upstream to derive the local day; the user's timezone lives in sys_user.timezone) and
+-- materialized_at is set by the DB. ritual_completed is the record's boxed Boolean (partial proxy for
+-- the ADR-018 ritual) and the one nullable measure column. The core owns this table via JDBC — the
+-- api.* views of the same Infra migration are consumed by the iOS app, never the core, so they are
+-- deliberately NOT mirrored here (S0-07: mirror only what the core reads/writes via JDBC).
+-- Mirrors HyperBrain-Infra/supabase/migrations/20260723120000_read_model_surface.sql
+CREATE TABLE plnr_daily_rollup (
+    user_id           UUID             NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
+    agenda_date       DATE             NOT NULL,
+    blocks_planned    INTEGER          NOT NULL,
+    blocks_executed   INTEGER          NOT NULL,
+    adherence         DOUBLE PRECISION NOT NULL,
+    wig_hit           BOOLEAN          NOT NULL,
+    ritual_completed  BOOLEAN,
+    replan_count      INTEGER          NOT NULL,
+    abandoned         BOOLEAN          NOT NULL,
+    materialized_at   TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, agenda_date)
+);
+
 -- Correlation log of WriteCommands emitted to apple-commands.fifo (HU-09c, ADR-010).
 -- Mirrors HyperBrain-Infra/supabase/migrations/20260706130000_sync_write_commands.sql (S0-07).
 CREATE TABLE sync_write_commands (

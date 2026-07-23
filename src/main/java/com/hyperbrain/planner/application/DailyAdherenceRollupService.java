@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.DailyAdherenceReport;
 import com.hyperbrain.planner.domain.model.DailyBlockObservation;
+import com.hyperbrain.planner.domain.port.out.DailyRollupRepository;
 import com.hyperbrain.planner.domain.port.out.DailyTelemetryRepository;
 import com.hyperbrain.planner.domain.port.out.MorningTriggerStore;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
@@ -22,9 +23,14 @@ import java.util.UUID;
 
 /**
  * Consolidates the H0 daily rollup (#17): reads a user's local day, computes adherence and the three
- * behavioral lead measures, and emits them as a single structured JSON line to stdout — the MVP
- * telemetry sink (ADR-016 raw-first, no new table). Returns the report so callers/tests can assert on
- * it beyond the log side effect.
+ * behavioral lead measures, emits them as a single structured JSON line to stdout, and persists them
+ * as a narrow projection in {@code plnr_daily_rollup}. Returns the report so callers/tests can assert
+ * on it beyond the side effects.
+ *
+ * <p><b>Log + projection (ADR-025 D4, amending ADR-016).</b> The structured log stays as the raw-first
+ * telemetry sink (ADR-016); the persisted upsert is an acotada, additive amendment that single-sources
+ * the adherence formula for the iOS Scoreboard (read through the {@code api.v_daily_adherence} view),
+ * avoiding a SQL reimplementation of {@link AdherenceCalculator}. It is not the full #59 telemetry stack.
  *
  * <p><b>Ritual proxy (partial lead measure).</b> ADR-018's morning commitment ritual has no explicit
  * "user committed" signal yet, so {@code ritual_completed} is logged as a proxy: whether the morning
@@ -39,6 +45,7 @@ public class DailyAdherenceRollupService {
     private final DailyTelemetryRepository telemetryRepository;
     private final PlannerStateRepository plannerStateRepository;
     private final MorningTriggerStore morningTriggerStore;
+    private final DailyRollupRepository dailyRollupRepository;
     private final AdherenceCalculator adherenceCalculator;
     private final ObjectMapper objectMapper;
 
@@ -46,24 +53,28 @@ public class DailyAdherenceRollupService {
         DailyTelemetryRepository telemetryRepository,
         PlannerStateRepository plannerStateRepository,
         MorningTriggerStore morningTriggerStore,
+        DailyRollupRepository dailyRollupRepository,
         AdherenceCalculator adherenceCalculator,
         ObjectMapper objectMapper
     ) {
         this.telemetryRepository = telemetryRepository;
         this.plannerStateRepository = plannerStateRepository;
         this.morningTriggerStore = morningTriggerStore;
+        this.dailyRollupRepository = dailyRollupRepository;
         this.adherenceCalculator = adherenceCalculator;
         this.objectMapper = objectMapper;
     }
 
     /**
-     * Rolls up one local day for a user and logs the structured result.
+     * Rolls up one local day for a user: logs the structured result and upserts the projection into
+     * {@code plnr_daily_rollup}. Read-write ({@code @Transactional}, not {@code readOnly}): the input
+     * reads and the single projection write share one transaction, so a partial rollup never persists.
      *
      * @param userId the user to roll up; never null
      * @param day    the local day to consolidate (typically the previous day); never null
      * @return the computed rollup
      */
-    @Transactional(readOnly = true)
+    @Transactional
     public DailyAdherenceReport rollup(UUID userId, LocalDate day) {
         ZoneId zone = plannerStateRepository.loadUserZone(userId);
         List<DailyBlockObservation> blocks =
@@ -74,6 +85,7 @@ public class DailyAdherenceRollupService {
         DailyAdherenceReport report =
             adherenceCalculator.compute(day, zone, blocks, replanCount, ritualCompleted);
         logStructured(report);
+        dailyRollupRepository.upsert(userId, report);
         return report;
     }
 

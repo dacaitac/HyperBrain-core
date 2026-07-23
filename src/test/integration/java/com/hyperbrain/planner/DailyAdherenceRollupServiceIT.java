@@ -10,9 +10,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.sql.Date;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,6 +40,7 @@ class DailyAdherenceRollupServiceIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        jdbcTemplate.update("DELETE FROM plnr_daily_rollup");
         jdbcTemplate.update("DELETE FROM processed_message");
         jdbcTemplate.update("UPDATE core_executable SET imputed_time_block_id = NULL");
         jdbcTemplate.update("DELETE FROM core_time_block");
@@ -110,6 +113,68 @@ class DailyAdherenceRollupServiceIT {
         assertThat(report.adherence()).isZero();
         assertThat(report.wigHit()).isFalse();
         assertThat(report.abandoned()).isFalse();
+    }
+
+    @Test
+    @DisplayName("persists the rollup to plnr_daily_rollup mirroring the computed report")
+    void persists_the_projection_to_plnr_daily_rollup() {
+        UUID wig = insertLeadMeasure("Ship MVP");
+        insertPlannerBlock(wig, 8, 50, "SETTLED");    // WIG executed
+        UUID task = insertTask("Deep work");
+        insertPlannerBlock(task, 11, null, "EXPIRED"); // dropped
+
+        DailyAdherenceReport report = service.rollup(USER, DAY);
+
+        assertThat(rollupRowCount()).isEqualTo(1);
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+            "SELECT * FROM plnr_daily_rollup WHERE user_id = ? AND agenda_date = ?",
+            USER, Date.valueOf(DAY));
+        assertThat(row)
+            .containsEntry("blocks_planned", report.blocksPlanned())
+            .containsEntry("blocks_executed", report.blocksExecuted())
+            .containsEntry("adherence", report.adherence())
+            .containsEntry("wig_hit", report.wigHit())
+            .containsEntry("ritual_completed", report.ritualCompleted())
+            .containsEntry("replan_count", report.replanCount())
+            .containsEntry("abandoned", report.abandoned());
+        assertThat(row.get("materialized_at")).isNotNull();
+    }
+
+    @Test
+    @DisplayName("re-rolling the same day upserts the row instead of duplicating or failing on the PK")
+    void re_running_the_same_day_upserts() {
+        UUID task = insertTask("Deep work");
+        insertPlannerBlock(task, 9, 60, "SETTLED");    // executed
+        insertPlannerBlock(task, 11, null, "EXPIRED"); // dropped
+
+        DailyAdherenceReport first = service.rollup(USER, DAY);
+        assertThat(rollupRowCount()).isEqualTo(1);
+        assertThat(first.blocksExecuted()).isEqualTo(1);
+
+        // The day settles further: the previously-expired block is now executed.
+        jdbcTemplate.update(
+            "UPDATE core_time_block SET actual_duration_minutes = 30, status = 'SETTLED' "
+                + "WHERE actual_duration_minutes IS NULL");
+
+        DailyAdherenceReport second = service.rollup(USER, DAY);
+
+        assertThat(second.blocksExecuted()).isGreaterThan(first.blocksExecuted());
+        assertThat(rollupRowCount()).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT blocks_executed FROM plnr_daily_rollup WHERE user_id = ? AND agenda_date = ?",
+            Integer.class, USER, Date.valueOf(DAY)))
+            .isEqualTo(second.blocksExecuted());
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT adherence FROM plnr_daily_rollup WHERE user_id = ? AND agenda_date = ?",
+            Double.class, USER, Date.valueOf(DAY)))
+            .isEqualTo(second.adherence());
+    }
+
+    private int rollupRowCount() {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM plnr_daily_rollup WHERE user_id = ? AND agenda_date = ?",
+            Integer.class, USER, Date.valueOf(DAY));
+        return count == null ? 0 : count;
     }
 
     private UUID insertTask(String name) {
