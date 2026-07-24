@@ -171,6 +171,54 @@ class NotionInboundSyncIT {
     }
 
     @Test
+    @DisplayName("bug #2 — an AGENDA completed via Status (checkbox off) lands DONE and stages the propagation")
+    void agenda_status_done_without_checkbox_marks_done() {
+        String pageId = newPageId();
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "Not started", false, "Agenda",
+            "2026-07-07T15:00:00.000Z", null));
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // The user sets Status=Done in Notion but never ticks the Complete checkbox
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "Done", false, "Agenda",
+            "2026-07-07T15:01:00.000Z", null));
+
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT e.type, e.status FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, pageId);
+        assertThat(row.get("type")).isEqualTo("AGENDA");
+        assertThat(row.get("status")).isEqualTo("DONE");
+        // The completing edit is a real domain change → one NOTION event staged for the Apple write-back
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION' AND aggregate_id = ?",
+            Integer.class, localId(pageId).toString());
+        assertThat(notionEvents).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("bug #1 — un-completing a DONE AGENDA via Status (In progress, checkbox off) re-opens it to IN_PROGRESS")
+    void agenda_status_reopen_marks_in_progress() {
+        String pageId = newPageId();
+        // Given an AGENDA already DONE in the Core (completed via Status, checkbox off)
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "Done", false, "Agenda",
+            "2026-07-07T15:00:00.000Z", null));
+        assertThat(mappedStatus(pageId)).isEqualTo("DONE");
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // When the user moves Status back to In progress (checkbox still off): both signals non-completed
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "In progress", false, "Agenda",
+            "2026-07-07T15:05:00.000Z", null));
+
+        // Then the reopened task settles at IN_PROGRESS (Option B maps Status=In progress directly;
+        // had the user left Not started it would drop to TODO and DR-02 would lift it) and propagates
+        assertThat(mappedStatus(pageId)).isEqualTo("IN_PROGRESS");
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION' AND aggregate_id = ?",
+            Integer.class, localId(pageId).toString());
+        assertThat(notionEvents).isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("scenario 4 — DELETE: a trashed page removes the entity and its mapping (CA-7)")
     void trashed_page_deletes_entity() {
         String pageId = newPageId();
@@ -655,6 +703,13 @@ class NotionInboundSyncIT {
     private String mappedName(String pageId) {
         return jdbcTemplate.queryForObject("""
             SELECT e.name FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, String.class, pageId);
+    }
+
+    private String mappedStatus(String pageId) {
+        return jdbcTemplate.queryForObject("""
+            SELECT e.status FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
             WHERE m.external_id = ?
             """, String.class, pageId);
     }

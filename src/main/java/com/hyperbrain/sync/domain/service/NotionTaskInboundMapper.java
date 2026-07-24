@@ -22,8 +22,9 @@ import java.util.UUID;
  * Maps a {@link NotionTaskPage} to an {@link ExecutableSnapshot} — the inverse of
  * {@link NotionTaskMapper} (HU-14 CA-5), with the merge rules inherited from the legacy:
  * <ul>
- *   <li>{@code Complete} has priority over {@code Status}: checked → {@code DONE};
- *       unchecked with {@code Status=Done} → {@code TODO} (the checkbox is the authority).
+ *   <li>Completion follows the "either signal completes" policy (Option B): {@code DONE} when
+ *       the {@code Complete} checkbox is checked <b>or</b> {@code Status=Done}; uncompleting
+ *       needs both signals non-completed. See {@link #resolveStatus}.
  *   <li>Unknown {@code Status}/{@code Type} options degrade to {@code TODO}/{@code TASK}
  *       instead of failing — the schema may gain options before the Core learns them.
  *   <li>Scale selects ({@code Impact}/{@code Energy}/{@code Mental Load}) map to their
@@ -102,19 +103,22 @@ public final class NotionTaskInboundMapper {
             false);
     }
 
-    /** Resolves the domain status; the {@code Complete} checkbox wins over {@code Status}. */
+    /**
+     * Resolves the domain status under the "either signal completes" policy (Option B): the
+     * Tasks database carries two independent completion signals — the {@code Complete} checkbox
+     * and the {@code Status} status property (complete group). The executable is {@code DONE}
+     * when {@code Complete} is checked <b>or</b> {@code Status} is {@code Done}; otherwise the
+     * {@code Status} option maps directly ({@code In progress} → {@code IN_PROGRESS},
+     * {@code Failed} → {@code FAILED}, {@code Not started}/unknown/null → {@code TODO}).
+     * Uncompleting therefore requires <b>both</b> signals to be non-completed — completing or
+     * re-opening the task from either side converges on the same domain status.
+     */
     static String resolveStatus(String statusName, Boolean complete) {
         if (Boolean.TRUE.equals(complete)) {
             return "DONE";
         }
         String mapped = statusName != null ? STATUS_FROM_NOTION.get(statusName) : null;
-        if (mapped == null) {
-            return "TODO";
-        }
-        if ("DONE".equals(mapped) && Boolean.FALSE.equals(complete)) {
-            return "TODO";
-        }
-        return mapped;
+        return mapped != null ? mapped : "TODO";
     }
 
     static String mapType(String typeName) {

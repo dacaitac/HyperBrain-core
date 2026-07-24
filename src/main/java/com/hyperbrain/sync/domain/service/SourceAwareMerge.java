@@ -185,7 +185,10 @@ public final class SourceAwareMerge {
      * Applies a Notion status pair with the loss-aware rule: when the current status projects
      * to the same {@code Status} option and the same {@code Complete} flag, nothing changed
      * in Notion and the (richer) domain status is kept. A null option carries no information
-     * and never regresses the status by itself.
+     * and never regresses the status by itself. Any real change delegates to
+     * {@link NotionTaskInboundMapper#resolveStatus}, inheriting the "either signal completes"
+     * authority (Option B): a still-completed {@code Status=Done} keeps {@code DONE} even after
+     * the checkbox is cleared, while both signals non-completed re-opens the task.
      */
     static String mergeStatus(String currentStatus, String statusName, Boolean complete) {
         boolean completeProjection = STATUS_DONE.equals(currentStatus);

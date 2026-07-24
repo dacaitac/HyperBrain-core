@@ -53,21 +53,58 @@ class NotionTaskInboundMapperTest {
             5, 1, 4, false));
     }
 
+    @ParameterizedTest(name = "Status={0}, Complete={1} → {2}")
+    @CsvSource(nullValues = "NULL", value = {
+        // DONE when either signal completes (Option B); checkbox checked always wins
+        "Done, true, DONE",
+        "Done, false, DONE",
+        "Done, NULL, DONE",
+        "In progress, true, DONE",
+        "Not started, true, DONE",
+        "Failed, true, DONE",
+        "Someday, true, DONE",
+        "NULL, true, DONE",
+        // Neither signal completed: Status maps directly
+        "In progress, false, IN_PROGRESS",
+        "In progress, NULL, IN_PROGRESS",
+        "Failed, false, FAILED",
+        "Failed, NULL, FAILED",
+        "Not started, false, TODO",
+        "Not started, NULL, TODO",
+        // Unknown or missing Status degrades to TODO
+        "Someday, false, TODO",
+        "NULL, false, TODO",
+        "NULL, NULL, TODO"})
+    @DisplayName("resolves the domain status under the either-signal-completes policy (Option B)")
+    void resolves_status_option_b(String statusName, Boolean complete, String expected) {
+        assertThat(NotionTaskInboundMapper.resolveStatus(statusName, complete)).isEqualTo(expected);
+    }
+
     @Test
-    @DisplayName("Complete checkbox has priority over Status when resolving the domain status")
-    void complete_checkbox_wins_over_status() {
-        // Checked → DONE even if Status says otherwise
-        assertThat(NotionTaskInboundMapper.resolveStatus("In progress", true)).isEqualTo("DONE");
-        assertThat(NotionTaskInboundMapper.resolveStatus(null, true)).isEqualTo("DONE");
-        // Unchecked contradicting Status=Done → not done
-        assertThat(NotionTaskInboundMapper.resolveStatus("Done", false)).isEqualTo("TODO");
-        // Consistent pairs pass through
-        assertThat(NotionTaskInboundMapper.resolveStatus("Done", true)).isEqualTo("DONE");
-        assertThat(NotionTaskInboundMapper.resolveStatus("Failed", false)).isEqualTo("FAILED");
-        assertThat(NotionTaskInboundMapper.resolveStatus("Not started", false)).isEqualTo("TODO");
-        // Unknown or missing status degrades to TODO
-        assertThat(NotionTaskInboundMapper.resolveStatus("Someday", false)).isEqualTo("TODO");
-        assertThat(NotionTaskInboundMapper.resolveStatus(null, null)).isEqualTo("TODO");
+    @DisplayName("Status=Done with the checkbox off still resolves to DONE (bug #2 fix)")
+    void status_done_without_checkbox_is_done() {
+        assertThat(NotionTaskInboundMapper.resolveStatus("Done", false)).isEqualTo("DONE");
+        // and moving the Status away while the checkbox is off re-opens the task (bug #1 fix)
+        assertThat(NotionTaskInboundMapper.resolveStatus("In progress", false)).isEqualTo("IN_PROGRESS");
+    }
+
+    @Test
+    @DisplayName("an AGENDA page completed via Status (checkbox off) resolves to DONE (status is type-agnostic)")
+    void agenda_completed_via_status_is_done() {
+        // Given an AGENDA whose Complete checkbox is still off but Status is Done
+        NotionTaskPage page = new NotionTaskPage(
+            "page0000000000000000000000000003", null, false,
+            "Doctor appointment", null, "Done", false, "Agenda",
+            null, null, null, null, null,
+            null, null,
+            null, null, null, null, null);
+
+        // When
+        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null);
+
+        // Then completion is authoritative regardless of type
+        assertThat(snapshot.type()).isEqualTo("AGENDA");
+        assertThat(snapshot.status()).isEqualTo("DONE");
     }
 
     @ParameterizedTest(name = "Type \"{0}\" → {1}")
