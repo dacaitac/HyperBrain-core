@@ -118,7 +118,7 @@ class NotionCycleSyncServiceTest {
 
         // When
         SyncOutcome outcome = service.apply(new NotionCyclePage(PAGE_ID, EDITED_AT, true,
-            null, null, null, null, null));
+            null, null, null, null, null, null));
 
         // Then
         assertThat(outcome).isEqualTo(SyncOutcome.DELETED);
@@ -178,9 +178,69 @@ class NotionCycleSyncServiceTest {
         verify(cycleRepo, never()).upsert(any());
     }
 
+    @Test
+    @DisplayName("ADR-015: a cycle's parent relation resolves to the mapped local id and is persisted")
+    void parent_relation_resolves_to_local_id() {
+        // Given the child page is new and its parent cycle is already mapped
+        String parentPageId = "parentcycle00000000000000000001";
+        UUID parentLocalId = UUID.fromString("55555555-5555-5555-5555-555555555555");
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID)).thenReturn(Optional.empty());
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", parentPageId))
+            .thenReturn(Optional.of(new SyncMapping(UUID.randomUUID(), USER_ID, parentLocalId,
+                "NOTION", parentPageId, "checksum", "SYNCED", EDITED_AT)));
+
+        // When
+        service.apply(pageWithParent("Sprint 2", false, EDITED_AT, parentPageId));
+
+        // Then the resolved parent local id is written to the snapshot
+        ArgumentCaptor<CycleSnapshot> snapshot = ArgumentCaptor.forClass(CycleSnapshot.class);
+        verify(cycleRepo).upsert(snapshot.capture());
+        assertThat(snapshot.getValue().parentCycleId()).isEqualTo(parentLocalId);
+    }
+
+    @Test
+    @DisplayName("ADR-015: an unmapped parent relation is omitted (repaired by the next webhook), never imported on demand")
+    void unmapped_parent_relation_is_omitted() {
+        // Given the child page is new and its parent cycle is not mapped yet
+        String parentPageId = "parentcycle00000000000000000001";
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID)).thenReturn(Optional.empty());
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", parentPageId))
+            .thenReturn(Optional.empty());
+
+        // When
+        service.apply(pageWithParent("Sprint 2", false, EDITED_AT, parentPageId));
+
+        // Then the relation is omitted and the parent is never fetched (no recursion up the ladder)
+        ArgumentCaptor<CycleSnapshot> snapshot = ArgumentCaptor.forClass(CycleSnapshot.class);
+        verify(cycleRepo).upsert(snapshot.capture());
+        assertThat(snapshot.getValue().parentCycleId()).isNull();
+        verify(notion, never()).retrievePage(any());
+    }
+
+    @Test
+    @DisplayName("anti-cycle guard: a page whose parent relation points to itself discards the self-parent")
+    void self_parent_is_discarded() {
+        // Given a mapped page (LOCAL_ID) whose Cycle Parent (Objective) relation contains its own id
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
+            .thenReturn(Optional.of(mapping("prev-checksum", EDITED_AT)));
+
+        // When
+        service.apply(pageWithParent("Sprint 2 renamed", false, EDITED_AT, PAGE_ID));
+
+        // Then the self-parent is discarded to keep parent_cycle_id acyclic
+        ArgumentCaptor<CycleSnapshot> snapshot = ArgumentCaptor.forClass(CycleSnapshot.class);
+        verify(cycleRepo).upsert(snapshot.capture());
+        assertThat(snapshot.getValue().parentCycleId()).isNull();
+    }
+
     private static NotionCyclePage page(String name, Boolean inactive, OffsetDateTime editedAt) {
+        return pageWithParent(name, inactive, editedAt, null);
+    }
+
+    private static NotionCyclePage pageWithParent(String name, Boolean inactive,
+                                                  OffsetDateTime editedAt, String parentRelationId) {
         return new NotionCyclePage(PAGE_ID, editedAt, false, name, "MCI",
-            "2026-07-01", "2026-07-14", inactive);
+            "2026-07-01", "2026-07-14", inactive, parentRelationId);
     }
 
     private static SyncMapping mapping(String checksum, OffsetDateTime lastSyncedAt) {

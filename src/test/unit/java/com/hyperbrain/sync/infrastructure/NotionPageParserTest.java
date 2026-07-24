@@ -97,7 +97,7 @@ class NotionPageParserTest {
     }
 
     @Test
-    @DisplayName("parses a Cycles page (Inactive checkbox, date-only range)")
+    @DisplayName("parses a Cycles page (Inactive checkbox, date-only range, parent self-relation)")
     void parses_cycle_page() throws Exception {
         String json = """
             {
@@ -108,7 +108,9 @@ class NotionPageParserTest {
                 "Name": { "type": "title", "title": [ { "plain_text": "Sprint 2" } ] },
                 "Type": { "type": "select", "select": { "name": "MCI" } },
                 "Date": { "type": "date", "date": { "start": "2026-07-01", "end": "2026-07-14" } },
-                "Inactive": { "type": "checkbox", "checkbox": true }
+                "Inactive": { "type": "checkbox", "checkbox": true },
+                "Cycle Parent (Objective)": { "type": "relation",
+                  "relation": [ { "id": "1bf8bc9c-5d91-81aa-bbbb-000000000009" } ] }
               }
             }
             """;
@@ -118,7 +120,28 @@ class NotionPageParserTest {
         assertThat(page).usingRecursiveComparison().isEqualTo(new NotionCyclePage(
             "1bf8bc9c5d9181d882cfe1f4aa38f295",
             OffsetDateTime.parse("2026-07-07T15:00:00Z"),
-            false, "Sprint 2", "MCI", "2026-07-01", "2026-07-14", true));
+            false, "Sprint 2", "MCI", "2026-07-01", "2026-07-14", true,
+            "1bf8bc9c5d9181aabbbb000000000009"));
+    }
+
+    @Test
+    @DisplayName("parses a Cycles page with no parent relation to a null parentRelationId")
+    void parses_cycle_page_without_parent() throws Exception {
+        String json = """
+            {
+              "object": "page",
+              "id": "1bf8bc9c-5d91-81d8-82cf-e1f4aa38f295",
+              "properties": {
+                "Name": { "type": "title", "title": [ { "plain_text": "Sprint 2" } ] },
+                "Type": { "type": "select", "select": { "name": "MCI" } },
+                "Inactive": { "type": "checkbox", "checkbox": false }
+              }
+            }
+            """;
+
+        NotionCyclePage page = parser.parseCycle(objectMapper.readTree(json));
+
+        assertThat(page.parentRelationId()).isNull();
     }
 
     @Test

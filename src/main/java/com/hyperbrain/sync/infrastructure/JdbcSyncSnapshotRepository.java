@@ -32,7 +32,7 @@ class JdbcSyncSnapshotRepository implements SyncSnapshotRepository {
         """;
 
     private static final String FIND_CYCLE_SQL = """
-        SELECT id, user_id, name, type, status, start_date, end_date
+        SELECT id, user_id, parent_cycle_id, name, type, status, start_date, end_date
         FROM core_cycle
         WHERE id = ?
         """;
@@ -69,6 +69,7 @@ class JdbcSyncSnapshotRepository implements SyncSnapshotRepository {
         return new CycleSnapshot(
             rs.getObject("id", UUID.class),
             rs.getObject("user_id", UUID.class),
+            rs.getObject("parent_cycle_id", UUID.class),
             rs.getString("name"),
             rs.getString("type"),
             rs.getString("status"),

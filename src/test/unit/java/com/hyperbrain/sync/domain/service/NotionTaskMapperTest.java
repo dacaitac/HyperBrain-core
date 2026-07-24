@@ -148,6 +148,18 @@ class NotionTaskMapperTest {
             assertThat(map(snapshot().status(domainStatus).build()).get("Complete"))
                 .isEqualTo(Map.of("checkbox", false));
         }
+
+        @Test
+        @DisplayName("Complete is derived from status so the two Notion completion signals never diverge (write-back)")
+        void complete_and_status_stay_consistent() {
+            Map<String, Object> done = map(snapshot().status("DONE").build());
+            assertThat(done.get("Status")).isEqualTo(Map.of("status", Map.of("name", "Done")));
+            assertThat(done.get("Complete")).isEqualTo(Map.of("checkbox", true));
+
+            Map<String, Object> inProgress = map(snapshot().status("IN_PROGRESS").build());
+            assertThat(inProgress.get("Status")).isEqualTo(Map.of("status", Map.of("name", "In progress")));
+            assertThat(inProgress.get("Complete")).isEqualTo(Map.of("checkbox", false));
+        }
     }
 
     @Nested

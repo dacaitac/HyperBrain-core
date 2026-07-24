@@ -41,17 +41,23 @@ public final class NotionCycleInboundMapper {
     }
 
     /**
-     * Builds the cycle snapshot for one Notion Cycles page.
+     * Builds the cycle snapshot for one Notion Cycles page. The parent relation arrives already
+     * resolved to a local id by the caller ({@code NotionCycleSyncService}), mirroring how
+     * {@code NotionTaskInboundMapper} receives {@code parentId}.
      *
-     * @param page   the parsed page properties
-     * @param id     local {@code core_cycle} id (existing mapping or a fresh UUID)
-     * @param userId owning user (single-user MVP)
+     * @param page                  the parsed page properties
+     * @param id                    local {@code core_cycle} id (existing mapping or a fresh UUID)
+     * @param userId                owning user (single-user MVP)
+     * @param resolvedParentCycleId local parent cycle id resolved by the caller, or null (no
+     *                              relation, unmapped parent, or self-parent discarded)
      * @return the snapshot to persist
      */
-    public static CycleSnapshot toSnapshot(NotionCyclePage page, UUID id, UUID userId) {
+    public static CycleSnapshot toSnapshot(NotionCyclePage page, UUID id, UUID userId,
+                                           UUID resolvedParentCycleId) {
         return new CycleSnapshot(
             id,
             userId,
+            resolvedParentCycleId,
             page.name() != null ? page.name() : "",
             mapType(page.typeName()),
             Boolean.TRUE.equals(page.inactive()) ? "COMPLETED" : "ACTIVE",

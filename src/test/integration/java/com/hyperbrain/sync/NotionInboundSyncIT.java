@@ -171,6 +171,54 @@ class NotionInboundSyncIT {
     }
 
     @Test
+    @DisplayName("bug #2 — an AGENDA completed via Status (checkbox off) lands DONE and stages the propagation")
+    void agenda_status_done_without_checkbox_marks_done() {
+        String pageId = newPageId();
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "Not started", false, "Agenda",
+            "2026-07-07T15:00:00.000Z", null));
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // The user sets Status=Done in Notion but never ticks the Complete checkbox
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "Done", false, "Agenda",
+            "2026-07-07T15:01:00.000Z", null));
+
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT e.type, e.status FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, pageId);
+        assertThat(row.get("type")).isEqualTo("AGENDA");
+        assertThat(row.get("status")).isEqualTo("DONE");
+        // The completing edit is a real domain change → one NOTION event staged for the Apple write-back
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION' AND aggregate_id = ?",
+            Integer.class, localId(pageId).toString());
+        assertThat(notionEvents).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("bug #1 — un-completing a DONE AGENDA via Status (In progress, checkbox off) re-opens it to IN_PROGRESS")
+    void agenda_status_reopen_marks_in_progress() {
+        String pageId = newPageId();
+        // Given an AGENDA already DONE in the Core (completed via Status, checkbox off)
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "Done", false, "Agenda",
+            "2026-07-07T15:00:00.000Z", null));
+        assertThat(mappedStatus(pageId)).isEqualTo("DONE");
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // When the user moves Status back to In progress (checkbox still off): both signals non-completed
+        deliverAutomation(pageId, taskPage(pageId, "Doctor appointment", "In progress", false, "Agenda",
+            "2026-07-07T15:05:00.000Z", null));
+
+        // Then the reopened task settles at IN_PROGRESS (Option B maps Status=In progress directly;
+        // had the user left Not started it would drop to TODO and DR-02 would lift it) and propagates
+        assertThat(mappedStatus(pageId)).isEqualTo("IN_PROGRESS");
+        Integer notionEvents = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE source_system = 'NOTION' AND aggregate_id = ?",
+            Integer.class, localId(pageId).toString());
+        assertThat(notionEvents).isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("scenario 4 — DELETE: a trashed page removes the entity and its mapping (CA-7)")
     void trashed_page_deletes_entity() {
         String pageId = newPageId();
@@ -248,6 +296,47 @@ class NotionInboundSyncIT {
         assertThat(row.get("name")).isEqualTo("Q3 routine");
         assertThat(row.get("type")).isEqualTo("ROUTINE");
         assertThat(row.get("status")).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    @DisplayName("bug #3 — a child cycle whose parent is already mapped populates core_cycle.parent_cycle_id (ADR-015)")
+    void child_cycle_links_to_mapped_parent() {
+        // Given a parent cycle already ingested and mapped
+        String parentPageId = newPageId();
+        deliverAutomation(parentPageId, cyclePage(parentPageId, "Objective A", "Objective", false,
+            "2026-07-07T15:00:00.000Z"));
+        UUID parentLocalId = localId(parentPageId);
+
+        // When a child cycle arrives referencing the parent via Cycle Parent (Objective)
+        String childPageId = newPageId();
+        deliverAutomation(childPageId, cyclePageWithParent(childPageId, "Phase 1", "Phase", false,
+            "2026-07-07T15:01:00.000Z", parentPageId));
+
+        // Then the child's parent_cycle_id points to the parent's local id (was always NULL before the fix)
+        assertThat(storedParentOf(childPageId)).isEqualTo(parentLocalId);
+    }
+
+    @Test
+    @DisplayName("bug #3 — re-parenting a cycle in Notion updates core_cycle.parent_cycle_id")
+    void reparenting_a_cycle_updates_parent() {
+        // Given two candidate parents and a child linked to the first
+        String parentA = newPageId();
+        String parentB = newPageId();
+        deliverAutomation(parentA, cyclePage(parentA, "Objective A", "Objective", false,
+            "2026-07-07T15:00:00.000Z"));
+        deliverAutomation(parentB, cyclePage(parentB, "Objective B", "Objective", false,
+            "2026-07-07T15:00:00.000Z"));
+        String childPageId = newPageId();
+        deliverAutomation(childPageId, cyclePageWithParent(childPageId, "Phase 1", "Phase", false,
+            "2026-07-07T15:01:00.000Z", parentA));
+        assertThat(storedParentOf(childPageId)).isEqualTo(localId(parentA));
+
+        // When the user re-parents the child to B
+        deliverAutomation(childPageId, cyclePageWithParent(childPageId, "Phase 1", "Phase", false,
+            "2026-07-07T15:05:00.000Z", parentB));
+
+        // Then the stored parent switches to B
+        assertThat(storedParentOf(childPageId)).isEqualTo(localId(parentB));
     }
 
     @Test
@@ -598,6 +687,27 @@ class NotionInboundSyncIT {
             """.formatted(pageId, lastEditedTime, CYCLES_DB, name, type, inactive);
     }
 
+    private String cyclePageWithParent(String pageId, String name, String type, boolean inactive,
+                                       String lastEditedTime, String parentPageId) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Type":{"type":"select","select":{"name":"%s"}},
+               "Date":{"type":"date","date":{"start":"2026-07-01","end":"2026-07-14"}},
+               "Inactive":{"type":"checkbox","checkbox":%s},
+               "Cycle Parent (Objective)":{"type":"relation","relation":[{"id":"%s"}]}}}
+            """.formatted(pageId, lastEditedTime, CYCLES_DB, name, type, inactive, parentPageId);
+    }
+
+    private UUID storedParentOf(String pageId) {
+        return jdbcTemplate.queryForObject("""
+            SELECT c.parent_cycle_id FROM core_cycle c JOIN sync_mappings m ON m.local_id = c.id
+            WHERE m.external_id = ?
+            """, UUID.class, pageId);
+    }
+
     private String trashedPage(String pageId, String lastEditedTime) {
         return """
             {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":true,
@@ -655,6 +765,13 @@ class NotionInboundSyncIT {
     private String mappedName(String pageId) {
         return jdbcTemplate.queryForObject("""
             SELECT e.name FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
+            WHERE m.external_id = ?
+            """, String.class, pageId);
+    }
+
+    private String mappedStatus(String pageId) {
+        return jdbcTemplate.queryForObject("""
+            SELECT e.status FROM core_executable e JOIN sync_mappings m ON m.local_id = e.id
             WHERE m.external_id = ?
             """, String.class, pageId);
     }

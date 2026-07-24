@@ -26,7 +26,12 @@ class NotionCycleMapperTest {
 
     private static CycleSnapshot cycle(String type, String status,
                                        LocalDate start, LocalDate end) {
-        return new CycleSnapshot(ID, USER_ID, "Sprint 2", type, status, start, end);
+        return new CycleSnapshot(ID, USER_ID, null, "Sprint 2", type, status, start, end);
+    }
+
+    /** Maps with no parent external id resolved (the common case in these attribute tests). */
+    private static Map<String, Object> map(CycleSnapshot snapshot) {
+        return NotionCycleMapper.map(snapshot, null);
     }
 
     @Nested
@@ -37,7 +42,7 @@ class NotionCycleMapperTest {
         @DisplayName("maps the cycle name as the title text")
         void maps_name_to_title() {
             Map<String, Object> props =
-                NotionCycleMapper.map(cycle("MCI", "ACTIVE", null, null));
+                map(cycle("MCI", "ACTIVE", null, null));
 
             assertThat(props.get("Name")).isEqualTo(
                 Map.of("title", List.of(Map.of("text", Map.of("content", "Sprint 2")))));
@@ -60,7 +65,7 @@ class NotionCycleMapperTest {
         @DisplayName("maps every domain cycle type to its Notion select option")
         void maps_type(String domainType, String notionType) {
             Map<String, Object> props =
-                NotionCycleMapper.map(cycle(domainType, "ACTIVE", null, null));
+                map(cycle(domainType, "ACTIVE", null, null));
 
             assertThat(props.get("Type"))
                 .isEqualTo(Map.of("select", Map.of("name", notionType)));
@@ -74,7 +79,7 @@ class NotionCycleMapperTest {
         @Test
         @DisplayName("maps start and end as a date-only range")
         void maps_date_range() {
-            Map<String, Object> props = NotionCycleMapper.map(
+            Map<String, Object> props = map(
                 cycle("MCI", "ACTIVE", LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 14)));
 
             assertThat(props.get("Date")).isEqualTo(
@@ -84,7 +89,7 @@ class NotionCycleMapperTest {
         @Test
         @DisplayName("start without end produces a single-date value")
         void start_only_has_no_end() {
-            Map<String, Object> props = NotionCycleMapper.map(
+            Map<String, Object> props = map(
                 cycle("MCI", "ACTIVE", LocalDate.of(2026, 7, 1), null));
 
             assertThat(props.get("Date"))
@@ -94,7 +99,7 @@ class NotionCycleMapperTest {
         @Test
         @DisplayName("clears Date explicitly when the cycle has no dates (full mirror, ADR-012 D3)")
         void clears_date_when_null() {
-            assertThat(NotionCycleMapper.map(cycle("MCI", "ACTIVE", null, null)).get("Date"))
+            assertThat(map(cycle("MCI", "ACTIVE", null, null)).get("Date"))
                 .isEqualTo(java.util.Collections.singletonMap("date", null));
         }
     }
@@ -106,15 +111,37 @@ class NotionCycleMapperTest {
         @Test
         @DisplayName("ACTIVE maps to Inactive=false")
         void active_is_not_inactive() {
-            assertThat(NotionCycleMapper.map(cycle("MCI", "ACTIVE", null, null)).get("Inactive"))
+            assertThat(map(cycle("MCI", "ACTIVE", null, null)).get("Inactive"))
                 .isEqualTo(Map.of("checkbox", false));
         }
 
         @Test
         @DisplayName("COMPLETED maps to Inactive=true")
         void completed_is_inactive() {
-            assertThat(NotionCycleMapper.map(cycle("MCI", "COMPLETED", null, null)).get("Inactive"))
+            assertThat(map(cycle("MCI", "COMPLETED", null, null)).get("Inactive"))
                 .isEqualTo(Map.of("checkbox", true));
+        }
+    }
+
+    @Nested
+    @DisplayName("parent_cycle_id → Cycle Parent (Objective) (self-relation, ADR-015)")
+    class ParentRelation {
+
+        @Test
+        @DisplayName("writes the parent self-relation with the resolved page id")
+        void maps_parent_relation() {
+            Map<String, Object> props = NotionCycleMapper.map(
+                cycle("PHASE", "ACTIVE", null, null), "parentcyclepage999");
+
+            assertThat(props.get("Cycle Parent (Objective)")).isEqualTo(
+                Map.of("relation", List.of(Map.of("id", "parentcyclepage999"))));
+        }
+
+        @Test
+        @DisplayName("clears the parent relation explicitly when the parent id is unresolved (full mirror)")
+        void clears_unresolved_parent_relation() {
+            assertThat(map(cycle("PHASE", "ACTIVE", null, null)).get("Cycle Parent (Objective)"))
+                .isEqualTo(Map.of("relation", List.of()));
         }
     }
 
@@ -123,14 +150,15 @@ class NotionCycleMapperTest {
     class ReadOnly {
 
         @Test
-        @DisplayName("the mapper never produces formula properties")
+        @DisplayName("the mapper never produces formula properties and emits the canonical property set")
         void never_emits_read_only_properties() {
             Map<String, Object> props = NotionCycleMapper.map(
-                cycle("PHASE", "COMPLETED", LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 14)));
+                cycle("PHASE", "COMPLETED", LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 14)),
+                "parentcyclepage999");
 
             assertThat(props.keySet())
                 .doesNotContainAnyElementsOf(NotionSchema.READ_ONLY_PROPERTIES)
-                .containsOnly("Name", "Type", "Date", "Inactive");
+                .containsOnly("Name", "Type", "Date", "Inactive", "Cycle Parent (Objective)");
         }
     }
 }

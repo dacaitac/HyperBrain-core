@@ -12,9 +12,11 @@ import java.time.OffsetDateTime;
  * @param archived       true when the page is {@code archived} or {@code in_trash} (CA-7)
  * @param name           plain text of the {@code Name} title property
  * @param typeName       {@code Type} select option name ({@code MCI}/{@code Routine}/{@code Phase})
- * @param dateStart      raw {@code Date.start} string, or null
- * @param dateEnd        raw {@code Date.end} string, or null
- * @param inactive       {@code Inactive} checkbox; true maps to status {@code COMPLETED}
+ * @param dateStart        raw {@code Date.start} string, or null
+ * @param dateEnd          raw {@code Date.end} string, or null
+ * @param inactive         {@code Inactive} checkbox; true maps to status {@code COMPLETED}
+ * @param parentRelationId normalized Notion page id of the {@code Cycle Parent (Objective)}
+ *                         self-relation (limit-1: first id), or null when the relation is empty
  */
 public record NotionCyclePage(
     String pageId,
@@ -24,6 +26,7 @@ public record NotionCyclePage(
     String typeName,
     String dateStart,
     String dateEnd,
-    Boolean inactive
+    Boolean inactive,
+    String parentRelationId
 ) {
 }

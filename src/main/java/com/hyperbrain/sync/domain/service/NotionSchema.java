@@ -35,6 +35,8 @@ public final class NotionSchema {
 
     // ── Cycles DB ─────────────────────────────────────────────────────────────
     public static final String PROP_INACTIVE = "Inactive";
+    // Self-relation of the Cycles DB (ADR-015 horizon ladder): points to the parent cycle.
+    public static final String PROP_PARENT_CYCLE = "Cycle Parent (Objective)";
 
     // ── Canonical select options (1-based domain scale ↔ option index) ────────
     // Shared by the outbound (HU-10) and inbound (HU-14) mappers so both directions

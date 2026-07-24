@@ -193,12 +193,29 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("checking Complete moves any status to DONE; unchecking regresses only DONE")
-        void complete_checkbox_rules() {
+        @DisplayName("either signal completes: checkbox or Status=Done moves any status to DONE (Option B)")
+        void complete_checkbox_or_status_rules() {
+            // Checking the Complete checkbox always completes
             assertThat(SourceAwareMerge.mergeStatus("IN_PROGRESS", "In progress", true)).isEqualTo("DONE");
-            assertThat(SourceAwareMerge.mergeStatus("DONE", "Done", false)).isEqualTo("TODO");
+            // Setting Status=Done completes even with the checkbox still off (bug #2 fix)
+            assertThat(SourceAwareMerge.mergeStatus("IN_PROGRESS", "Done", false)).isEqualTo("DONE");
+            assertThat(SourceAwareMerge.mergeStatus("TODO", "Done", false)).isEqualTo("DONE");
+            // A null option carries no information and never regresses on its own
             assertThat(SourceAwareMerge.mergeStatus("WAITING", "Not started", false)).isEqualTo("WAITING");
             assertThat(SourceAwareMerge.mergeStatus("PLANNED", null, null)).isEqualTo("PLANNED");
+        }
+
+        @Test
+        @DisplayName("Option B uncompletion: DONE only re-opens when BOTH Notion signals are non-completed")
+        void uncompletion_requires_both_signals() {
+            // Clearing only the checkbox while Status stays Done keeps DONE (still completed)
+            assertThat(SourceAwareMerge.mergeStatus("DONE", "Done", false)).isEqualTo("DONE");
+            // An echo of a completed row (Status=Done + checked) is a no-op that keeps DONE
+            assertThat(SourceAwareMerge.mergeStatus("DONE", "Done", true)).isEqualTo("DONE");
+            // Both signals non-completed re-opens: Status=In progress + checkbox off (bug #1 fix)
+            assertThat(SourceAwareMerge.mergeStatus("DONE", "In progress", false)).isEqualTo("IN_PROGRESS");
+            // Both signals non-completed via Not started + checkbox off drops to TODO (DR-02 then lifts it)
+            assertThat(SourceAwareMerge.mergeStatus("DONE", "Not started", false)).isEqualTo("TODO");
         }
 
         @Test
