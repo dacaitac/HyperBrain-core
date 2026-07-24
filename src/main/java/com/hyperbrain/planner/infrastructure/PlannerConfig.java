@@ -16,6 +16,7 @@ import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
+import com.hyperbrain.planner.domain.service.SleepSampleSessionParser;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -52,6 +53,15 @@ class PlannerConfig {
     @Bean
     SleepFrontierCalculator sleepFrontierCalculator() {
         return new SleepFrontierCalculator();
+    }
+
+    /**
+     * Parses the iOS Shortcut's raw HealthKit sleep dump into the most-recent scorable night
+     * (user-command sleep bridge). Framework-free; uses the sanctioned session-gap default.
+     */
+    @Bean
+    SleepSampleSessionParser sleepSampleSessionParser() {
+        return new SleepSampleSessionParser();
     }
 
     @Bean

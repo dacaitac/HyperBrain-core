@@ -111,6 +111,33 @@ class UserCommandConsumerIT {
     }
 
     @Test
+    @DisplayName("REPLAN_AGENDA carrying a raw HealthKit dump distils a device night (real hours, no raw origin) and replans")
+    void replan_with_sleep_records_device_record_and_plans() {
+        // Given one schedulable task
+        insertTask("Deep work", 0.9, 60);
+
+        // When the «calcular» button fires at noon with the raw stage dump inlined (U+202F and all)
+        UUID commandId = UUID.randomUUID();
+        send(replanWithSleepBody(commandId, NOON), commandId.toString());
+
+        // Then a complete device record lands: real hours (end_time set), a score, the derived
+        // duration (Core 6h + Deep 1h + REM 30m = 450 min), and no raw origin (context_event_id NULL)
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT end_time, sleep_score, duration_minutes, context_event_id
+            FROM tel_sleep_record WHERE user_id = ?
+            """, USER);
+        assertThat(row.get("end_time")).isNotNull();
+        assertThat((Integer) row.get("sleep_score")).isGreaterThan(0);
+        assertThat(row.get("duration_minutes")).isEqualTo(450);
+        assertThat(row.get("context_event_id")).isNull();
+
+        // And the agenda still materializes from the replan (same transaction)
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
+        assertThat(earliestBlockStart()).isAfterOrEqualTo(NOON);
+    }
+
+    @Test
     @DisplayName("SLEEP_SCORE upserts one row per day: a second score for the same day updates in place")
     void sleep_score_upserts_single_daily_row() {
         // When the user reports 85 for the day
@@ -279,6 +306,29 @@ class UserCommandConsumerIT {
               "origin": "USER",
               "occurred_at": "%s",
               "payload": null
+            }
+            """.formatted(commandId, occurredAt);
+    }
+
+    private static String replanWithSleepBody(UUID commandId, OffsetDateTime occurredAt) {
+        // Raw HealthKit dump (the Shortcut's shape) in the user's zone (UTC in this suite), local time
+        // strings with the U+202F narrow no-break space Apple inserts before AM/PM. Core 6 h + Deep 1 h
+        // + REM 30 m → TST 27 000 s = 450 min; window 23:00 → 06:40 on DAY.
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "10/07/2026 at 12:05 PM",
+                "sample": [
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
+                  {"stage":"Deep","startDate":"10/07/2026 at 5:00 AM","endDate":"10/07/2026 at 6:00 AM","duration":"1:00:00"},
+                  {"stage":"REM","startDate":"10/07/2026 at 6:00 AM","endDate":"10/07/2026 at 6:30 AM","duration":"30:00"},
+                  {"stage":"Awake","startDate":"10/07/2026 at 6:30 AM","endDate":"10/07/2026 at 6:40 AM","duration":"10:00"}
+                ]
+              }
             }
             """.formatted(commandId, occurredAt);
     }

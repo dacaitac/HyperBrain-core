@@ -1,14 +1,10 @@
 package com.hyperbrain.planner.infrastructure.telemetry;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
-import com.hyperbrain.planner.domain.model.SleepScoreResult;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
+import com.hyperbrain.planner.domain.port.out.SleepRecordAssembler;
 import com.hyperbrain.planner.domain.port.out.SleepScoreStore;
-import com.hyperbrain.planner.domain.service.SleepScoreCalculator;
 import org.springframework.stereotype.Component;
 
 import java.time.OffsetDateTime;
@@ -18,10 +14,10 @@ import static com.hyperbrain.planner.infrastructure.telemetry.TelemetryPayloads.
 
 /**
  * Normalizes {@code APPLE_HEALTH/SLEEP_SESSION} into a device {@code tel_sleep_record} row (ADR-016).
- * Computes the per-night {@code sleep_score} with the pure {@link SleepScoreCalculator} and persists a
- * complete device record through {@link SleepScoreStore#upsertDeviceSleepRecord}, which enforces
- * device precedence and the frontier invariant already codified in the store — no synthetic-hour
- * markers are created.
+ * Reads the raw payload into a {@link SleepStageSample}, delegates the scoring and stage-breakdown
+ * serialization to the shared {@link SleepRecordAssembler}, and persists the resulting device record
+ * through {@link SleepScoreStore#upsertDeviceSleepRecord}, which enforces device precedence and the
+ * frontier invariant already codified in the store — no synthetic-hour markers are created.
  *
  * <p><b>Expected payload</b> (tolerant reader; missing stage durations default to 0, aliases accepted):
  * <pre>{@code
@@ -42,17 +38,13 @@ class SleepSessionNormalizationStrategy implements TelemetryNormalizationStrateg
     static final String PROVIDER = "APPLE_HEALTH";
     static final String EVENT_TYPE = "SLEEP_SESSION";
 
-    private static final double SECONDS_PER_MINUTE = 60.0;
-
-    private final SleepScoreCalculator calculator;
+    private final SleepRecordAssembler sleepRecordAssembler;
     private final SleepScoreStore sleepScoreStore;
-    private final ObjectMapper objectMapper;
 
-    SleepSessionNormalizationStrategy(SleepScoreCalculator calculator, SleepScoreStore sleepScoreStore,
-                                      ObjectMapper objectMapper) {
-        this.calculator = calculator;
+    SleepSessionNormalizationStrategy(SleepRecordAssembler sleepRecordAssembler,
+                                      SleepScoreStore sleepScoreStore) {
+        this.sleepRecordAssembler = sleepRecordAssembler;
         this.sleepScoreStore = sleepScoreStore;
-        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -81,41 +73,8 @@ class SleepSessionNormalizationStrategy implements TelemetryNormalizationStrateg
             seconds(payload, "unspecified_seconds"),
             seconds(payload, "awake_seconds"));
 
-        SleepScoreResult result = calculator.score(sample);
-        int durationMinutes = (int) Math.round(sample.totalSleepSeconds() / SECONDS_PER_MINUTE);
-        DeviceSleepRecord deviceRecord = new DeviceSleepRecord(
-            start, end, durationMinutes, result.score(), stagesJson(sample, result),
-            record.collectedAt(), record.contextEventId());
-
+        DeviceSleepRecord deviceRecord =
+            sleepRecordAssembler.assemble(sample, record.collectedAt(), record.contextEventId());
         sleepScoreStore.upsertDeviceSleepRecord(record.userId(), deviceRecord, record.zone());
-    }
-
-    /** Serializes the stage durations, derived metrics and sub-scores for {@code tel_sleep_record.stages}. */
-    private String stagesJson(SleepStageSample sample, SleepScoreResult result) {
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("in_bed_seconds", sample.inBedSeconds());
-        root.put("core_seconds", sample.coreSeconds());
-        root.put("deep_seconds", sample.deepSeconds());
-        root.put("rem_seconds", sample.remSeconds());
-        root.put("unspecified_seconds", sample.unspecifiedSeconds());
-        root.put("awake_seconds", sample.awakeSeconds());
-        root.put("tst_hours", result.tstHours());
-        root.put("efficiency", result.efficiency());
-        root.put("deep_fraction", result.deepFraction());
-        root.put("rem_fraction", result.remFraction());
-        root.put("waso_minutes", result.wasoMinutes());
-        root.put("low_confidence", result.lowConfidence());
-        ObjectNode subScores = root.putObject("sub_scores");
-        subScores.put("duration", result.durationSubScore());
-        subScores.put("efficiency", result.efficiencySubScore());
-        subScores.put("deep", result.deepSubScore());
-        subScores.put("rem", result.remSubScore());
-        subScores.put("waso", result.wasoSubScore());
-        try {
-            return objectMapper.writeValueAsString(root);
-        } catch (JsonProcessingException ex) {
-            // The node is built from primitives and boxed doubles; serialization cannot fail.
-            throw new IllegalStateException("Unserializable sleep stages node", ex);
-        }
     }
 }
