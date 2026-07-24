@@ -19,5 +19,7 @@ awslocal sqs create-queue --queue-name core-events \
   --attributes VisibilityTimeout=5
 awslocal sqs create-queue --queue-name ia-jobs \
   --attributes VisibilityTimeout=5
+awslocal sqs create-queue --queue-name telemetry-events \
+  --attributes VisibilityTimeout=5
 
 echo 'HyperBrain queues ready'

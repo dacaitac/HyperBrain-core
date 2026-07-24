@@ -49,6 +49,7 @@ spring:
           apple-commands:         ${SQS_QUEUE_APPLE_COMMANDS:apple-commands.fifo}
           apple-commands-results: ${SQS_QUEUE_APPLE_COMMANDS_RESULTS:apple-commands-results.fifo}
           user-commands:          ${SQS_QUEUE_USER_COMMANDS:user-commands.fifo}
+          telemetry-events:       ${SQS_QUEUE_TELEMETRY_EVENTS:telemetry-events}
 
   # Spring AI (HU-01c H3/H4). The Anthropic provider autoconfiguration is DISABLED by default via
   # spring.ai.model.chat=none, so the app and the whole test suite boot WITHOUT an API key (local/CI
@@ -140,6 +141,36 @@ app:
     expiry-poll-ms:     60000
     scheduling-enabled: true
   telemetry:
+    consumer:
+      # Listener of telemetry-events (ADR-016 raw-first, #59). Deploy-safe default OFF: the Standard
+      # queue is not provisioned until the Infra rollout, and a missing queue fails the listener
+      # container at startup. Enable in prod via APP_TELEMETRY_CONSUMER_ENABLED=true once
+      # telemetry-events (+ DLQ) exists. Integration tests keep it off (competing-listener discipline).
+      enabled: ${APP_TELEMETRY_CONSUMER_ENABLED:false}
+    # Retention sweep of the raw context_event landing zone (ADR-016): NORMALIZED/SKIPPED rows past the
+    # window are purged; ERROR rows are kept for diagnosis. retention-days is a sanctioned MVP default,
+    # CALIBRABLE by Daniel.
+    retention-days: ${APP_TELEMETRY_RETENTION_DAYS:90}
+    retention:
+      cron:               "0 45 3 * * *"
+      scheduling-enabled: true
+    # sleep_score formula calibration (ADR-016 v1.4.0, fixed + validated by the committee). Every value
+    # is a sanctioned MVP default PENDING DANIEL's ratification (a domain formula) — the code falls back
+    # to the same defaults per section when omitted.
+    sleep-score:
+      # Sub-score weights (must sum to 1.0): Duration 45%, Efficiency 30%, Deep 10%, REM 10%, WASO 5%.
+      weights:       { duration: 0.45, efficiency: 0.30, deep: 0.10, rem: 0.10, waso: 0.05 }
+      # Duration (TST) curve, hours: 0 at/below zero-floor, ramp to 100 at full-lower, flat plateau to
+      # plateau-upper (9–10h never penalizes), then a very gentle oversleep slope (points per hour).
+      duration-hours: { zero-floor: 3.0, full-lower: 7.0, plateau-upper: 10.0, oversleep-slope-per-hour: 15.0 }
+      # Efficiency (SE = TST/TIB): 0 at/below zero, 100 at/above full.
+      efficiency:    { zero: 0.75, full: 0.90 }
+      # Deep %N3 band (fraction of TST): full [full-low, full-high], falloff to 0 at zero-low/zero-high.
+      deep-band:     { zero-low: 0.02, full-low: 0.13, full-high: 0.23, zero-high: 0.35 }
+      # REM % band (fraction of TST): full [0.20, 0.25]; the 18–27% tolerance maps to ≈80 via the edges.
+      rem-band:      { zero-low: 0.10, full-low: 0.20, full-high: 0.25, zero-high: 0.35 }
+      # Fragmentation (WASO), minutes: 100 at/below full-max, 0 at/above zero.
+      waso-minutes:  { full-max: 20.0, zero: 60.0 }
     rollup:
       # H0 (#17): daily adherence + behavioral lead-measures rollup. Structured JSON line to stdout —
       # the MVP telemetry sink (ADR-016 raw-first, no new table). Runs early over the PREVIOUS local

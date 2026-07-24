@@ -350,18 +350,74 @@ CREATE TABLE brain_idea (
 CREATE INDEX idx_brain_idea_user      ON brain_idea (user_id);
 CREATE INDEX idx_brain_idea_converted ON brain_idea (converted_to_id);
 
+-- Mirrors HyperBrain-Infra/supabase/migrations/20260723140000_adr016_telemetry_raw_first.sql (S0-07).
+-- context_event is the raw-first landing zone (ADR-016 #59): the TelemetryConsumer inserts every
+-- TelemetryEnvelope here BEFORE any interpretation, so ingestion never fails on payload format.
+--   * dedup_key: semantic idempotency key (provider + external id, or a content hash of the payload).
+--     Uniqueness is enforced by a PARTIAL index over the non-null values so legacy rows are exempt.
+--   * schema_version: version of the provider payload format (tolerant reader in the normalizer).
+--   * ingested_at: when the Core landed the row (distinct from occurred_at); drives the retention sweep.
+--   * normalization_status: PENDING on insert; the normalizer sets NORMALIZED / ERROR; an envelope with
+--     no matching (provider, event_type) strategy is SKIPPED (stays raw, never DLQ'd).
 CREATE TABLE context_event (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id      UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
-    source       TEXT NOT NULL CHECK (source IN ('MANUAL', 'SYSTEM', 'INTEGRATION')),
-    provider     TEXT,
-    event_type   TEXT,
-    content      TEXT,
-    payload      JSONB,
-    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id              UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
+    source               TEXT NOT NULL CHECK (source IN ('MANUAL', 'SYSTEM', 'INTEGRATION')),
+    provider             TEXT,
+    event_type           TEXT,
+    content              TEXT,
+    payload              JSONB,
+    occurred_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    dedup_key            TEXT,
+    schema_version       TEXT,
+    ingested_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    normalization_status TEXT NOT NULL DEFAULT 'PENDING'
+                             CHECK (normalization_status IN ('PENDING', 'NORMALIZED', 'SKIPPED', 'ERROR'))
 );
 
 CREATE INDEX idx_context_event_user ON context_event (user_id);
+
+-- Semantic dedup: at most one raw row per external fact. Partial over non-null so pre-existing rows
+-- (dedup_key IS NULL) never collide.
+CREATE UNIQUE INDEX uq_context_event_dedup_key
+    ON context_event (dedup_key)
+    WHERE dedup_key IS NOT NULL;
+
+-- Reprocessing scan: a new/fixed normalizer re-runs over PENDING/ERROR rows cheaply.
+CREATE INDEX idx_context_event_norm_pending
+    ON context_event (normalization_status)
+    WHERE normalization_status IN ('PENDING', 'ERROR');
+
+-- Retention sweep support: the purge deletes NORMALIZED/SKIPPED rows past the cutoff (ERROR rows are
+-- kept for diagnosis). Partial index makes the sweep an index-only scan.
+CREATE INDEX idx_context_event_retention
+    ON context_event (ingested_at)
+    WHERE normalization_status IN ('NORMALIZED', 'SKIPPED');
+
+-- Traceability from the typed sleep record back to the raw envelope (ADR-016). Optional (manual-score
+-- markers have no raw origin); FK nulled on the raw row's deletion so retention never cascades here.
+-- Added after context_event is created so the FK target exists on a fresh build.
+ALTER TABLE tel_sleep_record
+    ADD COLUMN context_event_id UUID REFERENCES context_event (id) ON DELETE SET NULL;
+
+-- tel_app_usage: typed Screen Time / DeviceActivity table (ADR-016 v1.3/v1.4). The iOS app aggregates
+-- at the edge and sends ONE row per (category, time bucket) — DeviceActivity exposes no window_title,
+-- so this is distinct from tel_activity_stream (RescueTime-desktop schema, left untouched).
+CREATE TABLE tel_app_usage (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id           UUID NOT NULL REFERENCES sys_user (id) ON DELETE CASCADE,
+    bucket_start      TIMESTAMPTZ NOT NULL,
+    bucket_end        TIMESTAMPTZ NOT NULL,
+    category          TEXT NOT NULL,          -- DeviceActivity ActivityCategory token (open set)
+    duration_seconds  INTEGER NOT NULL,
+    pickups           INTEGER,                -- nullable: not every provider reports pickups
+    context_event_id  UUID REFERENCES context_event (id) ON DELETE SET NULL,
+    collected_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Read pattern: "recent usage for a user, newest first" (engine/read-model windows).
+CREATE INDEX idx_tel_app_usage_user_bucket
+    ON tel_app_usage (user_id, bucket_start DESC);
 
 -- embedding dimension: 768 (nomic-embed-text via local Ollama-MLX, ADR-005).
 -- Changing the model requires adjusting vector(N) and rebuilding the HNSW index.
