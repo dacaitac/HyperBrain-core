@@ -16,6 +16,9 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Distils a raw {@link DeviceSleepSamples} dump (HealthKit stages forwarded by the iOS Shortcut) into
@@ -31,10 +34,14 @@ import java.util.Map;
  *   <li><b>Cluster</b> the samples into sessions, splitting whenever a sample starts more than
  *       {@link #DEFAULT_SESSION_GAP} after the running end of the current session, and keep the most
  *       recent session (the last night).</li>
- *   <li><b>Union</b> the intervals of each stage within that session and sum them — Apple Watch revises
- *       stages, so intervals of the same stage overlap and a naive sum would double-count.</li>
- *   <li><b>Window</b> from the session's earliest start to its latest end (time in bed for the
- *       efficiency baseline).</li>
+ *   <li><b>Resolve overlaps</b> across the whole session, not just within a stage. Apple Watch revises
+ *       stages, so intervals overlap both within and <em>across</em> stages (Core/Deep/REM tracks pile
+ *       up). Total sleep time is the union of all asleep intervals on a single timeline — which bounds
+ *       {@code TST ≤ TIB} — and each instant is then attributed to a single stage by a "deepest wins"
+ *       precedence (Deep &gt; REM &gt; Core &gt; Unspecified), so the per-stage seconds sum exactly to
+ *       TST (no double-counting). Awake (WASO) and In Bed are the unions of their own intervals.</li>
+ *   <li><b>Window</b> from the session's earliest start to its latest end (the calculator's time-in-bed
+ *       baseline).</li>
  * </ol>
  *
  * <p>Throws {@link IllegalArgumentException} when no usable night can be built (no parseable samples,
@@ -125,13 +132,22 @@ public class SleepSampleSessionParser {
         return current;
     }
 
-    /** Unions each stage's intervals within the session and derives the in-bed window. */
+    /**
+     * Aggregates the session: asleep stages are overlap-resolved (deepest wins) so they sum to the
+     * asleep-union TST; Awake and In Bed are plain unions; the window spans all samples.
+     */
     private SleepStageSample aggregate(List<StageInterval> session) {
-        Map<StageCategory, List<StageInterval>> byStage = new EnumMap<>(StageCategory.class);
+        List<StageInterval> asleep = new ArrayList<>();
+        List<StageInterval> awake = new ArrayList<>();
+        List<StageInterval> inBed = new ArrayList<>();
         OffsetDateTime windowStart = null;
         OffsetDateTime windowEnd = null;
         for (StageInterval interval : session) {
-            byStage.computeIfAbsent(interval.category(), key -> new ArrayList<>()).add(interval);
+            switch (interval.category()) {
+                case AWAKE -> awake.add(interval);
+                case IN_BED -> inBed.add(interval);
+                default -> asleep.add(interval); // CORE, DEEP, REM, UNSPECIFIED
+            }
             if (windowStart == null || interval.start().isBefore(windowStart)) {
                 windowStart = interval.start();
             }
@@ -139,14 +155,69 @@ public class SleepSampleSessionParser {
                 windowEnd = interval.end();
             }
         }
+        Map<StageCategory, Long> asleepSeconds = resolveAsleepSeconds(asleep);
         return new SleepStageSample(
             windowStart, windowEnd,
-            unionSeconds(byStage.get(StageCategory.IN_BED)),
-            unionSeconds(byStage.get(StageCategory.CORE)),
-            unionSeconds(byStage.get(StageCategory.DEEP)),
-            unionSeconds(byStage.get(StageCategory.REM)),
-            unionSeconds(byStage.get(StageCategory.UNSPECIFIED)),
-            unionSeconds(byStage.get(StageCategory.AWAKE)));
+            unionSeconds(inBed),
+            asleepSeconds.get(StageCategory.CORE),
+            asleepSeconds.get(StageCategory.DEEP),
+            asleepSeconds.get(StageCategory.REM),
+            asleepSeconds.get(StageCategory.UNSPECIFIED),
+            unionSeconds(awake));
+    }
+
+    /**
+     * Attributes each covered instant across the asleep intervals to a single stage by "deepest wins"
+     * precedence (sweep-line). The four returned values sum to the union of all asleep intervals (TST),
+     * so overlapping Core/Deep/REM tracks are never double-counted.
+     */
+    private static Map<StageCategory, Long> resolveAsleepSeconds(List<StageInterval> asleep) {
+        Map<StageCategory, Long> seconds = new EnumMap<>(StageCategory.class);
+        for (StageCategory category : StageCategory.ASLEEP) {
+            seconds.put(category, 0L);
+        }
+        if (asleep.isEmpty()) {
+            return seconds;
+        }
+        NavigableMap<OffsetDateTime, List<StageCategory>> starts = new TreeMap<>();
+        NavigableMap<OffsetDateTime, List<StageCategory>> ends = new TreeMap<>();
+        TreeSet<OffsetDateTime> boundaries = new TreeSet<>();
+        for (StageInterval interval : asleep) {
+            starts.computeIfAbsent(interval.start(), key -> new ArrayList<>()).add(interval.category());
+            ends.computeIfAbsent(interval.end(), key -> new ArrayList<>()).add(interval.category());
+            boundaries.add(interval.start());
+            boundaries.add(interval.end());
+        }
+        Map<StageCategory, Integer> active = new EnumMap<>(StageCategory.class);
+        List<OffsetDateTime> ordered = new ArrayList<>(boundaries);
+        for (int i = 0; i < ordered.size() - 1; i++) {
+            OffsetDateTime from = ordered.get(i);
+            // Apply this boundary's events before measuring [from, next): an interval ending here is no
+            // longer active on the sub-interval, one starting here is.
+            for (StageCategory category : ends.getOrDefault(from, List.of())) {
+                active.merge(category, -1, Integer::sum);
+            }
+            for (StageCategory category : starts.getOrDefault(from, List.of())) {
+                active.merge(category, 1, Integer::sum);
+            }
+            StageCategory winner = deepestActive(active);
+            if (winner != null) {
+                long span = Duration.between(from, ordered.get(i + 1)).toSeconds();
+                seconds.merge(winner, span, Long::sum);
+            }
+        }
+        return seconds;
+    }
+
+    /** The deepest asleep stage currently covering the sweep position, or null when none is active. */
+    private static StageCategory deepestActive(Map<StageCategory, Integer> active) {
+        StageCategory deepest = null;
+        for (Map.Entry<StageCategory, Integer> entry : active.entrySet()) {
+            if (entry.getValue() > 0 && (deepest == null || entry.getKey().priority > deepest.priority)) {
+                deepest = entry.getKey();
+            }
+        }
+        return deepest;
     }
 
     /** Total seconds covered by the union of the intervals (overlaps counted once); 0 when none. */
@@ -195,9 +266,23 @@ public class SleepSampleSessionParser {
     private record StageInterval(StageCategory category, OffsetDateTime start, OffsetDateTime end) {
     }
 
-    /** The HealthKit stage buckets the scorer understands; unknown labels map to none (skipped). */
+    /**
+     * The HealthKit stage buckets the scorer understands; unknown labels map to none (skipped). The
+     * {@code priority} ranks the asleep stages for overlap resolution — deeper sleep wins a contested
+     * instant ({@code DEEP > REM > CORE > UNSPECIFIED}); {@code AWAKE} and {@code IN_BED} are not asleep
+     * stages and carry no priority.
+     */
     private enum StageCategory {
-        CORE, DEEP, REM, AWAKE, IN_BED, UNSPECIFIED;
+        DEEP(4), REM(3), CORE(2), UNSPECIFIED(1), AWAKE(0), IN_BED(0);
+
+        /** The asleep stages that make up total sleep time, deepest first. */
+        static final List<StageCategory> ASLEEP = List.of(DEEP, REM, CORE, UNSPECIFIED);
+
+        private final int priority;
+
+        StageCategory(int priority) {
+            this.priority = priority;
+        }
 
         static StageCategory of(String stage) {
             if (stage == null) {

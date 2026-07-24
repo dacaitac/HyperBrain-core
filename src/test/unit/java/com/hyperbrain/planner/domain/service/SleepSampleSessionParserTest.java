@@ -9,6 +9,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -17,6 +18,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 @DisplayName("SleepSampleSessionParser — raw HealthKit dump → most recent scorable night")
 class SleepSampleSessionParserTest {
@@ -34,19 +36,50 @@ class SleepSampleSessionParserTest {
 
         ParsedSleepNight night = parser.parse(dump, ZONE);
 
-        // The fixture holds two nights; the parser keeps the most recent (22 Jul 23:41 → 23 Jul 07:51)
-        // and unions each stage's overlapping intervals so revised stages are never double-counted.
+        // The fixture holds two nights; the parser keeps the most recent (22 Jul 23:41 → 23 Jul 07:51),
+        // unions all asleep intervals for TST, and resolves cross-stage overlaps by deepest-wins.
         SleepStageSample sample = night.sample();
         assertThat(sample.start()).isEqualTo(OffsetDateTime.parse("2026-07-22T23:41:00Z"));
         assertThat(sample.end()).isEqualTo(OffsetDateTime.parse("2026-07-23T07:51:00Z"));
-        assertThat(sample.coreSeconds()).isEqualTo(20940);
+
+        // TST is the union of every asleep interval on one timeline (~7.45 h), NOT the 40 200 s sum of
+        // per-stage unions, which would falsely exceed time in bed.
+        long tst = sample.totalSleepSeconds();
+        assertThat(tst).isCloseTo(26820L, within(60L));
+        // Overlap-resolved per-stage seconds (Deep > REM > Core) sum exactly to TST — no double-count.
         assertThat(sample.deepSeconds()).isEqualTo(9420);
-        assertThat(sample.remSeconds()).isEqualTo(9840);
+        assertThat(sample.remSeconds()).isEqualTo(7920);
+        assertThat(sample.coreSeconds()).isEqualTo(9480);
+        assertThat(sample.unspecifiedSeconds()).isZero();
+        assertThat(sample.coreSeconds() + sample.deepSeconds() + sample.remSeconds()
+            + sample.unspecifiedSeconds()).isEqualTo(tst);
+
+        // Awake (WASO) and In Bed (TIB ≈ 8.03 h) are plain unions; the invariant TST ≤ TIB now holds.
         assertThat(sample.awakeSeconds()).isEqualTo(3180);
         assertThat(sample.inBedSeconds()).isEqualTo(28920);
-        assertThat(sample.unspecifiedSeconds()).isZero();
+        long windowSeconds = Duration.between(sample.start(), sample.end()).toSeconds();
+        assertThat(tst).isLessThanOrEqualTo(sample.inBedSeconds()).isLessThanOrEqualTo(windowSeconds);
+
         // The capture date ("23/07/2026 at 10:12 PM", with U+202F) is the collection instant.
         assertThat(night.collectedAt()).isEqualTo(OffsetDateTime.parse("2026-07-23T22:12:00Z"));
+    }
+
+    @Test
+    @DisplayName("resolves cross-stage overlaps by deepest-wins so per-stage seconds sum to the asleep union")
+    void resolves_cross_stage_overlap_by_deepest_wins() {
+        // Core spans the whole 2 h; Deep and REM overlap inside it — the deeper stage wins the instant.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 1:00 AM"),   // 23:00–01:00
+            sample("Deep", "09/07/2026 at 11:30 PM", "10/07/2026 at 12:00 AM"),  // 30 m carved from Core
+            sample("REM", "10/07/2026 at 12:00 AM", "10/07/2026 at 12:15 AM"))); // 15 m carved from Core
+
+        SleepStageSample s = parser.parse(dump, ZONE).sample();
+
+        assertThat(s.deepSeconds()).isEqualTo(30 * 60);
+        assertThat(s.remSeconds()).isEqualTo(15 * 60);
+        assertThat(s.coreSeconds()).isEqualTo(2 * 3600 - 45 * 60);
+        assertThat(s.totalSleepSeconds()).isEqualTo(2 * 3600);
+        assertThat(s.coreSeconds() + s.deepSeconds() + s.remSeconds()).isEqualTo(s.totalSleepSeconds());
     }
 
     @Test
