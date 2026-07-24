@@ -1,9 +1,13 @@
 package com.hyperbrain.planner.application;
 
+import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
+import com.hyperbrain.planner.domain.model.ParsedSleepNight;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.planner.domain.port.out.SleepRecordAssembler;
 import com.hyperbrain.planner.domain.port.out.SleepScoreStore;
+import com.hyperbrain.planner.domain.service.SleepSampleSessionParser;
 import com.hyperbrain.shared.messaging.ProcessedMessageStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +47,16 @@ import java.util.UUID;
  * median never sees synthetic hours. Device precedence (Daniel, 2026-07-11): when the day is
  * already owned by a complete device record (hours + score), the manual score is discarded with a
  * WARN — see the store's contract.
+ *
+ * <p><b>Replan sleep enrichment (provisional bridge).</b> A {@code REPLAN_AGENDA} may carry a device
+ * sleep session (HealthKit stages forwarded by an iOS Shortcut). When present it is recorded as a
+ * device record — via the shared {@link SleepRecordAssembler} + {@link SleepScoreStore}, the same
+ * seam the telemetry pipeline uses — <em>before</em> replanning and inside the one dedup transaction,
+ * so the replan (sync or async) sees the fresh sleep; in the async path the write commits with the
+ * dedup insert before the job is emitted, so the {@code AgendaJobConsumer} reads it. The sleep write
+ * is best-effort: an unscorable payload is logged and skipped without failing the replan, and it is
+ * recorded even when the replan itself is dropped by the staleness guard (the night is real
+ * regardless of consumer lag).
  */
 @Service
 public class UserCommandService {
@@ -56,6 +70,8 @@ public class UserCommandService {
     private final AgendaJobEmitter agendaJobEmitter;
     private final PlannerStateRepository plannerStateRepository;
     private final SleepScoreStore sleepScoreStore;
+    private final SleepRecordAssembler sleepRecordAssembler;
+    private final SleepSampleSessionParser sleepSampleSessionParser;
     private final Clock clock;
     private final Duration replanStalenessBound;
     private final boolean asyncMaterializationEnabled;
@@ -66,6 +82,8 @@ public class UserCommandService {
         AgendaJobEmitter agendaJobEmitter,
         PlannerStateRepository plannerStateRepository,
         SleepScoreStore sleepScoreStore,
+        SleepRecordAssembler sleepRecordAssembler,
+        SleepSampleSessionParser sleepSampleSessionParser,
         Clock clock,
         @Value("${app.user-commands.replan-staleness-hours:2}") long replanStalenessHours,
         @Value("${app.planner.materialization.async-enabled:false}") boolean asyncMaterializationEnabled
@@ -75,6 +93,8 @@ public class UserCommandService {
         this.agendaJobEmitter = agendaJobEmitter;
         this.plannerStateRepository = plannerStateRepository;
         this.sleepScoreStore = sleepScoreStore;
+        this.sleepRecordAssembler = sleepRecordAssembler;
+        this.sleepSampleSessionParser = sleepSampleSessionParser;
         this.clock = clock;
         this.replanStalenessBound = Duration.ofHours(replanStalenessHours);
         this.asyncMaterializationEnabled = asyncMaterializationEnabled;
@@ -101,23 +121,69 @@ public class UserCommandService {
     }
 
     private void replanFromNow(UUID userId, UserCommand command) {
-        OffsetDateTime occurredAt = command.occurredAt();
-        OffsetDateTime now = OffsetDateTime.now(clock);
-        if (occurredAt.isBefore(now.minus(replanStalenessBound))) {
-            log.warn("Stale replan command {} discarded: occurred_at {} is older than {}h (now {})",
-                command.commandId(), occurredAt, replanStalenessBound.toHours(), now);
+        boolean stale = isStaleReplan(command.occurredAt());
+        boolean hasSleep = command.sleepSession() != null;
+        // Fast path: a stale replan with no sleep enrichment neither loads state nor replans — the
+        // command stays marked processed so a redelivery of the same stale command stays silent.
+        if (stale && !hasSleep) {
+            logStaleDiscard(command);
             return;
         }
+
         ZoneId zone = plannerStateRepository.loadUserZone(userId);
+        if (hasSleep) {
+            recordDeviceSleep(userId, command, zone);
+        }
+        if (stale) {
+            logStaleDiscard(command);
+            return;
+        }
         if (asyncMaterializationEnabled) {
             // Single-owner cut-over (HU-01c H2): hand the replan to ia-jobs. The enqueue commits in
             // this same dedup transaction, so a redelivery of the command neither re-emits nor
-            // re-materializes. The AgendaJobConsumer runs the 48h window.
-            LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
-            agendaJobEmitter.emitReplanJob(userId, startDay, zone, occurredAt);
+            // re-materializes, and any sleep write above is already durable before the job is read.
+            LocalDate startDay = command.occurredAt().atZoneSameInstant(zone).toLocalDate();
+            agendaJobEmitter.emitReplanJob(userId, startDay, zone, command.occurredAt());
             return;
         }
-        agendaGenerationService.replanAcrossWindow(userId, occurredAt, zone);
+        agendaGenerationService.replanAcrossWindow(userId, command.occurredAt(), zone);
+    }
+
+    private boolean isStaleReplan(OffsetDateTime occurredAt) {
+        return occurredAt.isBefore(OffsetDateTime.now(clock).minus(replanStalenessBound));
+    }
+
+    private void logStaleDiscard(UserCommand command) {
+        log.warn("Stale replan command {} discarded: occurred_at {} is older than {}h (now {})",
+            command.commandId(), command.occurredAt(), replanStalenessBound.toHours(),
+            OffsetDateTime.now(clock));
+    }
+
+    /**
+     * Distils the command's HealthKit dump into the most recent night and records it as a device
+     * record (device precedence), reusing the same assembler + store the telemetry pipeline uses. The
+     * dump is parsed with the user's timezone (its local strings carry none); the capture instant is
+     * the record's {@code collected_at}, falling back to the command's {@code occurred_at} when the
+     * dump omits it. A dump that yields no scorable night (nothing parseable, no asleep time) is logged
+     * and skipped rather than failing the whole command — the replan is the primary action and must
+     * not be lost to a bad enrichment. Parsing and scoring are pure (no SQL), so catching their failure
+     * leaves no partial state; a genuine store fault still propagates for retry.
+     */
+    private void recordDeviceSleep(UUID userId, UserCommand command, ZoneId zone) {
+        DeviceSleepRecord record;
+        try {
+            ParsedSleepNight night = sleepSampleSessionParser.parse(command.sleepSession(), zone);
+            OffsetDateTime collectedAt =
+                night.collectedAt() != null ? night.collectedAt() : command.occurredAt();
+            record = sleepRecordAssembler.assemble(night.sample(), collectedAt, null);
+        } catch (IllegalArgumentException ex) {
+            log.warn("Unusable sleep dump on replan command {} skipped: {}",
+                command.commandId(), ex.getMessage());
+            return;
+        }
+        sleepScoreStore.upsertDeviceSleepRecord(userId, record, zone);
+        log.info("Device sleep (score {}) from replan command {} recorded for user {}",
+            record.sleepScore(), command.commandId(), userId);
     }
 
     private void recordSleepScore(UUID userId, SleepScoreInput input, OffsetDateTime occurredAt) {

@@ -38,7 +38,7 @@ class SleepSessionNormalizationStrategyTest {
     void setUp() {
         sleepScoreStore = mock(SleepScoreStore.class);
         strategy = new SleepSessionNormalizationStrategy(
-            new SleepScoreCalculator(), sleepScoreStore, objectMapper);
+            new JacksonSleepRecordAssembler(new SleepScoreCalculator(), objectMapper), sleepScoreStore);
     }
 
     @Test
