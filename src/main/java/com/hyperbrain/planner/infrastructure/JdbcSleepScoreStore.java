@@ -1,5 +1,6 @@
 package com.hyperbrain.planner.infrastructure;
 
+import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.port.out.SleepScoreStore;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -58,6 +59,32 @@ class JdbcSleepScoreStore implements SleepScoreStore {
         VALUES (?, ?, ?, NULL, ?, ?)
         """;
 
+    /**
+     * The id of the row governing a given local day (any class), used to decide UPDATE vs INSERT when
+     * a device record lands. Rows with real hours rank over markers; recency breaks ties.
+     */
+    private static final String GOVERNING_ROW_ID_SQL = """
+        SELECT id
+        FROM tel_sleep_record
+        WHERE user_id = ?
+          AND (COALESCE(end_time, start_time) AT TIME ZONE ?)::date = ?
+        ORDER BY (end_time IS NOT NULL) DESC, collected_at DESC
+        LIMIT 1
+        """;
+
+    private static final String UPDATE_DEVICE_RECORD_SQL = """
+        UPDATE tel_sleep_record
+        SET start_time = ?, end_time = ?, duration_minutes = ?, sleep_score = ?, stages = ?::jsonb,
+            collected_at = ?, context_event_id = ?
+        WHERE id = ?
+        """;
+
+    private static final String INSERT_DEVICE_RECORD_SQL = """
+        INSERT INTO tel_sleep_record
+            (id, user_id, start_time, end_time, duration_minutes, sleep_score, stages, collected_at, context_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?)
+        """;
+
     private final JdbcTemplate jdbcTemplate;
 
     JdbcSleepScoreStore(JdbcTemplate jdbcTemplate) {
@@ -83,6 +110,27 @@ class JdbcSleepScoreStore implements SleepScoreStore {
         }
         jdbcTemplate.update(UPDATE_SCORE_SQL, score, collectedAt, governing.id());
         return true;
+    }
+
+    @Override
+    public void upsertDeviceSleepRecord(UUID userId, DeviceSleepRecord record, ZoneId zone) {
+        LocalDate wakeDay = record.endTime().atZoneSameInstant(zone).toLocalDate();
+        List<UUID> governing = jdbcTemplate.query(GOVERNING_ROW_ID_SQL,
+            (rs, rowNum) -> rs.getObject("id", UUID.class),
+            userId, zone.getId(), Date.valueOf(wakeDay));
+
+        if (governing.isEmpty()) {
+            jdbcTemplate.update(INSERT_DEVICE_RECORD_SQL,
+                UUID.randomUUID(), userId, record.startTime(), record.endTime(),
+                record.durationMinutes(), record.sleepScore(), record.stagesJson(),
+                record.collectedAt(), record.contextEventId());
+            return;
+        }
+        // Device precedence: convert an existing manual marker — or supersede a prior device record —
+        // into this complete device record, keeping at most one row per day.
+        jdbcTemplate.update(UPDATE_DEVICE_RECORD_SQL,
+            record.startTime(), record.endTime(), record.durationMinutes(), record.sleepScore(),
+            record.stagesJson(), record.collectedAt(), record.contextEventId(), governing.getFirst());
     }
 
     private record DayRow(UUID id, boolean deviceOwned) {

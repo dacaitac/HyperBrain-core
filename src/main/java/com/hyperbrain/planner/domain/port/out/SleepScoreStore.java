@@ -1,5 +1,7 @@
 package com.hyperbrain.planner.domain.port.out;
 
+import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
+
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
@@ -40,4 +42,18 @@ public interface SleepScoreStore {
      */
     boolean upsertDailyScore(UUID userId, LocalDate date, int score, OffsetDateTime collectedAt,
                              ZoneId zone);
+
+    /**
+     * Upserts a device sleep record (ADR-016 telemetry normalization) as the single
+     * {@code tel_sleep_record} row governing its day. The governing day is the record's wake day
+     * ({@code end_time} projected to {@code zone}); a manual score marker for that day is converted
+     * in place into this device record (device precedence), and a prior device record for the same
+     * night is replaced (latest device report wins). Unlike a manual score this row carries real
+     * hours and a score, so it becomes device-owned and a later manual score is discarded.
+     *
+     * @param userId the owning user; never null
+     * @param record the device record (real hours, score, stage breakdown, raw-row trace); never null
+     * @param zone   the user's timezone, used to resolve the governing day; never null
+     */
+    void upsertDeviceSleepRecord(UUID userId, DeviceSleepRecord record, ZoneId zone);
 }
