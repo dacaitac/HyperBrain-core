@@ -3,6 +3,7 @@ package com.hyperbrain.sync.domain.service;
 import com.hyperbrain.sync.domain.model.CycleSnapshot;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static java.util.Collections.singletonMap;
@@ -22,6 +23,8 @@ import static java.util.Collections.singletonMap;
  *   <li>{@code type} ({@code MCI}/{@code GOAL}/{@code OBJECTIVE}/{@code PROJECT}/{@code PHASE}/{@code ROUTINE}) → {@code Type} (select)</li>
  *   <li>{@code start_date}/{@code end_date} → {@code Date} (date-only range)</li>
  *   <li>{@code status} → {@code Inactive} (checkbox, inverted: true iff COMPLETED)</li>
+ *   <li>{@code parent_cycle_id} → {@code Cycle Parent (Objective)} (self-relation; unresolved
+ *       or absent → empty relation list, ADR-015 horizon ladder)</li>
  * </ul>
  *
  * <p>Full-mirror contract (ADR-012 D3): null {@code type}/{@code start_date} clear their
@@ -45,12 +48,15 @@ public final class NotionCycleMapper {
     }
 
     /**
-     * Builds the Notion Cycles property map for one cycle.
+     * Builds the Notion Cycles property map for one cycle. The parent's Notion page id is
+     * supplied by the caller (the propagator resolves it from {@code sync_mappings}), mirroring
+     * how {@link NotionTaskMapper#map} receives the cycle/parent external ids.
      *
-     * @param snapshot the cycle state to propagate
+     * @param snapshot         the cycle state to propagate
+     * @param parentExternalId Notion page id of the parent cycle, or null when unmapped/absent
      * @return an insertion-ordered property map, guaranteed free of read-only properties
      */
-    public static Map<String, Object> map(CycleSnapshot snapshot) {
+    public static Map<String, Object> map(CycleSnapshot snapshot, String parentExternalId) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(NotionSchema.PROP_NAME, NotionTaskMapper.title(snapshot.name()));
         String notionType = snapshot.type() != null ? TYPE_TO_NOTION.get(snapshot.type()) : null;
@@ -64,6 +70,9 @@ public final class NotionCycleMapper {
             : singletonMap("date", null));
         props.put(NotionSchema.PROP_INACTIVE,
             NotionTaskMapper.checkbox("COMPLETED".equals(snapshot.status())));
+        props.put(NotionSchema.PROP_PARENT_CYCLE, parentExternalId != null
+            ? NotionTaskMapper.relation(parentExternalId)
+            : Map.of("relation", List.of()));
         NotionSchema.assertWritable(props);
         return props;
     }

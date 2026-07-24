@@ -19,34 +19,45 @@ class NotionCycleInboundMapperTest {
 
     private static final UUID ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
+    private static final UUID PARENT_ID = UUID.fromString("55555555-5555-5555-5555-555555555555");
 
     @Test
-    @DisplayName("maps every attribute of a fully populated page")
+    @DisplayName("maps every attribute of a fully populated page, including the resolved parent cycle")
     void maps_full_page() {
         // Given
         NotionCyclePage page = new NotionCyclePage(
             "cycle000000000000000000000000001",
             OffsetDateTime.of(2026, 7, 7, 15, 0, 0, 0, ZoneOffset.UTC),
             false,
-            "Sprint 2", "MCI", "2026-07-01", "2026-07-14", false);
+            "Sprint 2", "MCI", "2026-07-01", "2026-07-14", false,
+            "parentcycle00000000000000000001");
 
         // When
-        CycleSnapshot snapshot = NotionCycleInboundMapper.toSnapshot(page, ID, USER_ID);
+        CycleSnapshot snapshot = NotionCycleInboundMapper.toSnapshot(page, ID, USER_ID, PARENT_ID);
 
         // Then
         assertThat(snapshot).usingRecursiveComparison().isEqualTo(new CycleSnapshot(
-            ID, USER_ID, "Sprint 2", "MCI", "ACTIVE",
+            ID, USER_ID, PARENT_ID, "Sprint 2", "MCI", "ACTIVE",
             LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 14)));
+    }
+
+    @Test
+    @DisplayName("a null resolved parent maps to a null parent_cycle_id (unmapped or absent relation)")
+    void maps_without_parent() {
+        CycleSnapshot snapshot =
+            NotionCycleInboundMapper.toSnapshot(page("Routine", false), ID, USER_ID, null);
+
+        assertThat(snapshot.parentCycleId()).isNull();
     }
 
     @Test
     @DisplayName("Inactive checkbox maps to COMPLETED; unchecked or missing maps to ACTIVE")
     void maps_inactive_to_status() {
-        assertThat(NotionCycleInboundMapper.toSnapshot(page("Routine", true), ID, USER_ID).status())
+        assertThat(NotionCycleInboundMapper.toSnapshot(page("Routine", true), ID, USER_ID, null).status())
             .isEqualTo("COMPLETED");
-        assertThat(NotionCycleInboundMapper.toSnapshot(page("Routine", false), ID, USER_ID).status())
+        assertThat(NotionCycleInboundMapper.toSnapshot(page("Routine", false), ID, USER_ID, null).status())
             .isEqualTo("ACTIVE");
-        assertThat(NotionCycleInboundMapper.toSnapshot(page("Routine", null), ID, USER_ID).status())
+        assertThat(NotionCycleInboundMapper.toSnapshot(page("Routine", null), ID, USER_ID, null).status())
             .isEqualTo("ACTIVE");
     }
 
@@ -70,6 +81,6 @@ class NotionCycleInboundMapperTest {
 
     private static NotionCyclePage page(String type, Boolean inactive) {
         return new NotionCyclePage("cycle000000000000000000000000002", null, false,
-            "Sprint 2", type, null, null, inactive);
+            "Sprint 2", type, null, null, inactive, null);
     }
 }

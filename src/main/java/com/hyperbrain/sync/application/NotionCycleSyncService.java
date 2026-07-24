@@ -102,8 +102,10 @@ public class NotionCycleSyncService {
         }
 
         UUID localId = mapping.map(SyncMapping::localId).orElseGet(UUID::randomUUID);
-        CycleSnapshot snapshot = NotionCycleInboundMapper.toSnapshot(page, localId, defaultUserId);
-        Map<String, Object> canonicalProps = NotionCycleMapper.map(snapshot);
+        UUID parentCycleId = resolveParent(page.parentRelationId(), localId);
+        CycleSnapshot snapshot =
+            NotionCycleInboundMapper.toSnapshot(page, localId, defaultUserId, parentCycleId);
+        Map<String, Object> canonicalProps = NotionCycleMapper.map(snapshot, page.parentRelationId());
         if (mapping.isPresent()
             && ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(),
                 canonicalProps, objectMapper)) {
@@ -175,6 +177,36 @@ public class NotionCycleSyncService {
         return syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, cycleExternalId)
             .map(SyncMapping::localId)
             .orElse(null);
+    }
+
+    /**
+     * Resolves the local id of a cycle's {@code Cycle Parent (Objective)} relation (ADR-015
+     * self-nesting). Unlike a task's {@code Cycle} relation, the parent is <b>not</b> imported on
+     * demand: recursing up an arbitrarily deep horizon ladder risks unbounded recursion (and cycles
+     * in malformed data), so an unmapped parent is omitted with a warning and repaired by the next
+     * webhook/backfill of the parent. A parent that resolves to the child itself (self-parent) is
+     * discarded to keep the {@code parent_cycle_id} graph acyclic.
+     *
+     * @param parentExternalId normalized Notion page id of the parent relation, or null
+     * @param selfLocalId      the local id of the cycle being upserted (self-parent guard)
+     * @return the local parent cycle id, or null when unmapped, absent or self-referential
+     */
+    private UUID resolveParent(String parentExternalId, UUID selfLocalId) {
+        if (parentExternalId == null) {
+            return null;
+        }
+        Optional<SyncMapping> parentMapping =
+            syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, parentExternalId);
+        if (parentMapping.isEmpty()) {
+            log.warn("Parent cycle page {} is not mapped yet; relation omitted", parentExternalId);
+            return null;
+        }
+        UUID parentLocalId = parentMapping.get().localId();
+        if (parentLocalId.equals(selfLocalId)) {
+            log.warn("Cycle {} points to itself as parent; self-parent discarded", selfLocalId);
+            return null;
+        }
+        return parentLocalId;
     }
 
     private SyncOutcome deleteMapped(String pageId, Optional<SyncMapping> mapping) {

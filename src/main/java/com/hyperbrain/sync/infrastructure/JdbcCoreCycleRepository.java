@@ -17,14 +17,15 @@ import java.util.UUID;
 class JdbcCoreCycleRepository implements CoreCycleRepository {
 
     private static final String UPSERT_SQL = """
-        INSERT INTO core_cycle (id, user_id, name, type, status, start_date, end_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO core_cycle (id, user_id, parent_cycle_id, name, type, status, start_date, end_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (id) DO UPDATE SET
-            name       = EXCLUDED.name,
-            type       = EXCLUDED.type,
-            status     = EXCLUDED.status,
-            start_date = EXCLUDED.start_date,
-            end_date   = EXCLUDED.end_date
+            parent_cycle_id = EXCLUDED.parent_cycle_id,
+            name            = EXCLUDED.name,
+            type            = EXCLUDED.type,
+            status          = EXCLUDED.status,
+            start_date      = EXCLUDED.start_date,
+            end_date        = EXCLUDED.end_date
         """;
 
     private static final String DELETE_BY_ID_SQL = "DELETE FROM core_cycle WHERE id = ?";
@@ -38,7 +39,7 @@ class JdbcCoreCycleRepository implements CoreCycleRepository {
     @Override
     public void upsert(CycleSnapshot c) {
         jdbcTemplate.update(UPSERT_SQL,
-            c.id(), c.userId(), c.name(), c.type(), c.status(),
+            c.id(), c.userId(), c.parentCycleId(), c.name(), c.type(), c.status(),
             toDate(c.startDate()), toDate(c.endDate()));
     }
 

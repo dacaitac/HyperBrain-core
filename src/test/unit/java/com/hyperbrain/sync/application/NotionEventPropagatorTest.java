@@ -612,7 +612,7 @@ class NotionEventPropagatorTest {
     }
 
     private static CycleSnapshot cycleSnapshot(UUID id) {
-        return new CycleSnapshot(id, USER_ID, "Sprint 2", "MCI", "ACTIVE",
+        return new CycleSnapshot(id, USER_ID, null, "Sprint 2", "MCI", "ACTIVE",
             LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 14));
     }
 

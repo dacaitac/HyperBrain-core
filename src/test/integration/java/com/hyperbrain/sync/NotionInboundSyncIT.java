@@ -299,6 +299,47 @@ class NotionInboundSyncIT {
     }
 
     @Test
+    @DisplayName("bug #3 — a child cycle whose parent is already mapped populates core_cycle.parent_cycle_id (ADR-015)")
+    void child_cycle_links_to_mapped_parent() {
+        // Given a parent cycle already ingested and mapped
+        String parentPageId = newPageId();
+        deliverAutomation(parentPageId, cyclePage(parentPageId, "Objective A", "Objective", false,
+            "2026-07-07T15:00:00.000Z"));
+        UUID parentLocalId = localId(parentPageId);
+
+        // When a child cycle arrives referencing the parent via Cycle Parent (Objective)
+        String childPageId = newPageId();
+        deliverAutomation(childPageId, cyclePageWithParent(childPageId, "Phase 1", "Phase", false,
+            "2026-07-07T15:01:00.000Z", parentPageId));
+
+        // Then the child's parent_cycle_id points to the parent's local id (was always NULL before the fix)
+        assertThat(storedParentOf(childPageId)).isEqualTo(parentLocalId);
+    }
+
+    @Test
+    @DisplayName("bug #3 — re-parenting a cycle in Notion updates core_cycle.parent_cycle_id")
+    void reparenting_a_cycle_updates_parent() {
+        // Given two candidate parents and a child linked to the first
+        String parentA = newPageId();
+        String parentB = newPageId();
+        deliverAutomation(parentA, cyclePage(parentA, "Objective A", "Objective", false,
+            "2026-07-07T15:00:00.000Z"));
+        deliverAutomation(parentB, cyclePage(parentB, "Objective B", "Objective", false,
+            "2026-07-07T15:00:00.000Z"));
+        String childPageId = newPageId();
+        deliverAutomation(childPageId, cyclePageWithParent(childPageId, "Phase 1", "Phase", false,
+            "2026-07-07T15:01:00.000Z", parentA));
+        assertThat(storedParentOf(childPageId)).isEqualTo(localId(parentA));
+
+        // When the user re-parents the child to B
+        deliverAutomation(childPageId, cyclePageWithParent(childPageId, "Phase 1", "Phase", false,
+            "2026-07-07T15:05:00.000Z", parentB));
+
+        // Then the stored parent switches to B
+        assertThat(storedParentOf(childPageId)).isEqualTo(localId(parentB));
+    }
+
+    @Test
     @DisplayName("scenario 6 / CA-31 — burst with a duplicate and an out-of-order delivery converges to the latest state")
     void burst_converges_to_latest_state() {
         String pageId = newPageId();
@@ -644,6 +685,27 @@ class NotionInboundSyncIT {
                "Date":{"type":"date","date":{"start":"2026-07-01","end":"2026-07-14"}},
                "Inactive":{"type":"checkbox","checkbox":%s}}}
             """.formatted(pageId, lastEditedTime, CYCLES_DB, name, type, inactive);
+    }
+
+    private String cyclePageWithParent(String pageId, String name, String type, boolean inactive,
+                                       String lastEditedTime, String parentPageId) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Type":{"type":"select","select":{"name":"%s"}},
+               "Date":{"type":"date","date":{"start":"2026-07-01","end":"2026-07-14"}},
+               "Inactive":{"type":"checkbox","checkbox":%s},
+               "Cycle Parent (Objective)":{"type":"relation","relation":[{"id":"%s"}]}}}
+            """.formatted(pageId, lastEditedTime, CYCLES_DB, name, type, inactive, parentPageId);
+    }
+
+    private UUID storedParentOf(String pageId) {
+        return jdbcTemplate.queryForObject("""
+            SELECT c.parent_cycle_id FROM core_cycle c JOIN sync_mappings m ON m.local_id = c.id
+            WHERE m.external_id = ?
+            """, UUID.class, pageId);
     }
 
     private String trashedPage(String pageId, String lastEditedTime) {

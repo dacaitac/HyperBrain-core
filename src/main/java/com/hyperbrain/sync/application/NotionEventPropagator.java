@@ -304,7 +304,8 @@ public class NotionEventPropagator implements IEventPropagator {
                 localId, event.id());
             return;
         }
-        Map<String, Object> props = NotionCycleMapper.map(snapshot.get());
+        String parentExternalId = resolveMappedExternalId(snapshot.get().parentCycleId());
+        Map<String, Object> props = NotionCycleMapper.map(snapshot.get(), parentExternalId);
         upsertPage(localId, snapshot.get().userId(), properties.getCyclesDataSourceId(), props, null);
     }
 
@@ -464,7 +465,10 @@ public class NotionEventPropagator implements IEventPropagator {
                 cycleId);
             return null;
         }
-        Map<String, Object> props = NotionCycleMapper.map(cycle.get());
+        // The parent relation is only mirrored when the parent already has a page — an unmapped
+        // parent is omitted rather than created in cascade (avoids orphan pages, ADR-015).
+        String parentExternalId = resolveMappedExternalId(cycle.get().parentCycleId());
+        Map<String, Object> props = NotionCycleMapper.map(cycle.get(), parentExternalId);
         String externalId = normalizePageId(
             notion.createPage(properties.getCyclesDataSourceId(), props));
         syncMappingRepo.insert(new SyncMapping(

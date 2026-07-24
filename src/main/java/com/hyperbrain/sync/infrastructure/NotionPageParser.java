@@ -67,7 +67,8 @@ public class NotionPageParser {
             optionName(props.path(NotionSchema.PROP_TYPE), "select"),
             dateBound(props.path(NotionSchema.PROP_DATE), "start"),
             dateBound(props.path(NotionSchema.PROP_DATE), "end"),
-            checkbox(props.path(NotionSchema.PROP_INACTIVE)));
+            checkbox(props.path(NotionSchema.PROP_INACTIVE)),
+            firstRelationId(props.path(NotionSchema.PROP_PARENT_CYCLE)));
     }
 
     /**
