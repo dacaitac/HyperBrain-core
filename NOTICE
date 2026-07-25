@@ -37,6 +37,15 @@ licencia amplia sobre cada contribución (incluido el uso comercial y el
 relicenciamiento).
 
 --------------------------------------------------------------------------------
+Marcas
+--------------------------------------------------------------------------------
+
+La licencia AGPLv3 cubre el CÓDIGO, no la MARCA. El nombre "HyperBrain", su
+logotipo e identidad visual son marcas de Daniel Caita y NO se licencian bajo
+AGPL. Un fork es libre bajo AGPL, pero debe usar un nombre propio. Ver
+TRADEMARKS.md para el detalle del uso permitido y no permitido.
+
+--------------------------------------------------------------------------------
 Contacto
 --------------------------------------------------------------------------------
 
