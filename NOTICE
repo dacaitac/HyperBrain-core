@@ -1,0 +1,43 @@
+HyperBrain-core
+Copyright (c) 2026 Daniel Caita
+
+Este producto está licenciado bajo la GNU Affero General Public License,
+versión 3 (AGPLv3). El texto completo de la licencia se encuentra en el
+archivo LICENSE, en la raíz de este repositorio.
+
+--------------------------------------------------------------------------------
+Estrategia de licenciamiento (open-core)
+--------------------------------------------------------------------------------
+
+HyperBrain-core forma parte de un ecosistema de arquitectura modular (Domain-
+Driven Design + Event-Driven Architecture, con las fronteras entre módulos
+verificadas estructuralmente mediante ArchUnit). Esta modularidad es deliberada
+y tiene una consecuencia de licenciamiento que se hace explícita aquí:
+
+  El titular de los derechos (Daniel Caita) se reserva el derecho de mover
+  módulos específicos a un licenciamiento comercial y/o cerrado en el futuro,
+  sin previo aviso.
+
+Este posible cambio NO es retroactivo. En particular:
+
+  - Todo código ya publicado bajo AGPLv3 permanece disponible bajo AGPLv3 en las
+    versiones (releases, tags y commits) en las que fue liberado. Un cambio de
+    licencia futuro sobre un módulo solo puede afectar a versiones posteriores
+    de ese módulo, nunca a las ya publicadas.
+
+  - El núcleo, el dominio compartido y la infraestructura común están previstos
+    para permanecer bajo AGPLv3. Los módulos candidatos a un futuro licenciamiento
+    comercial se documentan, como referencia orientativa y no vinculante, en el
+    archivo LICENSING.md de este repositorio.
+
+La capacidad de relicenciar se sostiene sobre la titularidad única de los
+derechos: las contribuciones externas se aceptan únicamente bajo el Contributor
+License Agreement (CLA) descrito en CONTRIBUTING.md, que cede al titular una
+licencia amplia sobre cada contribución (incluido el uso comercial y el
+relicenciamiento).
+
+--------------------------------------------------------------------------------
+Contacto
+--------------------------------------------------------------------------------
+
+Daniel Caita — i7.danielcc@gmail.com
