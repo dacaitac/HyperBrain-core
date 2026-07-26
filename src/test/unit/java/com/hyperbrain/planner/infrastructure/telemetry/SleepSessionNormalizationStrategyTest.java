@@ -77,10 +77,10 @@ class SleepSessionNormalizationStrategyTest {
     @Test
     @DisplayName("a session with no stage breakdown persists a low-confidence score, never 0")
     void no_phase_breakdown_persists_low_confidence() {
-        // Only unspecified asleep time, TIB 10h → duration+efficiency 60/40, low confidence.
+        // Only unspecified asleep time, TIB 10h, WASO 10min → duration+efficiency 60/40, low confidence.
         String payload = """
             { "start_time": "2026-07-10T22:00:00Z", "end_time": "2026-07-11T08:00:00Z",
-              "unspecified_seconds": 28800 }
+              "unspecified_seconds": 28800, "awake_seconds": 600 }
             """;
 
         strategy.normalize(record(payload));

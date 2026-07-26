@@ -22,7 +22,11 @@ package com.hyperbrain.planner.domain.model;
  *
  * <p>When the payload carries no stage breakdown the calculator drops the three phase sub-scores and
  * renormalizes duration + efficiency to 60/40 (derived from their weight ratio), flagging low
- * confidence — a missing breakdown never yields 0.
+ * confidence — a missing breakdown never yields 0. Likewise, when the night carries no evidence of
+ * wakefulness (ADR-016 v1.7.0 §2) efficiency and WASO are non-informative and are dropped, leaving
+ * duration + deep + REM renormalized to 69.2/15.4/15.4 (or duration alone at 100 when phases are also
+ * missing), again low-confidence. All renormalized shares are <b>derived</b> from the five base
+ * weights, so overriding {@code app.telemetry.sleep-score.weights.*} recalibrates every branch at once.
  */
 public record SleepScoreConfig(
     double durationWeight,
@@ -81,6 +85,25 @@ public record SleepScoreConfig(
     /** Efficiency weight share once the phase sub-scores are dropped: 30/(45+30) = 0.4. */
     public double efficiencyWeightNoPhase() {
         return efficiencyWeight / (durationWeight + efficiencyWeight);
+    }
+
+    /** Duration weight share once efficiency + WASO are dropped: 45/(45+10+10) = 0.692. */
+    public double durationWeightNoWakeEvidence() {
+        return durationWeight / wakeIndependentWeightSum();
+    }
+
+    /** Deep weight share once efficiency + WASO are dropped: 10/(45+10+10) = 0.154. */
+    public double deepWeightNoWakeEvidence() {
+        return deepWeight / wakeIndependentWeightSum();
+    }
+
+    /** REM weight share once efficiency + WASO are dropped: 10/(45+10+10) = 0.154. */
+    public double remWeightNoWakeEvidence() {
+        return remWeight / wakeIndependentWeightSum();
+    }
+
+    private double wakeIndependentWeightSum() {
+        return durationWeight + deepWeight + remWeight;
     }
 
     private static void requireOrdered(String label, double... breakpoints) {

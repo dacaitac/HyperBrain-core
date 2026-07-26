@@ -9,17 +9,20 @@ package com.hyperbrain.planner.domain.model;
  * job, not the normalizer's: {@code EnergyResolver} maps this score onto the F3/F6 tiers.
  *
  * @param score            the per-night sleep score in {@code [0, 100]}
- * @param lowConfidence    true when computed from duration + efficiency only (no stage breakdown)
+ * @param lowConfidence    true when sub-scores were dropped and the remaining weights renormalized
+ *                         (no stage breakdown, or no evidence of wakefulness)
  * @param tstHours         total sleep time, hours
  * @param efficiency       sleep efficiency TST/TIB, {@code [0, 1]}
  * @param deepFraction     deep sleep as a fraction of TST, {@code [0, 1]}
  * @param remFraction      REM sleep as a fraction of TST, {@code [0, 1]}
  * @param wasoMinutes      wake-after-sleep-onset, minutes
  * @param durationSubScore duration sub-score, {@code [0, 100]}
- * @param efficiencySubScore efficiency sub-score, {@code [0, 100]}
+ * @param efficiencySubScore efficiency sub-score, {@code [0, 100]}; null when the night carries no
+ *                         evidence of wakefulness, which makes efficiency non-informative
  * @param deepSubScore     deep-sleep sub-score, {@code [0, 100]}; null when no stage breakdown
  * @param remSubScore      REM sub-score, {@code [0, 100]}; null when no stage breakdown
- * @param wasoSubScore     fragmentation sub-score, {@code [0, 100]}; null when no stage breakdown
+ * @param wasoSubScore     fragmentation sub-score, {@code [0, 100]}; null when no stage breakdown or
+ *                         no evidence of wakefulness
  */
 public record SleepScoreResult(
     int score,
@@ -30,7 +33,7 @@ public record SleepScoreResult(
     double remFraction,
     double wasoMinutes,
     double durationSubScore,
-    double efficiencySubScore,
+    Double efficiencySubScore,
     Double deepSubScore,
     Double remSubScore,
     Double wasoSubScore
