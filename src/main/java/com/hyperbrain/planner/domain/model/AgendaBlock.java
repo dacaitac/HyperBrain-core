@@ -1,6 +1,9 @@
 package com.hyperbrain.planner.domain.model;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -9,12 +12,26 @@ import java.util.UUID;
  * the {@code wig} / {@code highLoad} flags the {@code AgendaValidator} re-checks against the walls
  * and the F6 quota. Persisted as {@code PLANNED} with {@code origin = PLANNER} once validated.
  *
- * @param executableId the executable this block schedules; never null
- * @param start        the block start instant; never null
- * @param end          the block end instant; never null, strictly after {@code start}
- * @param wig          true for the reserved WIG block (F1) — never expellable by energy nor validator
- * @param highLoad     true when the executable is high-load (counts against the F6 quota)
- * @param reason       the readable placement reason; never blank
+ * <p><b>Membership (ADR-027 D1/D2).</b> The block is a <em>time container</em> that references N
+ * executables. {@link #executableId()} is the block's <b>anchor</b> member — the executable the block
+ * is built around, persisted on {@code core_time_block.executable_id}; {@code additionalMembers}
+ * carries the rest of the theme. The full membership is projected onto {@code core_time_block_member}
+ * and is <b>never</b> what identifies the block: identity is a persisted surrogate reconciled by
+ * anchoring ({@link PlannerBlockIdentity}), so a member entering or leaving the theme can never
+ * regenerate the block id.
+ *
+ * <p><b>WIG atomicity (ADR-027 D4).</b> A WIG block is atomic: it never groups other executables, so
+ * {@code additionalMembers} must be empty when {@code wig} is set.
+ *
+ * @param executableId      the anchor executable this block schedules; never null
+ * @param start             the block start instant; never null
+ * @param end               the block end instant; never null, strictly after {@code start}
+ * @param wig               true for the reserved WIG block (F1) — never expellable by energy nor validator
+ * @param highLoad          true when the executable is high-load (counts against the F6 quota)
+ * @param reason            the readable placement reason; never blank
+ * @param additionalMembers the non-anchor members of the themed block, in presentation order; never
+ *                          null (empty for a single-executable block), never containing the anchor,
+ *                          nulls nor duplicates, and always empty for a WIG block
  */
 public record AgendaBlock(
     UUID executableId,
@@ -22,7 +39,8 @@ public record AgendaBlock(
     OffsetDateTime end,
     boolean wig,
     boolean highLoad,
-    String reason
+    String reason,
+    List<UUID> additionalMembers
 ) {
 
     public AgendaBlock {
@@ -38,10 +56,60 @@ public record AgendaBlock(
         if (reason == null || reason.isBlank()) {
             throw new IllegalArgumentException("reason must not be blank");
         }
+        List<UUID> members =
+            additionalMembers == null ? List.of() : new ArrayList<>(additionalMembers);
+        if (members.contains(null)) {
+            throw new IllegalArgumentException("additionalMembers must not contain null");
+        }
+        if (members.contains(executableId) || new LinkedHashSet<>(members).size() != members.size()) {
+            throw new IllegalArgumentException(
+                "additionalMembers must be distinct and must not repeat the anchor: " + members);
+        }
+        if (wig && !members.isEmpty()) {
+            throw new IllegalArgumentException("a WIG block is atomic and must not group other executables");
+        }
+        additionalMembers = List.copyOf(members);
+    }
+
+    /** Builds a single-executable block — the shape the deterministic floor produces (ADR-027 D4). */
+    public AgendaBlock(UUID executableId, OffsetDateTime start, OffsetDateTime end, boolean wig,
+                       boolean highLoad, String reason) {
+        this(executableId, start, end, wig, highLoad, reason, List.of());
+    }
+
+    /**
+     * @return the block's full membership, anchor first; never null, never empty, immutable
+     */
+    public List<UUID> members() {
+        List<UUID> members = new ArrayList<>(additionalMembers.size() + 1);
+        members.add(executableId);
+        members.addAll(additionalMembers);
+        return List.copyOf(members);
     }
 
     /** @return the block duration in minutes */
     public long durationMinutes() {
         return java.time.Duration.between(start, end).toMinutes();
+    }
+
+    /**
+     * Splits the container's duration across its members as evenly as possible, so
+     * {@code Σ planned_minutes} of the persisted {@code core_time_block_member} rows always equals the
+     * block's duration (ADR-027 D2 — the fine-grained counterpart of the ADR-013 imputation). The
+     * remainder goes to the leading members, keeping the split a pure function of the block.
+     *
+     * @return one planned-minutes share per member, aligned index-by-index with {@link #members()};
+     *         never null, same size as {@code members()}
+     */
+    public List<Integer> memberPlannedMinutes() {
+        int memberCount = additionalMembers.size() + 1;
+        int total = (int) durationMinutes();
+        int share = total / memberCount;
+        int remainder = total % memberCount;
+        List<Integer> minutes = new ArrayList<>(memberCount);
+        for (int index = 0; index < memberCount; index++) {
+            minutes.add(index < remainder ? share + 1 : share);
+        }
+        return List.copyOf(minutes);
     }
 }

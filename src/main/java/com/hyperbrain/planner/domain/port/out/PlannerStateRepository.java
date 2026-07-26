@@ -109,10 +109,12 @@ public interface PlannerStateRepository {
     /**
      * Reconciles the day's regenerable {@code PLANNED}/{@code PLANNER} blocks against a freshly
      * generated plan, <b>preserving block identity</b> so a regeneration converges without churning
-     * the Apple calendar (#15). Each desired block is keyed by its stable id
-     * ({@link com.hyperbrain.planner.domain.model.PlannerBlockIdentity}):
+     * the Apple calendar (#15). Identity is a <b>persisted surrogate</b> reconciled by anchoring
+     * ({@link com.hyperbrain.planner.domain.model.PlannerBlockIdentity}, ADR-027 D3) — never a function
+     * of the block's membership, so a member entering or leaving the theme cannot regenerate the id:
      * <ul>
-     *   <li>a block that survives (same id) is <b>updated</b> in place (new start/end/reason), keeping
+     *   <li>a block the plan continues keeps its id and is <b>updated</b> in place (new
+     *       start/end/reason, new membership on {@code core_time_block_member}), keeping
      *       its {@code core_time_block.id} and therefore its {@code sync_mapping} → the write-back
      *       emits an {@code UPDATE} of the existing EKEvent instead of a duplicate {@code CREATE};</li>
      *   <li>a genuinely new block is <b>inserted</b>;</li>
@@ -121,9 +123,11 @@ public interface PlannerStateRepository {
      *       it is closed by the write-command result loop once Apple confirms the delete).</li>
      * </ul>
      * Scoped to {@code PLANNER}-origin {@code PLANNED} rows: {@code FOCUS}/{@code USER} blocks and any
-     * {@code ACTIVE}/{@code SETTLED} work (which carries telemetry) are never touched, even when a
-     * desired block's stable id would collide with such a row. Must run in the same transaction as the
-     * write-back staging so the plan and its delivery are atomic.
+     * {@code ACTIVE}/{@code SETTLED} work (which carries telemetry) are never touched. An executable
+     * already held by such a live block on the target day keeps its membership there — the D5 invariant
+     * (≤ 1 live block per executable per day) wins over the new plan's projection, and the conflicting
+     * bridge row is skipped rather than letting a constraint violation abort the day. Must run in the
+     * same transaction as the write-back staging so the plan and its delivery are atomic.
      *
      * @param userId    the owning user; never null
      * @param targetDay the calendar day being reconciled; never null

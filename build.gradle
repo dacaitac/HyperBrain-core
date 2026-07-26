@@ -116,13 +116,21 @@ tasks.register('integrationTest', Test) {
     // the shaded default is 1.32, which is rejected.
     systemProperty 'api.version', '1.43'
 
-    // On macOS (Docker Desktop) the socket lives at a non-standard path; on Linux
-    // (ubuntu-latest CI runner) it is /var/run/docker.sock — no override needed.
-    // TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE tells Ryuk which path to mount inside
-    // the container — /var/run/docker.sock is Docker Desktop's canonical in-VM path.
+    // On macOS the docker socket lives at a non-standard path; on Linux (ubuntu-latest CI runner)
+    // it is /var/run/docker.sock — no override needed. TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE tells
+    // Ryuk which path to mount inside the container. An already-exported DOCKER_HOST wins, so a
+    // machine running Colima (or any other daemon) instead of Docker Desktop needs no build edit;
+    // Docker Desktop's canonical paths remain the fallback.
     if (System.getProperty('os.name').toLowerCase().contains('mac')) {
-        environment 'DOCKER_HOST', 'unix:///Users/danielc/.docker/run/docker.sock'
-        environment 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', '/var/run/docker.sock'
+        // Ryuk needs an in-VM *path*, never a URI: both Docker Desktop and Colima serve the daemon
+        // at /var/run/docker.sock inside their VM, so a `unix://` scheme exported in the shell is
+        // ignored rather than propagated (it would abort every test as an invalid volume spec).
+        def socketOverride = System.getenv('TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE')
+        environment 'DOCKER_HOST',
+            System.getenv('DOCKER_HOST') ?: 'unix:///Users/danielc/.docker/run/docker.sock'
+        environment 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE',
+            (socketOverride == null || socketOverride.contains('://'))
+                ? '/var/run/docker.sock' : socketOverride
     }
 }
 

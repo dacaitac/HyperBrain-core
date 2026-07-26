@@ -54,8 +54,10 @@ import java.util.UUID;
  *
  * <p><b>Block identity and reconciliation.</b> Each block is mapped in {@code sync_mappings} under its
  * own {@code core_time_block.id} as {@code local_id}, kept separate from the executable's own mapping
- * so the block event and the task it schedules never collide. Because a regeneration preserves that id
- * (#15, {@code PlannerBlockIdentity}), reusing the HU-09c command log + results loop: a surviving
+ * so the block event and the task it schedules never collide. That id is a persisted surrogate the
+ * regeneration reconciles by anchoring ({@code PlannerBlockIdentity}, ADR-027 D3) and is <b>independent
+ * of the block's membership</b>, so a themed block whose members change still resolves to the same
+ * mapping. Reusing the HU-09c command log + results loop: a surviving
  * mapped block <b>updates</b> its EventKit event, a genuinely new block <b>creates</b> one, and a block
  * the regeneration dropped is carried in {@code removed_block_ids} and <b>deleted</b> from Apple — so a
  * replan reconciles the day's events instead of duplicating them. The {@code WriteCommandResult} closes
