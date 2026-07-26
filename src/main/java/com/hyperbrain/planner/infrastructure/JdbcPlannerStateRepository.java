@@ -170,7 +170,25 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                COALESCE((SELECT sum(b.actual_duration_minutes) FROM core_time_block b
                 WHERE b.executable_id = e.id
                   AND b.actual_duration_minutes IS NOT NULL), 0) AS settled_actual,
-               COALESCE(e.end_time, e.start_time)                AS due_instant
+               COALESCE(e.end_time, e.start_time)                AS due_instant,
+               -- ADR-026 D5: the start of the executable's last vencido (EXPIRED) PLANNER block, from
+               -- which the reschedule derives the hour (D3). Only surfaced when NO live block remains
+               -- for the executable — i.e. the task genuinely needs re-timing; a live PLANNED/ACTIVE
+               -- block means it is already placed and reconciliation (ADR-027) owns its continuity, so
+               -- the seed stays null and the Planner keeps full authorship (D4). Anchor-based
+               -- (core_time_block only), never the membership bridge, so the read is deploy-safe.
+               (SELECT lb.date_start
+                  FROM core_time_block lb
+                 WHERE lb.executable_id = e.id
+                   AND lb.origin = 'PLANNER'
+                   AND lb.status = 'EXPIRED'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM core_time_block live
+                        WHERE live.executable_id = e.id
+                          AND live.origin = 'PLANNER'
+                          AND live.status IN ('PLANNED', 'ACTIVE'))
+                 ORDER BY lb.date_start DESC
+                 LIMIT 1)                                        AS reschedule_seed_start
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
         WHERE e.user_id = ?
@@ -498,8 +516,27 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 rs.getObject("estimated_minutes", Integer.class),
                 rs.getInt("settled_actual"),
                 rs.getObject("due_instant", OffsetDateTime.class),
-                rs.getObject("cycle_id", UUID.class));
+                rs.getObject("cycle_id", UUID.class),
+                rescheduleSeed(rs.getObject("reschedule_seed_start", OffsetDateTime.class), dayStart));
         }, userId, dayStart, dayEnd);
+    }
+
+    /**
+     * Projects the last vencido block's wall-clock time-of-day onto the target day (ADR-026 D5/D3): the
+     * reschedule keeps the executable at the hour the Planner last chose for it, but on the day now
+     * being planned. Returns null when there is no vencido block to reschedule from. The projection
+     * uses the target day's own offset ({@code targetDayStart} is the zone-local midnight resolved
+     * upstream), which is exact for the MVP's fixed-offset zone; a future move across a DST boundary
+     * within the reschedule horizon would shift the wall clock by the offset delta — accepted for MVP.
+     */
+    private static OffsetDateTime rescheduleSeed(OffsetDateTime lastBlockStart,
+                                                 OffsetDateTime targetDayStart) {
+        if (lastBlockStart == null) {
+            return null;
+        }
+        java.time.ZoneOffset offset = targetDayStart.getOffset();
+        java.time.LocalTime timeOfDay = lastBlockStart.withOffsetSameInstant(offset).toLocalTime();
+        return targetDayStart.toLocalDate().atTime(timeOfDay).atOffset(offset);
     }
 
     @Override
