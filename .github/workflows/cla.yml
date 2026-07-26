@@ -1,0 +1,44 @@
+name: CLA Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# Necesario para que la action pueda comentar en el PR y escribir el fichero de firmas.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-assistant:
+    runs-on: ubuntu-latest
+    # Corre al cerrar el PR (para el "recheck") o cuando se comenta la aceptación.
+    if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+    steps:
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Registro de firmas en una rama órfana dedicada (fuera de main).
+          path-to-signatures: 'signatures/cla.json'
+          branch: 'cla-signatures'
+          path-to-document: 'https://github.com/dacaitac/HyperBrain-core/blob/main/CLA.md'
+
+          # Textos del bot.
+          custom-notsigned-prcomment: >
+            Gracias por tu contribución a **HyperBrain-core**. Antes de poder
+            aceptar este PR necesitamos que firmes nuestro **Contributor License
+            Agreement (CLA)**. Lee el [CLA / CONTRIBUTING.md](https://github.com/dacaitac/HyperBrain-core/blob/main/CONTRIBUTING.md)
+            y, si estás de acuerdo, responde en este PR con el siguiente comentario:
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          custom-allsigned-prcomment: >
+            ✅ Todas las personas que han contribuido han firmado el CLA. ¡Gracias!
+            ¿Dudas sobre el CLA? Contacto de soporte: **i7.danielcc@gmail.com**.
+
+          # No exigir el CLA al propio titular ni a los bots.
+          allowlist: dacaitac,bot*
