@@ -252,6 +252,23 @@ class AppleEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("AGENDA regression (ADR-028/ADR-009): DELETE is a no-op because AGENDA is never mapped "
+        + "— its UPDATE/CREATE is already rejected above, so no sync_mapping is ever created for it")
+    void agenda_delete_is_a_no_op_because_agenda_is_never_mapped() {
+        // Given — AGENDA is read-only and never reaches a mapped state (see
+        // agenda_executable_is_rejected above); propagateDelete only checks sync_mapping presence
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID)).thenReturn(Optional.empty());
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableDeletedEvent", "SYSTEM",
+            "{\"type\":\"AGENDA\"}"));
+
+        // Then
+        verify(commandPublisher, never()).publish(any(), anyString());
+        verifyNoInteractions(commandLogRepo);
+    }
+
+    @Test
     @DisplayName("system-generated executable is internal accounting and is never written back to Apple")
     void system_generated_executable_is_not_written_back() {
         // Given a focus-switch snapshot subtask (ADR-013 DR-06): the flag short-circuits before

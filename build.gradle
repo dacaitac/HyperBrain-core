@@ -116,12 +116,16 @@ tasks.register('integrationTest', Test) {
     // the shaded default is 1.32, which is rejected.
     systemProperty 'api.version', '1.43'
 
-    // On macOS (Docker Desktop) the socket lives at a non-standard path; on Linux
-    // (ubuntu-latest CI runner) it is /var/run/docker.sock — no override needed.
-    // TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE tells Ryuk which path to mount inside
-    // the container — /var/run/docker.sock is Docker Desktop's canonical in-VM path.
+    // On macOS the socket lives at a non-standard path (Docker Desktop or Colima); on
+    // Linux (ubuntu-latest CI runner) it is /var/run/docker.sock — no override needed.
+    // TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE tells Ryuk which path to mount inside the
+    // container — /var/run/docker.sock is the canonical in-VM path for either engine.
+    // Inherits DOCKER_HOST from the launching shell (set by Docker Desktop or `colima
+    // start`) instead of hardcoding one engine's socket path, so switching engines
+    // locally needs no build.gradle edit.
     if (System.getProperty('os.name').toLowerCase().contains('mac')) {
-        environment 'DOCKER_HOST', 'unix:///Users/danielc/.docker/run/docker.sock'
+        String dockerHost = System.getenv('DOCKER_HOST') ?: 'unix:///Users/danielc/.docker/run/docker.sock'
+        environment 'DOCKER_HOST', dockerHost
         environment 'TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE', '/var/run/docker.sock'
     }
 }
