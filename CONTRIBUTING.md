@@ -15,7 +15,8 @@ ser aceptado.** No se fusiona ningún PR de un tercero sin la firma registrada.
 
 La firma es automática y sin fricción: al abrir tu primer PR, el bot de
 **CLA Assistant** comentará con las instrucciones y registrará tu firma. No hay
-papeleo manual.
+papeleo manual. El texto contractual completo vive en **[CLA.md](CLA.md)** (esta
+sección es un resumen no vinculante de aquél).
 
 ### Qué cedes al firmar
 
