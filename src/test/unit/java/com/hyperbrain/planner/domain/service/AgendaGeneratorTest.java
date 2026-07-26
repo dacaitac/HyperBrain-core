@@ -112,6 +112,48 @@ class AgendaGeneratorTest {
     }
 
     @Test
+    @DisplayName("ADR-027 D4: the WIG block stays atomic — it never groups other executables")
+    void wig_block_is_atomic_and_never_groups() {
+        // A WIG lead measure alongside several rankable tasks: the reserved WIG block must carry only
+        // its own lead measure (no companions folded in), so the wigHit signal is unambiguous.
+        UUID leadMeasureId = UUID.randomUUID();
+        MciWig wig = mci(leadMeasureId, 0.3, 0.5);
+        List<SchedulableExecutable> ranked = List.of(task(0.9, 60), task(0.8, 60), task(0.7, 60));
+        PlannerDayState state = state(ranked, List.of(wig), List.of(), NEUTRAL, true);
+
+        Agenda agenda = generator.generate(state);
+
+        AgendaBlock wigBlock = agenda.blocks().stream().filter(AgendaBlock::wig).findFirst().orElseThrow();
+        assertThat(wigBlock.additionalMembers()).isEmpty();
+        assertThat(wigBlock.members()).containsExactly(leadMeasureId);
+    }
+
+    @Test
+    @DisplayName("ADR-027 D5: an executable placed as its MCI's WIG is not scheduled again from the ranking")
+    void executable_is_placed_in_at_most_one_block_per_day() {
+        // The WIG lead measure is ALSO present in the ranked list (a common case: the lead measure is a
+        // real, rankable executable). It must produce exactly one block for the day — the reserved WIG —
+        // never a second block from the rank fill, and no executable id may appear in two blocks.
+        UUID leadMeasureId = UUID.randomUUID();
+        MciWig wig = mci(leadMeasureId, 0.3, 0.5);
+        SchedulableExecutable leadInRanking = highLoadWithId(leadMeasureId, 0.99, 45);
+        SchedulableExecutable other = task(0.5, 60);
+        PlannerDayState state =
+            state(List.of(leadInRanking, other), List.of(wig), List.of(), NEUTRAL, true);
+
+        Agenda agenda = generator.generate(state);
+
+        assertThat(agenda.blocks())
+            .filteredOn(b -> b.executableId().equals(leadMeasureId))
+            .singleElement()
+            .satisfies(b -> assertThat(b.wig()).isTrue());
+        List<UUID> allMembers = agenda.blocks().stream()
+            .flatMap(b -> b.members().stream())
+            .toList();
+        assertThat(allMembers).doesNotHaveDuplicates();
+    }
+
+    @Test
     @DisplayName("F1 defect (a): an MCI with no lead measure is excluded with an alert, never NaN")
     void mci_without_lead_measure_is_excluded_with_alert() {
         UUID mciId = UUID.randomUUID();

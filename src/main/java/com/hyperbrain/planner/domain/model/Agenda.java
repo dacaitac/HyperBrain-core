@@ -1,6 +1,8 @@
 package com.hyperbrain.planner.domain.model;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -18,6 +20,15 @@ import java.util.UUID;
  *   <li>{@code degraded} — true when the floor fell back to F5 (WIG + a few urgents) on missing data
  *       or partial failure.</li>
  * </ul>
+ *
+ * <p><b>Daily uniqueness invariant (ADR-027 D5).</b> An executable belongs to <b>at most one block on a
+ * day</b>: no executable id may appear in more than one block's membership (anchor or companion) across
+ * {@code blocks}. This is the in-memory half of the invariant that a unique index on
+ * {@code core_time_block_member} enforces at the storage layer; the aggregate rejects a violating day
+ * at construction so a grouping bug can never smuggle the same executable into two themes the same day
+ * (which would double-count its effort and split its {@code wigHit} signal). The generator already
+ * upholds it by skipping an already-{@code placed} executable; this guard makes it a hard aggregate
+ * invariant regardless of who composed the blocks.
  *
  * @param blocks          the placed blocks, chronological; never null
  * @param excluded        the excluded executables with reasons; never null
@@ -39,6 +50,15 @@ public record Agenda(
         paused = paused == null ? List.of() : List.copyOf(paused);
         if (energyCriterion == null || energyCriterion.isBlank()) {
             throw new IllegalArgumentException("energyCriterion must not be blank");
+        }
+        Set<UUID> seen = new HashSet<>();
+        for (AgendaBlock block : blocks) {
+            for (UUID member : block.members()) {
+                if (!seen.add(member)) {
+                    throw new IllegalArgumentException(
+                        "an executable may belong to at most one block per day (ADR-027 D5): " + member);
+                }
+            }
         }
     }
 }
