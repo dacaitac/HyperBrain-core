@@ -123,6 +123,50 @@ class AgendaBlockReplanWriteBackIT {
     }
 
     @Test
+    @DisplayName("a themed container is titled with its theme and lists its members in the note (ADR-027 D1)")
+    void themed_container_is_titled_by_theme_and_lists_members() throws Exception {
+        UUID anchor = insertExecutable("Write the report");
+        UUID companion = insertExecutable("Review PRs");
+        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC, List.of(
+            new AgendaBlock(anchor, BLOCK_START, BLOCK_END, false, false, "Ranked by priority",
+                List.of(companion), "Deep work morning")));
+        insertAgendaBlockEvent(List.of());
+
+        outboxWorker.drainBatch();
+
+        // One EKEvent-container per block: the theme titles it and the members live in the note. The
+        // grouping does not nest — each member keeps its own Apple entity (EventKit has no subtasks).
+        JsonNode command = objectMapper.readTree(receiveOne(COMMANDS_QUEUE).orElseThrow().getPayload());
+        assertThat(command.path("command_type").asText()).isEqualTo("CALENDAR_EVENT");
+        assertThat(command.path("payload").path("title").asText()).isEqualTo("Deep work morning");
+        String notes = command.path("payload").path("notes").asText();
+        assertThat(notes)
+            .contains("Write the report")
+            .contains("Review PRs")
+            .contains("Ranked by priority")
+            .contains("Sleep Score 80");
+        assertThat(drainCommands()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a themeless single-executable block keeps the anchor's name as title, with no member list")
+    void themeless_block_keeps_the_anchor_name() throws Exception {
+        UUID anchor = insertExecutable("Write the report");
+        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC,
+            List.of(new AgendaBlock(anchor, BLOCK_START, BLOCK_END, false, false, "Ranked by priority")));
+        insertAgendaBlockEvent(List.of());
+
+        outboxWorker.drainBatch();
+
+        // The deterministic floor leaves the theme null: the calendar reads exactly as before ADR-027.
+        JsonNode command = objectMapper.readTree(receiveOne(COMMANDS_QUEUE).orElseThrow().getPayload());
+        assertThat(command.path("payload").path("title").asText()).isEqualTo("Write the report");
+        assertThat(command.path("payload").path("notes").asText())
+            .doesNotContain("In this block:")
+            .startsWith("Ranked by priority");
+    }
+
+    @Test
     @DisplayName("a block dropped from the plan is DELETED on Apple and its mapping is closed (no orphan)")
     void removed_block_is_deleted_and_mapping_closed() throws Exception {
         // Given a block that was delivered on a prior run but is absent from the new plan: only its

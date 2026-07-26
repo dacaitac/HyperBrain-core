@@ -114,6 +114,35 @@ class AgendaValidatorTest {
     }
 
     @Test
+    @DisplayName("wall: a read-only AGENDA executable smuggled in as a companion is rejected too (ADR-027)")
+    void rejects_agenda_executable_riding_as_a_companion() {
+        UUID agendaId = UUID.randomUUID();
+        UUID anchorId = UUID.randomUUID();
+        // The anchor is legitimate work; the read-only AGENDA executable rides along in the theme.
+        AgendaBlock block = new AgendaBlock(anchorId, WAKE, WAKE.plusMinutes(60), false, false, "r",
+            List.of(agendaId));
+
+        ValidatedAgenda result = validator.validate(List.of(block), context(3, Set.of(agendaId)));
+
+        assertThat(result.accepted()).isEmpty();
+        assertThat(result.violations()).singleElement()
+            .satisfies(v -> assertThat(v.wall()).isEqualTo(Wall.SCHEDULES_READ_ONLY_AGENDA));
+    }
+
+    @Test
+    @DisplayName("a themed container whose members are all schedulable clears the walls")
+    void accepts_a_themed_container_of_schedulable_work() {
+        UUID anchorId = UUID.randomUUID();
+        AgendaBlock block = new AgendaBlock(anchorId, WAKE, WAKE.plusMinutes(60), false, false, "r",
+            List.of(UUID.randomUUID(), UUID.randomUUID()));
+
+        ValidatedAgenda result = validator.validate(List.of(block), context(3, Set.of()));
+
+        assertThat(result.accepted()).containsExactly(block);
+        assertThat(result.violations()).isEmpty();
+    }
+
+    @Test
     @DisplayName("F6: a high-load block beyond the quota is rejected")
     void rejects_high_load_beyond_quota() {
         AgendaBlock h1 = block(WAKE, WAKE.plusMinutes(60), false, true);
