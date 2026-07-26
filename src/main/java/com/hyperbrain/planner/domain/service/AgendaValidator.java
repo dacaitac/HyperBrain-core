@@ -20,7 +20,8 @@ import java.util.List;
  *
  * <p><b>Walls re-imposed</b> (planner engine doc, ADR-009/ADR-013 D2), in evaluation order per block:
  * <ol>
- *   <li>a read-only AGENDA executable is never schedulable as work (ADR-009);</li>
+ *   <li>a read-only AGENDA executable is never schedulable as work (ADR-009) — checked against
+ *       <b>every member</b> of the block, not only its anchor (ADR-027 D1);</li>
  *   <li>no block may fall outside the sleep frontier {@code [wake, bedtime]} (ADR-013 D2);</li>
  *   <li>no block may overlap a read-only AGENDA window (ADR-009);</li>
  *   <li>no block may overlap an occupied/SETTLED block or a previously accepted block;</li>
@@ -82,7 +83,10 @@ public class AgendaValidator {
      */
     private static Wall firstWall(AgendaBlock block, ValidationContext context,
                                   List<OccupiedInterval> walls, int highLoadUsed) {
-        if (context.readOnlyAgendaIds().contains(block.executableId())) {
+        // Checked across the whole membership, not just the anchor (ADR-027 D1): a themed container
+        // that smuggles a read-only AGENDA executable in as a companion is just as illegal as one
+        // anchored on it.
+        if (block.members().stream().anyMatch(context.readOnlyAgendaIds()::contains)) {
             return Wall.SCHEDULES_READ_ONLY_AGENDA;
         }
         if (outsideFrontier(block, context)) {

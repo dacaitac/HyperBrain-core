@@ -1,6 +1,8 @@
 package com.hyperbrain.planner;
 
 import com.hyperbrain.planner.domain.model.AgendaBlock;
+import com.hyperbrain.planner.domain.model.PlannedBlockMember;
+import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -190,6 +192,62 @@ class PlannerBlockMembershipIT {
     }
 
     @Test
+    @DisplayName("the write-back read returns the container with its theme and ordered membership")
+    void write_back_read_returns_theme_and_membership() {
+        UUID anchor = insertTask("Write the report");
+        UUID companion = insertTask("Review PRs");
+        repository.reconcilePlannedBlocks(USER, DAY, ZONE, List.of(
+            new AgendaBlock(anchor, at(9), at(11), false, false, "Ranked by priority",
+                List.of(companion), "Deep work morning")));
+
+        List<PlannedBlockRecord> blocks = repository.loadPlannedBlocksForDay(USER, DAY, ZONE);
+
+        assertThat(blocks).singleElement().satisfies(block -> {
+            assertThat(block.theme()).isEqualTo("Deep work morning");
+            assertThat(block.title()).isEqualTo("Deep work morning");
+            assertThat(block.grouped()).isTrue();
+            assertThat(block.members()).extracting(PlannedBlockMember::name)
+                .containsExactly("Write the report", "Review PRs");
+            assertThat(block.members()).extracting(PlannedBlockMember::ord).containsExactly(0, 1);
+            // The split of the container's duration is coherent with its window (ADR-027 D2).
+            assertThat(block.members().stream().mapToInt(PlannedBlockMember::plannedMinutes).sum())
+                .isEqualTo(120);
+        });
+    }
+
+    @Test
+    @DisplayName("a block with no bridge row still reads back through its anchor (legacy/skipped rows)")
+    void block_without_bridge_rows_falls_back_to_the_anchor() {
+        UUID anchor = insertTask("Legacy block");
+        // A block persisted before the ADR-027 migration: no core_time_block_member row at all.
+        insertRawBlock(anchor, 9, 10, "PLANNED", "PLANNER");
+
+        List<PlannedBlockRecord> blocks = repository.loadPlannedBlocksForDay(USER, DAY, ZONE);
+
+        assertThat(blocks).singleElement().satisfies(block -> {
+            assertThat(block.members()).extracting(PlannedBlockMember::executableId)
+                .containsExactly(anchor);
+            assertThat(block.title()).isEqualTo("Legacy block");
+            assertThat(block.grouped()).isFalse();
+        });
+    }
+
+    @Test
+    @DisplayName("the theme is persisted on the container and cleared when a replan drops it")
+    void theme_is_persisted_and_cleared() {
+        UUID anchor = insertTask("Anchor");
+        repository.reconcilePlannedBlocks(USER, DAY, ZONE, List.of(
+            new AgendaBlock(anchor, at(9), at(10), false, false, "why", List.of(), "Deep work")));
+        assertThat(persistedTheme()).isEqualTo("Deep work");
+
+        // A deterministic regeneration carries no theme: the column follows the current plan.
+        repository.reconcilePlannedBlocks(USER, DAY, ZONE,
+            List.of(new AgendaBlock(anchor, at(9), at(10), false, false, "why")));
+
+        assertThat(persistedTheme()).isNull();
+    }
+
+    @Test
     @DisplayName("a block dropped from the plan takes its bridge rows with it (cascade)")
     void dropped_block_removes_its_membership() {
         UUID anchor = insertTask("Anchor");
@@ -246,6 +304,11 @@ class PlannerBlockMembershipIT {
     private UUID onlyBlockId() {
         return jdbcTemplate.queryForObject(
             "SELECT id FROM core_time_block WHERE origin = 'PLANNER'", UUID.class);
+    }
+
+    private String persistedTheme() {
+        return jdbcTemplate.queryForObject(
+            "SELECT theme FROM core_time_block WHERE origin = 'PLANNER'", String.class);
     }
 
     private UUID blockIdOfAnchor(UUID executableId) {

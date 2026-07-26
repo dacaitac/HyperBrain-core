@@ -6,6 +6,7 @@ import com.hyperbrain.planner.domain.model.LearnedUnitCost;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
@@ -318,14 +319,15 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      */
     private static final String UPSERT_BLOCK_SQL = """
         INSERT INTO core_time_block
-            (id, executable_id, date_start, date_end, status, origin, planned_minutes, reason)
-        VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?, ?)
+            (id, executable_id, date_start, date_end, status, origin, planned_minutes, reason, theme)
+        VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?, ?, ?)
         ON CONFLICT (id) DO UPDATE
            SET executable_id   = EXCLUDED.executable_id,
                date_start      = EXCLUDED.date_start,
                date_end        = EXCLUDED.date_end,
                planned_minutes = EXCLUDED.planned_minutes,
-               reason          = EXCLUDED.reason
+               reason          = EXCLUDED.reason,
+               theme           = EXCLUDED.theme
          WHERE core_time_block.status = 'PLANNED'
            AND core_time_block.origin = 'PLANNER'
         """;
@@ -401,22 +403,34 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND origin = 'PLANNER'
         """;
 
-    /** Re-reads the day's persisted planner blocks with their executable names for the write-back. */
+    /**
+     * Re-reads the day's persisted planner blocks with their theme and <b>one row per member</b>
+     * (ADR-027 D1/D2), each joined to its executable's display name for the write-back. The join to
+     * {@code core_time_block_member} is a LEFT JOIN with a fallback onto the anchor
+     * {@code core_time_block.executable_id}: a block carrying no bridge row (persisted before the
+     * migration, or whose membership the D5 guard skipped) still yields exactly one member, so the
+     * write-back never loses a block.
+     */
     private static final String PLANNED_BLOCKS_FOR_DAY_SQL = """
         SELECT b.id,
-               b.executable_id,
-               e.name AS executable_name,
+               b.theme,
                b.date_start,
-               COALESCE(b.date_end, b.date_start + interval '1 minute') AS date_end,
-               b.reason
+               COALESCE(b.date_end, b.date_start + interval '1 minute')  AS date_end,
+               b.reason,
+               COALESCE(m.executable_id, b.executable_id)                AS member_id,
+               COALESCE(me.name, e.name)                                 AS member_name,
+               COALESCE(m.planned_minutes, b.planned_minutes, 0)         AS member_minutes,
+               COALESCE(m.ord, 0)                                        AS member_ord
         FROM core_time_block b
         JOIN core_executable e ON e.id = b.executable_id
+        LEFT JOIN core_time_block_member m ON m.block_id = b.id
+        LEFT JOIN core_executable me ON me.id = m.executable_id
         WHERE e.user_id = ?
           AND b.status = 'PLANNED'
           AND b.origin = 'PLANNER'
           AND b.date_start >= ?
           AND b.date_start < ?
-        ORDER BY b.date_start, b.id
+        ORDER BY b.date_start, b.id, member_ord
         """;
 
     /** Display names of a set of executables for the LLM-facing read model (#61, H3). */
@@ -597,6 +611,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             ps.setObject(4, block.end());
             ps.setObject(5, (int) block.durationMinutes());
             ps.setString(6, block.reason());
+            ps.setString(7, block.theme());
         });
         insertBlockMembers(userId, targetDay, identified);
 
@@ -673,14 +688,30 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                                                             ZoneId zone) {
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
-        return jdbcTemplate.query(PLANNED_BLOCKS_FOR_DAY_SQL, (rs, rowNum) -> new PlannedBlockRecord(
-                rs.getObject("id", UUID.class),
-                rs.getObject("executable_id", UUID.class),
-                rs.getString("executable_name"),
-                rs.getObject("date_start", OffsetDateTime.class),
-                rs.getObject("date_end", OffsetDateTime.class),
-                rs.getString("reason")),
-            userId, dayStart, dayEnd);
+        Map<UUID, PlannedBlockAccumulator> accumulators = new LinkedHashMap<>();
+        jdbcTemplate.query(PLANNED_BLOCKS_FOR_DAY_SQL, rs -> {
+            UUID blockId = rs.getObject("id", UUID.class);
+            PlannedBlockAccumulator accumulator = accumulators.get(blockId);
+            if (accumulator == null) {
+                accumulator = new PlannedBlockAccumulator(
+                    rs.getString("theme"),
+                    rs.getObject("date_start", OffsetDateTime.class),
+                    rs.getObject("date_end", OffsetDateTime.class),
+                    rs.getString("reason"));
+                accumulators.put(blockId, accumulator);
+            }
+            accumulator.members().add(new PlannedBlockMember(
+                rs.getObject("member_id", UUID.class),
+                rs.getString("member_name"),
+                rs.getInt("member_minutes"),
+                rs.getInt("member_ord")));
+        }, userId, dayStart, dayEnd);
+
+        return accumulators.entrySet().stream()
+            .map(entry -> new PlannedBlockRecord(
+                entry.getKey(), entry.getValue().theme(), entry.getValue().members(),
+                entry.getValue().start(), entry.getValue().end(), entry.getValue().reason()))
+            .toList();
     }
 
     @Override
@@ -704,6 +735,16 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
 
         PersistedBlockAccumulator(OffsetDateTime start, OffsetDateTime end) {
             this(new LinkedHashSet<>(), start, end);
+        }
+    }
+
+    /** Groups the joined block/member rows of {@link #loadPlannedBlocksForDay} into one block. */
+    private record PlannedBlockAccumulator(List<PlannedBlockMember> members, String theme,
+                                           OffsetDateTime start, OffsetDateTime end, String reason) {
+
+        PlannedBlockAccumulator(String theme, OffsetDateTime start, OffsetDateTime end,
+                                String reason) {
+            this(new ArrayList<>(), theme, start, end, reason);
         }
     }
 

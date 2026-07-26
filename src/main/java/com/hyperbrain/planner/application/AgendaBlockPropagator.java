@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
 import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
+import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
@@ -78,6 +79,8 @@ public class AgendaBlockPropagator implements IEventPropagator {
     private static final String STATUS_PENDING = "PENDING";
     /** HyperBrain's own writable calendar — never a read-only AGENDA calendar (ADR-009). */
     private static final String DESTINATION_CALENDAR_NAME = "HyperBrain";
+    /** Heading of the member list a themed container carries in its note (ADR-027 D1). */
+    private static final String MEMBERS_NOTE_HEADING = "In this block:";
 
     private final PlannerStateRepository plannerStateRepository;
     private final SyncMappingRepository syncMappingRepo;
@@ -193,13 +196,14 @@ public class AgendaBlockPropagator implements IEventPropagator {
         // A time-boxed calendar event (start + end), not a reminder: the block's duration must not be
         // lost. Written to HyperBrain's own writable calendar, never a read-only AGENDA one (ADR-009);
         // all_day is left false — SentinelAPI derives it at the Apple boundary. calendar_id is empty
-        // so SentinelAPI resolves the target by name.
+        // so SentinelAPI resolves the target by name. The title is the container's theme (ADR-027 D1),
+        // falling back to the anchor's name on a deterministic day.
         CalendarEventPayload payload = new CalendarEventPayload(
-            block.executableName(),
+            block.title(),
             block.start(),
             block.end(),
             false,
-            eventNotes(block.reason(), energyCriterion),
+            eventNotes(block, energyCriterion),
             "",
             DESTINATION_CALENDAR_NAME,
             null);
@@ -258,22 +262,38 @@ public class AgendaBlockPropagator implements IEventPropagator {
     }
 
     /**
-     * Builds the event notes: the block's placement reason followed by the day's readable energy
-     * criterion, so every block explains why it is there and how the day's load was sized
-     * (legibilidad obligatoria).
+     * Builds the event notes: the themed container's member list (only when it actually groups more
+     * than one executable), then the block's placement reason, then the day's readable energy
+     * criterion — so every block explains what it holds, why it is there and how the day's load was
+     * sized (legibilidad obligatoria).
+     *
+     * <p>The member list lives <b>here, on the container</b>, and never on the members' own titles:
+     * EventKit exposes no subtasks (ADR-027 v2.1.0, docs#81), so the grouping cannot nest, and writing
+     * the theme onto an executable would pollute the mirror and churn the merge of its canonical title
+     * (ADR-012). Each member stays individually checkable through its own Apple entity.
      */
-    private static String eventNotes(String reason, String energyCriterion) {
+    private static String eventNotes(PlannedBlockRecord block, String energyCriterion) {
         StringBuilder body = new StringBuilder();
-        if (reason != null && !reason.isBlank()) {
-            body.append(reason.trim());
-        }
-        if (!energyCriterion.isBlank()) {
-            if (body.length() > 0) {
-                body.append("\n\n");
+        if (block.grouped()) {
+            body.append(MEMBERS_NOTE_HEADING);
+            for (PlannedBlockMember member : block.members()) {
+                body.append("\n• ").append(member.name());
             }
-            body.append(energyCriterion.trim());
         }
+        appendParagraph(body, block.reason());
+        appendParagraph(body, energyCriterion);
         return body.length() == 0 ? null : body.toString();
+    }
+
+    /** Appends a blank-line-separated paragraph, skipping blanks so the note never opens with padding. */
+    private static void appendParagraph(StringBuilder body, String paragraph) {
+        if (paragraph == null || paragraph.isBlank()) {
+            return;
+        }
+        if (body.length() > 0) {
+            body.append("\n\n");
+        }
+        body.append(paragraph.trim());
     }
 
     private JsonNode parsePayload(String json) {

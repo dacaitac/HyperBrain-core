@@ -87,8 +87,37 @@ class AgendaBlockTest {
             .isInstanceOf(UnsupportedOperationException.class);
     }
 
+    @Test
+    @DisplayName("the deterministic floor leaves the theme null; a blank theme normalizes to null")
+    void theme_is_nullable_and_blank_normalizes() {
+        assertThat(new AgendaBlock(ANCHOR, START, START.plusMinutes(60), false, false, "why").theme())
+            .isNull();
+        assertThat(themed(60, List.of(SECOND), "   ").theme()).isNull();
+        assertThat(themed(60, List.of(SECOND), "  Deep work  ").theme()).isEqualTo("Deep work");
+    }
+
+    @Test
+    @DisplayName("retimed moves the window and reason while preserving membership and theme")
+    void retimed_preserves_membership_and_theme() {
+        AgendaBlock block = themed(60, List.of(SECOND, THIRD), "Deep work");
+
+        AgendaBlock moved = block.retimed(START.plusHours(5), START.plusHours(6), "peak energy");
+
+        assertThat(moved.start()).isEqualTo(START.plusHours(5));
+        assertThat(moved.end()).isEqualTo(START.plusHours(6));
+        assertThat(moved.reason()).isEqualTo("peak energy");
+        assertThat(moved.additionalMembers()).containsExactly(SECOND, THIRD);
+        assertThat(moved.theme()).isEqualTo("Deep work");
+        assertThat(moved.wig()).isEqualTo(block.wig());
+        assertThat(moved.highLoad()).isEqualTo(block.highLoad());
+    }
+
     private static AgendaBlock themed(int minutes, List<UUID> additionalMembers) {
+        return themed(minutes, additionalMembers, null);
+    }
+
+    private static AgendaBlock themed(int minutes, List<UUID> additionalMembers, String theme) {
         return new AgendaBlock(ANCHOR, START, START.plusMinutes(minutes), false, false, "why",
-            additionalMembers);
+            additionalMembers, theme);
     }
 }
