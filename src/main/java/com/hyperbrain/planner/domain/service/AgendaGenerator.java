@@ -148,29 +148,25 @@ public class AgendaGenerator {
                 continue;
             }
 
-            // Pinned-start placement: the reminder time is when to START. When the executable has a
-            // due instant that falls within the planning window, anchor the block's start to that
-            // instant and let it run for its remaining effort (reminder-driven scheduling).
-            OffsetDateTime dueInstant = executable.dueInstant();
-            if (dueInstant != null) {
-                OffsetDateTime pinnedStart = dueInstant;
-                OffsetDateTime pinnedEnd = pinnedStart.plusMinutes(minutes);
-                if (!pinnedStart.isBefore(state.windowStart()) && !pinnedEnd.isAfter(state.windowEnd())) {
-                    blocks.add(new AgendaBlock(executable.id(), pinnedStart, pinnedEnd, false, highLoad,
-                        rankReasonPinned(executable, minutes)));
-                    walls.add(new OccupiedInterval(executable.id(), pinnedStart, pinnedEnd, false));
-                    reserveTransitionBuffer(walls, pinnedEnd);
-                    placed.add(executable.id());
-                    if (highLoad) highLoadUsed++;
-                    urgentPlaced++;
-                    continue;
-                }
-                // Due instant outside window, or the block would run past bedtime (e.g. midnight) —
-                // fall through to cursor-based placement.
-            }
-
-            Optional<OffsetDateTime> slot =
-                earliestSlot(state.windowStart(), rankingLimit, minutes, walls);
+            // Placement is the Planner's own authorship (ADR-026 D4): the deterministic floor places
+            // by its own logic — availability, effort, energy, hard walls — never seeding the start
+            // from the authorial reminder time. The due instant only scopes WHICH day an executable is
+            // schedulable (that day-filter lives upstream in AgendaGenerationService); it no longer
+            // dictates WHERE inside the day the block lands.
+            //
+            // Reschedule of a vencido block (ADR-026 D5): when the executable carries a reschedule seed
+            // — the hour of its last, now-EXPIRED core_time_block (D3) — the block is placed back at
+            // that hour, so a task the system already timed keeps its slot across days instead of
+            // drifting to the window start. The seed is a preference, never a licence to break a wall:
+            // it applies only when [seed, seed+effort] fits the usable window and clears every wall;
+            // otherwise the block falls back to the earliest wall-clearing gap by rank. This seeds from
+            // the Planner's OWN prior decision (D3), not the authorial reminder time D4 retired, so D4
+            // stays intact for genuinely fresh placements (seed null → identical to before).
+            Optional<OffsetDateTime> seedSlot = rescheduleSlot(
+                executable.rescheduleSeed(), state.windowStart(), rankingLimit, minutes, walls);
+            Optional<OffsetDateTime> slot = seedSlot.isPresent()
+                ? seedSlot
+                : earliestSlot(state.windowStart(), rankingLimit, minutes, walls);
             if (slot.isEmpty()) {
                 excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.NO_ROOM_IN_WINDOW));
                 continue;
@@ -178,8 +174,10 @@ public class AgendaGenerator {
 
             OffsetDateTime start = slot.get();
             OffsetDateTime end = start.plusMinutes(minutes);
-            blocks.add(new AgendaBlock(executable.id(), start, end, false, highLoad,
-                rankReason(executable, minutes)));
+            String reason = seedSlot.isPresent()
+                ? rankReasonRescheduled(executable, minutes)
+                : rankReason(executable, minutes);
+            blocks.add(new AgendaBlock(executable.id(), start, end, false, highLoad, reason));
             walls.add(new OccupiedInterval(executable.id(), start, end, false));
             reserveTransitionBuffer(walls, end);
             placed.add(executable.id());
@@ -258,6 +256,27 @@ public class AgendaGenerator {
     }
 
     /**
+     * The reschedule slot (ADR-026 D5): {@code seed} itself when a {@code minutes}-long block starting
+     * there fits inside {@code [windowStart, limit]} and clears every wall, so a vencido block is
+     * re-placed at the hour the Planner last chose (D3). Empty when there is no seed, or when the seed
+     * would fall outside the usable window or collide with a wall — the caller then falls back to the
+     * earliest wall-clearing gap by rank. The seed never loosens a wall.
+     */
+    private static Optional<OffsetDateTime> rescheduleSlot(
+        OffsetDateTime seed, OffsetDateTime windowStart, OffsetDateTime limit, int minutes,
+        List<OccupiedInterval> walls) {
+        if (seed == null) {
+            return Optional.empty();
+        }
+        OffsetDateTime seedEnd = seed.plusMinutes(minutes);
+        if (seed.isBefore(windowStart) || seedEnd.isAfter(limit)) {
+            return Optional.empty();
+        }
+        boolean clears = walls.stream().noneMatch(wall -> wall.overlaps(seed, seedEnd));
+        return clears ? Optional.of(seed) : Optional.empty();
+    }
+
+    /**
      * The earliest window instant at which a {@code minutes}-long block fits without overlapping any
      * wall, scanning gaps left-to-right. Returns empty when no gap up to {@code limit} is long enough.
      */
@@ -300,10 +319,11 @@ public class AgendaGenerator {
             executable.rankingScore(), minutes, load);
     }
 
-    private String rankReasonPinned(SchedulableExecutable executable, int minutes) {
+    private String rankReasonRescheduled(SchedulableExecutable executable, int minutes) {
         String load = executable.isHighLoad(constraints.highLoadDrainFloor()) ? "high-load" : "standard";
         return String.format(
-            "Pinned to start at reminder time %s, %d min remaining effort, priority %.3f, %s",
-            executable.dueInstant(), minutes, executable.rankingScore(), load);
+            "Rescheduled to the hour of its last block %s (ADR-026 D5), priority %.3f, %d min remaining "
+                + "effort, %s",
+            executable.rescheduleSeed(), executable.rankingScore(), minutes, load);
     }
 }

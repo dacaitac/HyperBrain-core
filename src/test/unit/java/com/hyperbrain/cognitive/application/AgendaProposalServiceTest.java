@@ -6,6 +6,8 @@ import com.hyperbrain.cognitive.application.ProposalWallGuard.ProposalWall;
 import com.hyperbrain.cognitive.application.ProposalWallGuard.WallGuardResult;
 import com.hyperbrain.cognitive.domain.LlmGatewayException;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
+import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties;
+import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties.SpecialContext;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
@@ -24,6 +26,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 @DisplayName("AgendaProposalService — propose → validate → DEGRADED (H3, stub gateway)")
@@ -33,9 +36,11 @@ class AgendaProposalServiceTest {
     private static final OffsetDateTime BEDTIME = OffsetDateTime.of(2026, 7, 10, 23, 0, 0, 0, ZoneOffset.UTC);
     private static final UUID A = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID B = UUID.fromString("22222222-2222-2222-2222-222222222222");
+    private static final UUID C = UUID.fromString("33333333-3333-3333-3333-333333333333");
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final AgendaProposalPromptBuilder promptBuilder = new AgendaProposalPromptBuilder(objectMapper);
+    private final AgendaProposalPromptBuilder promptBuilder = new AgendaProposalPromptBuilder(
+        objectMapper, new CommitteePromptProperties(100, SpecialContext.NONE));
     private final AgendaPropuestaParser parser = new AgendaPropuestaParser(objectMapper);
     private final ProposalWallGuard wallGuard = new ProposalWallGuard();
     private final ProposalTelemetry telemetry = mock(ProposalTelemetry.class);
@@ -196,6 +201,24 @@ class AgendaProposalServiceTest {
     }
 
     @Test
+    @DisplayName("ADR-029 D1: propose() invokes the gateway exactly once per generation, never once per "
+        + "committee role")
+    void propose_invokes_gateway_exactly_once() {
+        LlmGateway gateway = mock(LlmGateway.class);
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP"},
+              {"block_id":"22222222-2222-2222-2222-222222222222","placement":"KEEP"}
+            ]}""";
+        org.mockito.Mockito.when(gateway.complete(org.mockito.ArgumentMatchers.any())).thenReturn(json);
+
+        Optional<Agenda> result = service(gateway).propose(twoBlockContext());
+
+        assertThat(result).isPresent();
+        verify(gateway, times(1)).complete(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
     @DisplayName("an empty candidate set degrades without calling the gateway")
     void empty_candidates_degrade_without_call() {
         LlmGateway neverCalled = prompt -> {
@@ -205,6 +228,54 @@ class AgendaProposalServiceTest {
             List.of(), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
 
         assertThat(service(neverCalled).propose(empty)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a MOVE carries the themed container's membership and theme over, never re-composing it")
+    void move_preserves_membership_and_theme() {
+        // Given a themed container the floor grouped (A anchors, C rides along)
+        AgendaBlock themed = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
+            "floor reason", List.of(C), "Deep work morning");
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(themed, block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
+            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
+               "start":"2026-07-10T09:00:00Z","end":"2026-07-10T10:00:00Z","coach_note":"peak energy"},
+              {"block_id":"22222222-2222-2222-2222-222222222222","placement":"KEEP"}
+            ]}""";
+
+        // When the model retimes it
+        Optional<Agenda> result = service(prompt -> json).propose(context);
+
+        // Then only the window and the reason change: the membership and the theme survive. Rebuilding
+        // the block from its scalar fields used to drop the companions silently.
+        AgendaBlock moved = result.orElseThrow().blocks().stream()
+            .filter(b -> b.executableId().equals(A)).findFirst().orElseThrow();
+        assertThat(moved.additionalMembers()).containsExactly(C);
+        assertThat(moved.theme()).isEqualTo("Deep work morning");
+        assertThat(moved.start()).isEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, ZoneOffset.UTC));
+        assertThat(moved.reason()).isEqualTo("peak energy");
+    }
+
+    @Test
+    @DisplayName("a KEEP leaves the themed container untouched, membership included")
+    void keep_preserves_membership_and_theme() {
+        AgendaBlock themed = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
+            "floor reason", List.of(C), "Deep work morning");
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(themed), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP"}
+            ]}""";
+
+        Optional<Agenda> result = service(prompt -> json).propose(context);
+
+        assertThat(result.orElseThrow().blocks()).singleElement()
+            .usingRecursiveComparison()
+            .isEqualTo(themed);
     }
 
     private List<ProposalWall> interventionWalls() {

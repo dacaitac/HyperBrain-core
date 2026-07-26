@@ -178,6 +178,31 @@ class CalendarEventHandlerTest {
     }
 
     @Test
+    @DisplayName("ADR-026 D6 invariant: a block-backed CALENDAR_EVENT resolves ONLY to core_time_block, "
+        + "never to core_executable (its start_time is never touched)")
+    void d6_block_event_resolves_only_to_time_block_never_executable() {
+        // A block's EKEvent maps to a core_time_block (not an executable): findById returns empty, so
+        // the handler must route the delete to the planner-block path and leave core_executable —
+        // where the authorial start_time lives — completely untouched. This is the slot-authority
+        // invariant of ADR-026 D6: the SYSTEM slot lives in its own aggregate and can never regress
+        // onto core_executable.start_time by construction (separate rows, separate sync_mapping).
+        UUID blockId = UUID.randomUUID();
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-D6"))
+            .thenReturn(Optional.of(syncMapping("EKEvent-D6", blockId, "x")));
+        when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
+        when(plannerBlockDeletionPort.deletePlannedBlock(blockId)).thenReturn(true);
+
+        handler.handle(calendarEvent("EKEvent-D6", Operation.DELETED, null));
+
+        // Resolved only through the block port…
+        verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
+        // …and core_executable is never mutated: no delete, no upsert of any start_time.
+        verify(executableRepo, never()).deleteById(any());
+        verify(executableRepo, never()).upsert(any());
+        verifyNoInteractions(snapshotRepo);
+    }
+
+    @Test
     @DisplayName("DELETED with no mapping: no-op")
     void deleted_without_mapping_is_noop() {
         when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-9"))

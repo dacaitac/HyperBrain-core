@@ -135,6 +135,11 @@ public class AgendaProposalService implements AgendaProposer {
      * blocks (MOVE at the model's new window), DROP decisions are omitted, and the coach note is routed
      * to the block's reason → notes only (ADR-012), falling back to the floor's reason when blank so
      * legibility is preserved. The caller re-attaches the floor's exclusions/paused account and criterion.
+     *
+     * <p>The candidate is <b>retimed, never re-composed</b>: the model's authority is the arrangement
+     * (when a block runs), so the block's membership and theme (ADR-027 D1/D2) are carried over
+     * verbatim. Rebuilding the block from its scalar fields would silently drop the companions of a
+     * themed container.
      */
     private static Agenda applyArrangement(AgendaPropuesta propuesta, AgendaProposalContext context) {
         List<AgendaBlock> blocks = new ArrayList<>();
@@ -144,12 +149,9 @@ public class AgendaProposalService implements AgendaProposer {
             }
             AgendaBlock candidate = context.candidate(decision.blockId());
             boolean move = decision.placement() == Placement.MOVE;
-            blocks.add(new AgendaBlock(
-                candidate.executableId(),
+            blocks.add(candidate.retimed(
                 move ? decision.start() : candidate.start(),
                 move ? decision.end() : candidate.end(),
-                candidate.wig(),
-                candidate.highLoad(),
                 reason(decision.coachNote(), candidate.reason())));
         }
         blocks.sort(java.util.Comparator.comparing(AgendaBlock::start));

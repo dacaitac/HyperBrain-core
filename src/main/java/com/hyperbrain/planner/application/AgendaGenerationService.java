@@ -549,8 +549,12 @@ public class AgendaGenerationService {
      */
     private List<OccupiedInterval> withoutRegenerable(UUID userId, LocalDate targetDay, ZoneId zone,
                                                       List<OccupiedInterval> occupied) {
+        // Keyed by every member (ADR-027 D1), not only the anchor: the occupancy read exposes a block
+        // through its anchor today, but a themed container must drop its whole membership from the
+        // walls so a replan can re-place any of its executables.
         Set<String> regenerable = repository.loadPlannedBlocksForDay(userId, targetDay, zone).stream()
-            .map(block -> wallKey(block.executableId(), block.start(), block.end()))
+            .flatMap(block -> block.members().stream()
+                .map(member -> wallKey(member.executableId(), block.start(), block.end())))
             .collect(Collectors.toSet());
         if (regenerable.isEmpty()) {
             return occupied;

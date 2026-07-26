@@ -87,6 +87,14 @@ app:
     # Deliberately HIGH — legitimate multi-day spreading is the LLM's authority and must not be
     # clamped; this only catches the "near-empty day" pathology. Tunable by Daniel.
     max-drop-fraction: ${APP_COGNITIVE_MAX_DROP_FRACTION:0.8}
+    committee:
+      # ADR-029 D5: the composed committee prompt's intensity dials. System properties for the MVP
+      # (single user) — NOT a per-user configuration table; see CommitteePromptProperties javadoc for
+      # the future multi-user migration this value (and the Notion database ids) will need.
+      # 1 (gentle day) .. 100 (full-throttle day); default 100 per Daniel (2026-07-26).
+      intensity: ${APP_COGNITIVE_COMMITTEE_INTENSITY:100}
+      # NONE | VACATION | SPRINT | RECOVERY | TRAVEL.
+      special-context: ${APP_COGNITIVE_COMMITTEE_SPECIAL_CONTEXT:NONE}
   sync:
     consumer:
       enabled: true

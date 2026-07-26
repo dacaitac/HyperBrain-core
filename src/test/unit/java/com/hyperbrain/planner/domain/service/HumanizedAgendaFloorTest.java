@@ -123,28 +123,36 @@ class HumanizedAgendaFloorTest {
     }
 
     @Test
-    @DisplayName("rule 5: an anchored habit lands at the same local time across days, ignoring run clutter")
-    void habit_anchor_is_stable_across_days() {
+    @DisplayName("ADR-026 D4: a habit's authorial anchor no longer seeds placement — it is placed by rank")
+    void habit_placement_is_authorial_independent() {
+        // Before ADR-026 D4 a habit was pinned to its authorial anchor via dueInstant. That coupling is
+        // retired: placement is now the Planner's own authorship (smart/stable placement returns with
+        // the ADR-029 cognitive layer). Here the habit is the highest-ranked item on both days (the
+        // ranked list is score-descending, mirroring the repository read), so it is placed FIRST at the
+        // window start (07:00) — driven by rank, never anchored to its late 20:00 due instant. The
+        // anchor still scopes WHICH day the habit is schedulable, never WHERE in the day.
         HumanizationSettings settings = settings(0, List.of(), 0, 0.0, 1.0);
         UUID habitId = UUID.randomUUID();
 
-        // Day 1: habit anchored at 08:00 with light clutter around it.
-        OffsetDateTime day1Anchor = OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, ZoneOffset.UTC);
+        // Day 1: highest-ranked habit carries a late 20:00 authorial anchor, with lower-ranked clutter.
+        OffsetDateTime day1Anchor = OffsetDateTime.of(2026, 7, 10, 20, 0, 0, 0, ZoneOffset.UTC);
         SchedulableExecutable habitDay1 = habit(habitId, day1Anchor, 45);
         Agenda day1 = floor(settings).generate(state(WAKE, BEDTIME,
-            List.of(task(0.40, 30), habitDay1), List.of(), List.of()));
+            List.of(habitDay1, task(0.40, 30)), List.of(), List.of()));
 
-        // Day 2: same habit identity, same anchor, a different amount and shape of clutter. The anchor
-        // is a property of the habit's identity, not of where the run happens to reach it.
+        // Day 2: same habit identity and anchor, a different amount and shape of lower-ranked clutter.
         OffsetDateTime wake2 = WAKE.plusDays(1);
         OffsetDateTime bedtime2 = BEDTIME.plusDays(1);
-        OffsetDateTime day2Anchor = OffsetDateTime.of(2026, 7, 11, 8, 0, 0, 0, ZoneOffset.UTC);
+        OffsetDateTime day2Anchor = OffsetDateTime.of(2026, 7, 11, 20, 0, 0, 0, ZoneOffset.UTC);
         SchedulableExecutable habitDay2 = habit(habitId, day2Anchor, 45);
         Agenda day2 = floor(settings).generate(state(wake2, bedtime2,
-            List.of(task(0.30, 30), task(0.20, 30), task(0.10, 30), habitDay2), List.of(), List.of()));
+            List.of(habitDay2, task(0.30, 30), task(0.20, 30), task(0.10, 30)), List.of(), List.of()));
 
-        assertThat(habitBlockLocalHour(day1, habitId)).isEqualTo(8);
-        assertThat(habitBlockLocalHour(day2, habitId)).isEqualTo(8);
+        // Placement is by rank, not by the authorial 20:00 anchor: the habit lands at the window start
+        // on both days, and never at hour 20.
+        assertThat(habitBlockLocalHour(day1, habitId)).isEqualTo(WAKE.getHour());
+        assertThat(habitBlockLocalHour(day2, habitId)).isEqualTo(wake2.getHour());
+        assertThat(habitBlockLocalHour(day1, habitId)).isNotEqualTo(day1Anchor.getHour());
     }
 
     // ─── helpers ───────────────────────────────────────────────────────────────

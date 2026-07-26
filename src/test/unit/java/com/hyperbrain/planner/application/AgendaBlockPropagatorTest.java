@@ -3,6 +3,7 @@ package com.hyperbrain.planner.application;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
+import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.shared.outbox.OutboxEvent;
@@ -155,7 +156,8 @@ class AgendaBlockPropagatorTest {
     }
 
     private static PlannedBlockRecord block(UUID blockId) {
-        return new PlannedBlockRecord(blockId, EXECUTABLE_ID, "Deep work", START, END, "WIG pace");
+        return new PlannedBlockRecord(blockId, "Deep work",
+            List.of(new PlannedBlockMember(EXECUTABLE_ID, "Deep work", 60, 0)), START, END, "WIG pace");
     }
 
     private static SyncMapping mapping(UUID localId, String externalId) {

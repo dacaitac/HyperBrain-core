@@ -50,4 +50,17 @@ class SleepScoreConfigTest {
         assertThat(config.durationWeightNoPhase()).isCloseTo(0.6, within(1e-9));
         assertThat(config.efficiencyWeightNoPhase()).isCloseTo(0.4, within(1e-9));
     }
+
+    @Test
+    @DisplayName("no-wake-evidence weight shares renormalize 45/10/10 over 65 → 69.2/15.4/15.4")
+    void no_wake_evidence_weight_shares() {
+        SleepScoreConfig config = SleepScoreConfig.defaults();
+
+        assertThat(config.durationWeightNoWakeEvidence()).isCloseTo(0.6923, within(1e-4));
+        assertThat(config.deepWeightNoWakeEvidence()).isCloseTo(0.1538, within(1e-4));
+        assertThat(config.remWeightNoWakeEvidence()).isCloseTo(0.1538, within(1e-4));
+        double sum = config.durationWeightNoWakeEvidence() + config.deepWeightNoWakeEvidence()
+            + config.remWeightNoWakeEvidence();
+        assertThat(sum).isCloseTo(1.0, within(1e-9));
+    }
 }
