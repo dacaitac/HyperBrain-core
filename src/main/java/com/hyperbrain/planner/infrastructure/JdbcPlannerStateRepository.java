@@ -15,6 +15,8 @@ import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.port.out.LearnedCostRepository;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -23,10 +25,12 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 /**
  * JDBC adapter for {@link PlannerStateRepository} (#6a). Reads the day's state straight from the
@@ -46,6 +50,8 @@ import java.util.stream.Collectors;
  */
 @Repository
 class JdbcPlannerStateRepository implements PlannerStateRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(JdbcPlannerStateRepository.class);
 
     private static final LocalTime DEFAULT_WAKE = LocalTime.of(7, 0);
     private static final LocalTime DEFAULT_BEDTIME = LocalTime.of(23, 0);
@@ -302,20 +308,21 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         """;
 
     /**
-     * Upserts a desired block under its <b>stable id</b>: a brand-new id inserts, a surviving id
-     * updates in place (so the block keeps its {@code sync_mapping} → the write-back emits an UPDATE,
-     * not a duplicate CREATE, #15). The {@code ON CONFLICT} update is guarded to
-     * {@code PLANNED}/{@code PLANNER} rows so a stable id that happens to collide with an
-     * {@code ACTIVE}/{@code SETTLED} block (already-started work, telemetry-bearing) never clobbers it —
-     * the conflicting desired block is silently skipped, which is correct: that executable is already
-     * being worked on today.
+     * Upserts a desired block under the id the reconciliation assigned it: a fresh surrogate inserts, a
+     * continued id updates in place (so the block keeps its {@code sync_mapping} → the write-back emits
+     * an UPDATE, not a duplicate CREATE, #15). The anchor {@code executable_id} is re-written on update
+     * because the anchor may rotate while the block itself continues (ADR-027 D3). The
+     * {@code ON CONFLICT} update is guarded to {@code PLANNED}/{@code PLANNER} rows so an id that
+     * happens to collide with an {@code ACTIVE}/{@code SETTLED} block (already-started work,
+     * telemetry-bearing) never clobbers it.
      */
     private static final String UPSERT_BLOCK_SQL = """
         INSERT INTO core_time_block
             (id, executable_id, date_start, date_end, status, origin, planned_minutes, reason)
         VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?, ?)
         ON CONFLICT (id) DO UPDATE
-           SET date_start      = EXCLUDED.date_start,
+           SET executable_id   = EXCLUDED.executable_id,
+               date_start      = EXCLUDED.date_start,
                date_end        = EXCLUDED.date_end,
                planned_minutes = EXCLUDED.planned_minutes,
                reason          = EXCLUDED.reason
@@ -323,16 +330,64 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
            AND core_time_block.origin = 'PLANNER'
         """;
 
-    /** The day's regenerable planner block ids — the reconciliation universe (survive vs. removed). */
-    private static final String EXISTING_PLANNED_IDS_SQL = """
-        SELECT b.id
+    /**
+     * The day's regenerable planner blocks with their current membership — the reconciliation universe
+     * (continued vs. removed). The anchor {@code core_time_block.executable_id} is read alongside the
+     * bridge rows and folded into the member set, so a block persisted before the ADR-027 migration (or
+     * one whose anchor membership was skipped by the D5 guard) still reconciles by its anchor.
+     */
+    private static final String EXISTING_PLANNED_BLOCKS_SQL = """
+        SELECT b.id,
+               b.executable_id AS anchor_id,
+               m.executable_id AS member_id,
+               b.date_start,
+               COALESCE(b.date_end, b.date_start + interval '1 minute') AS date_end
         FROM core_time_block b
         JOIN core_executable e ON e.id = b.executable_id
+        LEFT JOIN core_time_block_member m ON m.block_id = b.id
         WHERE e.user_id = ?
           AND b.status = 'PLANNED'
           AND b.origin = 'PLANNER'
           AND b.date_start >= ?
           AND b.date_start < ?
+        ORDER BY b.date_start, b.id
+        """;
+
+    /**
+     * The executables already held by a <b>live block outside the reconciliation universe</b> on the
+     * target day (a {@code FOCUS}/{@code USER} block, or one already {@code ACTIVE}/{@code SETTLED}).
+     * The D5 unique index on {@code core_time_block_member} would reject a second live membership for
+     * them, so the planner drops those bridge rows explicitly instead of letting the whole day's
+     * generation fail on a constraint violation. {@code block_date}/{@code block_status} are the
+     * trigger-derived columns the index is built on — read-only for the core.
+     */
+    private static final String EXTERNALLY_HELD_EXECUTABLES_SQL = """
+        SELECT DISTINCT m.executable_id
+        FROM core_time_block_member m
+        JOIN core_time_block b ON b.id = m.block_id
+        JOIN core_executable e ON e.id = b.executable_id
+        WHERE e.user_id = ?
+          AND m.block_date = ?
+          AND m.block_status IN ('PLANNED', 'ACTIVE', 'SETTLED')
+          AND NOT (b.status = 'PLANNED' AND b.origin = 'PLANNER')
+        """;
+
+    /**
+     * Clears a continued block's bridge rows before they are re-inserted from the new plan. Doing it
+     * before any insert is what lets an executable move between two blocks of the same day without
+     * tripping the D5 unique index.
+     */
+    private static final String DELETE_BLOCK_MEMBERS_SQL =
+        "DELETE FROM core_time_block_member WHERE block_id = ?";
+
+    /**
+     * Inserts one bridge row per block member (ADR-027 D2). Only the four owned columns are written:
+     * {@code block_date} and {@code block_status} are derived by trigger from the parent block and must
+     * never be written by the core.
+     */
+    private static final String INSERT_BLOCK_MEMBER_SQL = """
+        INSERT INTO core_time_block_member (block_id, executable_id, planned_minutes, ord)
+        VALUES (?, ?, ?, ?)
         """;
 
     /**
@@ -510,14 +565,29 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
 
-        List<UUID> existingIds =
-            jdbcTemplate.queryForList(EXISTING_PLANNED_IDS_SQL, UUID.class, userId, dayStart, dayEnd);
+        List<PlannerBlockIdentity.PersistedBlock> persisted =
+            loadPersistedPlannerBlocks(userId, dayStart, dayEnd);
+        PlannerBlockIdentity.Reconciliation reconciliation =
+            PlannerBlockIdentity.reconcile(desired, persisted);
+        List<PlannerBlockIdentity.IdentifiedBlock> identified = reconciliation.identified();
+        List<UUID> removed = reconciliation.removedBlockIds();
 
-        List<PlannerBlockIdentity.IdentifiedBlock> identified =
-            PlannerBlockIdentity.assign(desired, targetDay);
-        Set<UUID> desiredIds = identified.stream()
+        // Order matters for the D5 unique index: the memberships that are going away (dropped blocks
+        // first, then the continued blocks' stale rows) must be gone before any new membership is
+        // inserted, so an executable that moves between two blocks of the same day never collides with
+        // its own previous row.
+        if (!removed.isEmpty()) {
+            jdbcTemplate.batchUpdate(DELETE_REMOVED_BLOCK_SQL, removed, removed.size(),
+                (ps, id) -> ps.setObject(1, id));
+        }
+        List<UUID> continuedIds = identified.stream()
+            .filter(PlannerBlockIdentity.IdentifiedBlock::continued)
             .map(PlannerBlockIdentity.IdentifiedBlock::blockId)
-            .collect(Collectors.toSet());
+            .toList();
+        if (!continuedIds.isEmpty()) {
+            jdbcTemplate.batchUpdate(DELETE_BLOCK_MEMBERS_SQL, continuedIds, continuedIds.size(),
+                (ps, id) -> ps.setObject(1, id));
+        }
 
         jdbcTemplate.batchUpdate(UPSERT_BLOCK_SQL, identified, identified.size(), (ps, entry) -> {
             AgendaBlock block = entry.block();
@@ -528,15 +598,74 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             ps.setObject(5, (int) block.durationMinutes());
             ps.setString(6, block.reason());
         });
+        insertBlockMembers(userId, targetDay, identified);
 
-        List<UUID> removed = existingIds.stream()
-            .filter(id -> !desiredIds.contains(id))
-            .toList();
-        if (!removed.isEmpty()) {
-            jdbcTemplate.batchUpdate(DELETE_REMOVED_BLOCK_SQL, removed, removed.size(),
-                (ps, id) -> ps.setObject(1, id));
-        }
         return removed;
+    }
+
+    /**
+     * Re-reads the day's regenerable blocks with their membership, folding the anchor
+     * {@code executable_id} into the member set so a block still reconciles by its anchor even when it
+     * carries no bridge row yet.
+     */
+    private List<PlannerBlockIdentity.PersistedBlock> loadPersistedPlannerBlocks(
+        UUID userId, OffsetDateTime dayStart, OffsetDateTime dayEnd) {
+        Map<UUID, PersistedBlockAccumulator> accumulators = new LinkedHashMap<>();
+        jdbcTemplate.query(EXISTING_PLANNED_BLOCKS_SQL, rs -> {
+            UUID blockId = rs.getObject("id", UUID.class);
+            PersistedBlockAccumulator accumulator = accumulators.get(blockId);
+            if (accumulator == null) {
+                accumulator = new PersistedBlockAccumulator(
+                    rs.getObject("date_start", OffsetDateTime.class),
+                    rs.getObject("date_end", OffsetDateTime.class));
+                accumulators.put(blockId, accumulator);
+            }
+            accumulator.members().add(rs.getObject("anchor_id", UUID.class));
+            UUID memberId = rs.getObject("member_id", UUID.class);
+            if (memberId != null) {
+                accumulator.members().add(memberId);
+            }
+        }, userId, dayStart, dayEnd);
+
+        return accumulators.entrySet().stream()
+            .map(entry -> new PlannerBlockIdentity.PersistedBlock(
+                entry.getKey(), entry.getValue().members(),
+                entry.getValue().start(), entry.getValue().end()))
+            .toList();
+    }
+
+    /**
+     * Projects each block's membership onto {@code core_time_block_member} (ADR-027 D2), splitting the
+     * container's duration across its members. Executables already held by a live block outside the
+     * planner's universe are skipped and logged: the D5 unique index would otherwise abort the whole
+     * day's generation, and the block itself is still worth delivering.
+     */
+    private void insertBlockMembers(UUID userId, LocalDate targetDay,
+                                    List<PlannerBlockIdentity.IdentifiedBlock> identified) {
+        if (identified.isEmpty()) {
+            return;
+        }
+        Set<UUID> externallyHeld = Set.copyOf(jdbcTemplate.queryForList(
+            EXTERNALLY_HELD_EXECUTABLES_SQL, UUID.class, userId, java.sql.Date.valueOf(targetDay)));
+
+        List<Object[]> rows = new ArrayList<>();
+        for (PlannerBlockIdentity.IdentifiedBlock entry : identified) {
+            List<UUID> blockMembers = entry.block().members();
+            List<Integer> minutes = entry.block().memberPlannedMinutes();
+            for (int ord = 0; ord < blockMembers.size(); ord++) {
+                UUID member = blockMembers.get(ord);
+                if (externallyHeld.contains(member)) {
+                    log.warn("Executable {} is already held by another live block on {}; "
+                        + "its membership of planner block {} is skipped (ADR-027 D5)",
+                        member, targetDay, entry.blockId());
+                    continue;
+                }
+                rows.add(new Object[] {entry.blockId(), member, minutes.get(ord), ord});
+            }
+        }
+        if (!rows.isEmpty()) {
+            jdbcTemplate.batchUpdate(INSERT_BLOCK_MEMBER_SQL, rows);
+        }
     }
 
     @Override
@@ -567,6 +696,15 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             titles.put(rs.getObject("id", UUID.class), rs.getString("name"));
         }, ids.toArray());
         return titles;
+    }
+
+    /** Groups the joined block/member rows of {@link #loadPersistedPlannerBlocks} into one block. */
+    private record PersistedBlockAccumulator(Set<UUID> members, OffsetDateTime start,
+                                             OffsetDateTime end) {
+
+        PersistedBlockAccumulator(OffsetDateTime start, OffsetDateTime end) {
+            this(new LinkedHashSet<>(), start, end);
+        }
     }
 
     private Double resolveCu(UUID taskId) {

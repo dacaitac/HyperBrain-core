@@ -2,6 +2,8 @@ package com.hyperbrain.planner;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.planner.domain.model.AgendaBlock;
+import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -42,11 +44,13 @@ class AgendaBlockReplanWriteBackIT {
     private static final String RESULTS_QUEUE = "apple-commands-results.fifo";
     private static final UUID USER = DataFixture.SYSTEM_USER_ID;
     private static final ZoneOffset UTC = ZoneOffset.UTC;
+    private static final java.time.LocalDate DAY = java.time.LocalDate.of(2026, 7, 10);
     private static final OffsetDateTime BLOCK_START = OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC);
     private static final OffsetDateTime BLOCK_END = OffsetDateTime.of(2026, 7, 10, 10, 0, 0, 0, UTC);
     private static final OffsetDateTime NOON = OffsetDateTime.of(2026, 7, 10, 12, 0, 0, 0, UTC);
 
     @Autowired private OutboxWorker outboxWorker;
+    @Autowired private PlannerStateRepository plannerStateRepository;
     @Autowired private SqsTemplate sqsTemplate;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
@@ -87,6 +91,34 @@ class AgendaBlockReplanWriteBackIT {
         assertThat(command.path("entity_id").asText()).isEqualTo(eventId);
 
         // And the command is logged under the block id, so exactly one command exists for it
+        assertThat(commandCountForLocalId(blockId)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("a replan that changes the block's membership still UPDATEs the same EKEvent (ADR-027 D3)")
+    void membership_change_updates_the_same_event() throws Exception {
+        // Given a themed block already delivered to Apple, holding two executables
+        UUID anchor = insertExecutable("Deep work");
+        UUID leaving = insertExecutable("Leaving the theme");
+        UUID joining = insertExecutable("Joining the theme");
+        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC,
+            List.of(themedBlock(anchor, List.of(leaving))));
+        UUID blockId = plannerBlockId();
+        String eventId = "EKEvent-" + UUID.randomUUID();
+        insertBlockMapping(blockId, eventId);
+
+        // When a replan swaps a member out for another one
+        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC,
+            List.of(themedBlock(anchor, List.of(joining))));
+        insertAgendaBlockEvent(List.of());
+        outboxWorker.drainBatch();
+
+        // Then the block kept its id — identity is a surrogate, never a function of the membership —
+        // so the write-back UPDATEs the existing EKEvent instead of creating a duplicate (#15).
+        assertThat(plannerBlockId()).isEqualTo(blockId);
+        JsonNode command = objectMapper.readTree(receiveOne(COMMANDS_QUEUE).orElseThrow().getPayload());
+        assertThat(command.path("operation").asText()).isEqualTo("UPDATED");
+        assertThat(command.path("entity_id").asText()).isEqualTo(eventId);
         assertThat(commandCountForLocalId(blockId)).isEqualTo(1);
     }
 
@@ -174,6 +206,16 @@ class AgendaBlockReplanWriteBackIT {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    private static AgendaBlock themedBlock(UUID anchor, List<UUID> additionalMembers) {
+        return new AgendaBlock(anchor, BLOCK_START, BLOCK_END, false, false,
+            "Reserved as the WIG lead measure", additionalMembers);
+    }
+
+    private UUID plannerBlockId() {
+        return jdbcTemplate.queryForObject(
+            "SELECT id FROM core_time_block WHERE origin = 'PLANNER'", UUID.class);
+    }
 
     private UUID insertExecutable(String name) {
         UUID id = UUID.randomUUID();
