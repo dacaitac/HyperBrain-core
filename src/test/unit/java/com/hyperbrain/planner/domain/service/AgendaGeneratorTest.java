@@ -317,6 +317,67 @@ class AgendaGeneratorTest {
         assertThat(block.end()).isBeforeOrEqualTo(BEDTIME);
     }
 
+    @Test
+    @DisplayName("ADR-026 D5: a vencido block reschedules to the hour of its last block, not the window start")
+    void reschedule_seed_places_block_at_last_block_hour() {
+        // Given: a task whose last core_time_block ran at 15:00 (now EXPIRED); the read port surfaces
+        // that hour as the reschedule seed. The task is otherwise free to land at the window start.
+        OffsetDateTime seed = OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, ZoneOffset.UTC);
+        SchedulableExecutable rescheduled = rescheduledTask(0.9, 60, seed);
+        PlannerDayState state = state(List.of(rescheduled), List.of(), List.of(), NEUTRAL, true);
+
+        // When
+        Agenda agenda = generator.generate(state);
+
+        // Then: the block is re-placed at 15:00 — the hour of its last block (D5/D3) — not at WAKE.
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.start()).isEqualTo(seed);
+        assertThat(block.end()).isEqualTo(seed.plusMinutes(60));
+        assertThat(block.reason()).contains("Rescheduled");
+    }
+
+    @Test
+    @DisplayName("ADR-026 D5: the reschedule seed never breaks a wall — a blocked seed falls back to the earliest gap")
+    void reschedule_seed_blocked_by_wall_falls_back_to_earliest_gap() {
+        // Given: the seed hour (15:00) is already occupied by a hard wall; the reschedule may not
+        // override it. The earliest free slot is the window start.
+        OffsetDateTime seed = OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, ZoneOffset.UTC);
+        OccupiedInterval busyAtSeed = new OccupiedInterval(UUID.randomUUID(),
+            seed, seed.plusMinutes(60), false);
+        SchedulableExecutable rescheduled = rescheduledTask(0.9, 60, seed);
+        PlannerDayState state =
+            state(List.of(rescheduled), List.of(), List.of(busyAtSeed), NEUTRAL, true);
+
+        // When
+        Agenda agenda = generator.generate(state);
+
+        // Then: the seed is skipped (it would collide) and the block lands at the window start by rank.
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.start()).isEqualTo(WAKE);
+        assertThat(block.reason()).doesNotContain("Rescheduled");
+    }
+
+    @Test
+    @DisplayName("ADR-026 D5: a reschedule seed outside the usable window is ignored — no wall is broken")
+    void reschedule_seed_past_bedtime_is_ignored() {
+        // Given: the last block's hour was 22:45; a 60-min block from there would spill past the 23:00
+        // bedtime wall. The seed must be ignored rather than overrun the window.
+        OffsetDateTime seed = OffsetDateTime.of(2026, 7, 10, 22, 45, 0, 0, ZoneOffset.UTC);
+        SchedulableExecutable rescheduled = rescheduledTask(0.9, 60, seed);
+        PlannerDayState state = state(List.of(rescheduled), List.of(), List.of(), NEUTRAL, true);
+
+        // When
+        Agenda agenda = generator.generate(state);
+
+        // Then: placed at the window start, never past bedtime.
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.start()).isEqualTo(WAKE);
+        assertThat(block.end()).isBeforeOrEqualTo(BEDTIME);
+    }
+
     private static PlannerDayState state(
         List<SchedulableExecutable> ranked, List<MciWig> wigs,
         List<OccupiedInterval> occupied, EnergyProfile energy, boolean dataComplete) {
@@ -331,6 +392,12 @@ class AgendaGeneratorTest {
     private static SchedulableExecutable task(double priority, int estimatedMinutes) {
         return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null,
             null, 0, estimatedMinutes, 0, null, null);
+    }
+
+    private static SchedulableExecutable rescheduledTask(double priority, int estimatedMinutes,
+                                                         OffsetDateTime rescheduleSeed) {
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null,
+            null, 0, estimatedMinutes, 0, null, null, rescheduleSeed);
     }
 
     private static SchedulableExecutable highLoad(double priority, int estimatedMinutes) {
