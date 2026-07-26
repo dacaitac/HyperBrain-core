@@ -6,6 +6,8 @@ import com.hyperbrain.cognitive.application.ProposalWallGuard.ProposalWall;
 import com.hyperbrain.cognitive.application.ProposalWallGuard.WallGuardResult;
 import com.hyperbrain.cognitive.domain.LlmGatewayException;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
+import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties;
+import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties.SpecialContext;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
@@ -24,6 +26,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 @DisplayName("AgendaProposalService — propose → validate → DEGRADED (H3, stub gateway)")
@@ -35,7 +38,8 @@ class AgendaProposalServiceTest {
     private static final UUID B = UUID.fromString("22222222-2222-2222-2222-222222222222");
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final AgendaProposalPromptBuilder promptBuilder = new AgendaProposalPromptBuilder(objectMapper);
+    private final AgendaProposalPromptBuilder promptBuilder = new AgendaProposalPromptBuilder(
+        objectMapper, new CommitteePromptProperties(100, SpecialContext.NONE));
     private final AgendaPropuestaParser parser = new AgendaPropuestaParser(objectMapper);
     private final ProposalWallGuard wallGuard = new ProposalWallGuard();
     private final ProposalTelemetry telemetry = mock(ProposalTelemetry.class);
@@ -193,6 +197,24 @@ class AgendaProposalServiceTest {
         verify(telemetry).degraded(org.mockito.ArgumentMatchers.eq(twoBlockContext()),
             org.mockito.ArgumentMatchers.eq(DegradeReason.GATEWAY_FAILURE),
             org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    @DisplayName("ADR-029 D1: propose() invokes the gateway exactly once per generation, never once per "
+        + "committee role")
+    void propose_invokes_gateway_exactly_once() {
+        LlmGateway gateway = mock(LlmGateway.class);
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP"},
+              {"block_id":"22222222-2222-2222-2222-222222222222","placement":"KEEP"}
+            ]}""";
+        org.mockito.Mockito.when(gateway.complete(org.mockito.ArgumentMatchers.any())).thenReturn(json);
+
+        Optional<Agenda> result = service(gateway).propose(twoBlockContext());
+
+        assertThat(result).isPresent();
+        verify(gateway, times(1)).complete(org.mockito.ArgumentMatchers.any());
     }
 
     @Test

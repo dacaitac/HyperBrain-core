@@ -111,8 +111,13 @@ class CognitiveLlmAutoConfigurationTest {
         }
 
         @Bean
-        AgendaProposalPromptBuilder promptBuilder(ObjectMapper mapper) {
-            return new AgendaProposalPromptBuilder(mapper);
+        CommitteePromptProperties committeePromptProperties() {
+            return new CommitteePromptProperties(100, CommitteePromptProperties.SpecialContext.NONE);
+        }
+
+        @Bean
+        AgendaProposalPromptBuilder promptBuilder(ObjectMapper mapper, CommitteePromptProperties properties) {
+            return new AgendaProposalPromptBuilder(mapper, properties);
         }
 
         @Bean
