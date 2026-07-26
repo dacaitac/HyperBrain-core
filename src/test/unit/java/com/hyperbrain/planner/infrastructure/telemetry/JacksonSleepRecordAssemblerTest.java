@@ -58,9 +58,9 @@ class JacksonSleepRecordAssemblerTest {
     @Test
     @DisplayName("a session with no stage breakdown scores low-confidence, never 0")
     void assembles_low_confidence_record_without_phases() {
-        // Only unspecified asleep time, TIB 10h → duration+efficiency 60/40, low confidence.
+        // Only unspecified asleep time, TIB 10h, WASO 10min → duration+efficiency 60/40, low confidence.
         SleepStageSample sample = new SleepStageSample(
-            START, OffsetDateTime.parse("2026-07-11T08:00:00Z"), 0, 0, 0, 0, 28800, 0);
+            START, OffsetDateTime.parse("2026-07-11T08:00:00Z"), 0, 0, 0, 0, 28800, 600);
 
         DeviceSleepRecord record = assembler.assemble(sample, COLLECTED, null);
 

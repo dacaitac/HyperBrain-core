@@ -16,9 +16,17 @@ import java.time.Duration;
  * the session window ({@code end - start}), robust to a missing unclassified-in-bed segment; sleep
  * efficiency is {@code TST/TIB} clamped to {@code [0, 1]}.
  *
- * <p><b>Robustness (never 0 for missing data):</b> when the session carries no stage breakdown the
- * three phase sub-scores are dropped and Duration + Efficiency are renormalized to 60/40, with a
- * low-confidence flag. A session with no sleep at all (TST = 0) is not scorable and raises
+ * <p><b>Robustness (never 0 for missing data):</b> a sub-score computed from data the provider did not
+ * supply is dropped rather than counted, and the remaining weights are renormalized under a
+ * low-confidence flag:
+ * <ul>
+ *   <li>no stage breakdown → Duration + Efficiency renormalized to 60/40;</li>
+ *   <li>no evidence of wakefulness ({@code awake} and {@code inBed} both absent, ADR-016 v1.7.0 §2) →
+ *       Efficiency and WASO are non-informative (1.0 and 0 by construction of the window) and are
+ *       dropped, leaving Duration + Deep + REM renormalized to 69.2/15.4/15.4;</li>
+ *   <li>neither → Duration alone carries the score.</li>
+ * </ul>
+ * A session with no sleep at all (TST = 0) is not scorable and raises
  * {@link IllegalArgumentException}, which the normalizer records as an ERROR — distinct from a merely
  * incomplete but scorable night.
  *
@@ -72,11 +80,15 @@ public class SleepScoreCalculator {
         double remFraction = (double) sample.remSeconds() / tstSeconds;
 
         double durationSub = durationSubScore(tstHours);
-        double efficiencySub = efficiencySubScore(efficiency);
+        boolean wakeEvidence = sample.hasWakeEvidence();
+        // Without an awake or in-bed segment the window equals the asleep union: efficiency and WASO
+        // would score 100 by absence of data, not by measurement, so they are dropped (ADR-016 v1.7.0).
+        Double efficiencySub = wakeEvidence ? efficiencySubScore(efficiency) : null;
 
         if (!sample.hasPhaseBreakdown()) {
-            double score = config.durationWeightNoPhase() * durationSub
-                + config.efficiencyWeightNoPhase() * efficiencySub;
+            double score = wakeEvidence
+                ? config.durationWeightNoPhase() * durationSub + config.efficiencyWeightNoPhase() * efficiencySub
+                : durationSub;
             return new SleepScoreResult(round(score), true, tstHours, efficiency,
                 deepFraction, remFraction, wasoMinutes, durationSub, efficiencySub, null, null, null);
         }
@@ -85,8 +97,16 @@ public class SleepScoreCalculator {
             config.deepZeroLow(), config.deepFullLow(), config.deepFullHigh(), config.deepZeroHigh());
         double remSub = trapezoid(remFraction,
             config.remZeroLow(), config.remFullLow(), config.remFullHigh(), config.remZeroHigh());
-        double wasoSub = wasoSubScore(wasoMinutes);
 
+        if (!wakeEvidence) {
+            double score = config.durationWeightNoWakeEvidence() * durationSub
+                + config.deepWeightNoWakeEvidence() * deepSub
+                + config.remWeightNoWakeEvidence() * remSub;
+            return new SleepScoreResult(round(score), true, tstHours, efficiency,
+                deepFraction, remFraction, wasoMinutes, durationSub, null, deepSub, remSub, null);
+        }
+
+        double wasoSub = wasoSubScore(wasoMinutes);
         double score = config.durationWeight() * durationSub
             + config.efficiencyWeight() * efficiencySub
             + config.deepWeight() * deepSub

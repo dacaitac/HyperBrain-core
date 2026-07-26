@@ -47,7 +47,8 @@ class SleepScoreCalculatorTest {
     @DisplayName("no stage breakdown: only Duration + Efficiency, renormalized 60/40, low confidence, never 0")
     void no_phase_breakdown_renormalizes_60_40() {
         // TST 8h as unspecified only (no core/deep/rem); TIB 10h → SE 80% → efficiency sub 33.3.
-        SleepScoreResult result = calculator.score(sample(36000, 0, 0, 0, 28800, 0));
+        // WASO 10min is the wake evidence that keeps efficiency informative.
+        SleepScoreResult result = calculator.score(sample(36000, 0, 0, 0, 28800, 600));
 
         assertThat(result.lowConfidence()).isTrue();
         assertThat(result.deepSubScore()).isNull();
@@ -125,6 +126,55 @@ class SleepScoreCalculatorTest {
         SleepScoreResult high = calculator.score(sample(30600, 15840, 5184, 7776, 0, 600));
         assertThat(high.remFraction()).isCloseTo(0.27, within(0.001));
         assertThat(high.remSubScore()).isCloseTo(80.0, within(0.1));
+    }
+
+    @Test
+    @DisplayName("no wake evidence with phases: efficiency + WASO dropped, weights renormalized 69.2/15.4/15.4")
+    void no_wake_evidence_renormalizes_duration_deep_rem() {
+        // Contiguous night: TIB = TST 8h, no Awake and no In Bed samples.
+        // deep 5% (1440s) → 27.27, REM 18% (5184s) → 80, duration 100.
+        // 0.6923*100 + 0.1538*27.27 + 0.1538*80 = 85.73 → 86 (the old weights would have given 91).
+        SleepScoreResult result = calculator.score(sample(28800, 22176, 1440, 5184, 0, 0));
+
+        assertThat(result.lowConfidence()).isTrue();
+        assertThat(result.efficiencySubScore()).isNull();
+        assertThat(result.wasoSubScore()).isNull();
+        assertThat(result.durationSubScore()).isEqualTo(100.0);
+        assertThat(result.deepSubScore()).isCloseTo(27.27, within(0.1));
+        assertThat(result.remSubScore()).isCloseTo(80.0, within(0.1));
+        assertThat(result.efficiency()).isEqualTo(1.0);
+        assertThat(result.wasoMinutes()).isEqualTo(0.0);
+        assertThat(result.score()).isEqualTo(86);
+    }
+
+    @Test
+    @DisplayName("an unclassified In Bed segment alone is wake evidence: the full 45/30/10/10/5 weights apply")
+    void in_bed_segment_alone_keeps_efficiency_informative() {
+        // TST 8h, TIB 8.5h with the residual half hour reported as In Bed and no Awake sample.
+        SleepStageSample inBedOnly = new SleepStageSample(BEDTIME, BEDTIME.plusSeconds(30600),
+            1800, 17280, 5184, 6336, 0, 0);
+
+        SleepScoreResult result = calculator.score(inBedOnly);
+
+        assertThat(result.lowConfidence()).isFalse();
+        assertThat(result.efficiencySubScore()).isEqualTo(100.0);
+        assertThat(result.wasoSubScore()).isCloseTo(100.0, within(EPS));
+        assertThat(result.score()).isEqualTo(100);
+    }
+
+    @Test
+    @DisplayName("no wake evidence and no phases: duration alone carries the score, low confidence")
+    void no_wake_evidence_and_no_phases_scores_on_duration_only() {
+        // TST 8h as unspecified only, window 10h but no Awake/In Bed sample to back it.
+        SleepScoreResult result = calculator.score(sample(36000, 0, 0, 0, 28800, 0));
+
+        assertThat(result.lowConfidence()).isTrue();
+        assertThat(result.efficiencySubScore()).isNull();
+        assertThat(result.deepSubScore()).isNull();
+        assertThat(result.remSubScore()).isNull();
+        assertThat(result.wasoSubScore()).isNull();
+        assertThat(result.durationSubScore()).isEqualTo(100.0);
+        assertThat(result.score()).isEqualTo(100);
     }
 
     @Test

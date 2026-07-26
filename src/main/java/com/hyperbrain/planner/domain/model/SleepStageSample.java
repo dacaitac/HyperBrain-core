@@ -59,4 +59,14 @@ public record SleepStageSample(
     public boolean hasPhaseBreakdown() {
         return coreSeconds > 0 || deepSeconds > 0 || remSeconds > 0;
     }
+
+    /**
+     * Whether the session carries evidence of wakefulness inside the in-bed window — any {@code awake}
+     * or unclassified {@code inBed} segment. When false the session window is, by construction, the
+     * union of the asleep segments, so efficiency is 1.0 and WASO 0 by absence of data rather than by
+     * measurement; the calculator then drops both sub-scores and renormalizes (ADR-016 v1.7.0 §2).
+     */
+    public boolean hasWakeEvidence() {
+        return awakeSeconds > 0 || inBedSeconds > 0;
+    }
 }
