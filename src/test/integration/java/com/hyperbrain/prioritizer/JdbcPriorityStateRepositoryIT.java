@@ -178,6 +178,41 @@ class JdbcPriorityStateRepositoryIT {
     }
 
     @Test
+    @DisplayName("ADR-026: a COMPLETED ancestor's earlier (past) deadline is ineligible — no spurious overdue urgency 6")
+    void completed_ancestor_deadline_is_ineligible() {
+        // Earliest end_date is on a COMPLETED ancestor in the past; only ACTIVE cycles feed the MIN,
+        // so the executable falls to its own ACTIVE far deadline and scores ~0, NOT the overdue 6.
+        UUID completedPast = insertCycle("MCI", "COMPLETED", null, LocalDate.now().minusDays(5));
+        UUID ownFarActive = insertCycle("PROJECT", "ACTIVE", completedPast, LocalDate.now().plusDays(60));
+        UUID task = insertTaskInCycle("Under a finished MCI", ownFarActive);
+
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
+    }
+
+    @Test
+    @DisplayName("ADR-026: with the earliest deadline COMPLETED, urgency falls to the next ACTIVE cycle with an end_date")
+    void falls_to_next_active_cycle_with_deadline() {
+        // Chain: COMPLETED past (earliest) -> ACTIVE near -> own ACTIVE undated. The MIN over ACTIVE
+        // cycles is the near deadline, so urgency is on the ramp (>0, <6), not the spurious overdue 6.
+        UUID completedPast = insertCycle("MCI", "COMPLETED", null, LocalDate.now().minusDays(5));
+        UUID activeNear = insertCycle("OBJECTIVE", "ACTIVE", completedPast, LocalDate.now().plusDays(1));
+        UUID ownUndated = insertCycle("PROJECT", "ACTIVE", activeNear, null);
+        UUID task = insertTaskInCycle("Above a finished MCI", ownUndated);
+
+        assertThat(urgencyOf(task)).isGreaterThan(0.0).isLessThan(6.0);
+    }
+
+    @Test
+    @DisplayName("ADR-026: when every dated cycle in the chain is COMPLETED, urgency is 0 (no active deadline)")
+    void all_dated_cycles_completed_yields_zero() {
+        UUID completedParent = insertCycle("MCI", "COMPLETED", null, LocalDate.now().minusDays(2));
+        UUID completedOwn = insertCycle("PROJECT", "COMPLETED", completedParent, LocalDate.now().plusDays(3));
+        UUID task = insertTaskInCycle("Fully finished chain", completedOwn);
+
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
+    }
+
+    @Test
     @DisplayName("ADR-026: two executables sharing a cycle share the same raw urgency (per-cycle granularity)")
     void same_cycle_shares_urgency() {
         UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().plusDays(3));
