@@ -254,10 +254,11 @@ class AgendaGeneratorTest {
     }
 
     @Test
-    @DisplayName("pinned start: a task with dueInstant inside the window starts exactly at dueInstant")
-    void pinned_start_within_window_anchors_block_start() {
-        // Given: a task whose reminder time is 15:00 (well inside the window) with 60 min of effort.
-        // The reminder time is when to START, so the block runs 15:00-16:00.
+    @DisplayName("ADR-026 D4: a dated executable is NOT anchored to its due instant — placement is by rank")
+    void due_instant_does_not_seed_placement() {
+        // Given: a lone task whose authorial reminder time is 15:00 (well inside the window), 60 min.
+        // Before ADR-026 D4 this pinned the block to 15:00; now placement is the Planner's authorship,
+        // so the block lands in the earliest wall-clearing slot (the window start), not at 15:00.
         OffsetDateTime due = OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, ZoneOffset.UTC);
         SchedulableExecutable executable = new SchedulableExecutable(
             UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, due, null);
@@ -266,37 +267,40 @@ class AgendaGeneratorTest {
         // When
         Agenda agenda = generator.generate(state);
 
-        // Then: exactly one block, starting at the reminder time and ending 60 min later
+        // Then: exactly one block, placed by the cursor at the window start — not seeded from 15:00.
         assertThat(agenda.blocks()).hasSize(1);
         AgendaBlock block = agenda.blocks().get(0);
-        assertThat(block.start()).isEqualTo(due);
-        assertThat(block.end()).isEqualTo(due.plusMinutes(60));
+        assertThat(block.start()).isNotEqualTo(due);
+        assertThat(block.start()).isEqualTo(WAKE);
+        assertThat(block.end()).isEqualTo(WAKE.plusMinutes(60));
     }
 
     @Test
-    @DisplayName("pinned start: a dueInstant outside the window falls back to cursor placement")
-    void pinned_start_outside_window_falls_back_to_cursor() {
-        // Given: a task due at midnight (00:00 on targetDay) — before the 07:00 window start
-        OffsetDateTime midnight = OffsetDateTime.of(2026, 7, 10, 0, 0, 0, 0, ZoneOffset.UTC);
-        SchedulableExecutable executable = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, midnight, null);
-        PlannerDayState state = state(List.of(executable), List.of(), List.of(), NEUTRAL, true);
+    @DisplayName("ADR-026 D4: the authorial hour does not change placement — dated and undated task land identically")
+    void dated_and_undated_executables_place_identically() {
+        // A task with an authorial 15:00 due instant and an otherwise-identical undated task must be
+        // placed the same way (rank order alone decides): the due instant no longer pulls placement.
+        OffsetDateTime due = OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, ZoneOffset.UTC);
+        SchedulableExecutable dated = new SchedulableExecutable(
+            UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, due, null);
+        SchedulableExecutable undated = task(0.9, 60);
 
-        // When
-        Agenda agenda = generator.generate(state);
+        Agenda datedAgenda = generator.generate(
+            state(List.of(dated), List.of(), List.of(), NEUTRAL, true));
+        Agenda undatedAgenda = generator.generate(
+            state(List.of(undated), List.of(), List.of(), NEUTRAL, true));
 
-        // Then: the task is still placed (cursor fallback), but not starting at midnight
-        assertThat(agenda.blocks()).hasSize(1);
-        AgendaBlock block = agenda.blocks().get(0);
-        assertThat(block.start()).isNotEqualTo(midnight);
-        assertThat(block.start()).isAfterOrEqualTo(WAKE);
+        assertThat(datedAgenda.blocks()).hasSize(1);
+        assertThat(undatedAgenda.blocks()).hasSize(1);
+        assertThat(datedAgenda.blocks().get(0).start())
+            .isEqualTo(undatedAgenda.blocks().get(0).start());
     }
 
     @Test
-    @DisplayName("pinned start: a reminder whose block would run past bedtime falls back to cursor")
-    void pinned_start_past_bedtime_falls_back_to_cursor() {
-        // Given: a task whose reminder is 22:30, 60 min of effort → 22:30-23:30 would spill past the
-        // 23:00 bedtime, so the pinned placement is rejected and the cursor fallback keeps it in-window.
+    @DisplayName("hard wall: a dated executable never overruns bedtime — placement stays inside the window")
+    void dated_executable_respects_bedtime_wall() {
+        // Given: a task whose authorial due is 22:30 (would spill past the 23:00 bedtime if anchored).
+        // The floor must keep it inside the window; the bedtime wall is never loosened by the due hour.
         OffsetDateTime due = BEDTIME.minusMinutes(30); // 22:30 UTC
         SchedulableExecutable executable = new SchedulableExecutable(
             UUID.randomUUID(), ExecutableType.TASK, 0.9, false, null, null, 0, 60, 0, due, null);
@@ -305,10 +309,11 @@ class AgendaGeneratorTest {
         // When
         Agenda agenda = generator.generate(state);
 
-        // Then: the task is still placed (cursor fallback) and never runs past bedtime
+        // Then: placed by rank at the window start, never running past bedtime.
         assertThat(agenda.blocks()).hasSize(1);
         AgendaBlock block = agenda.blocks().get(0);
         assertThat(block.start()).isNotEqualTo(due);
+        assertThat(block.start()).isEqualTo(WAKE);
         assertThat(block.end()).isBeforeOrEqualTo(BEDTIME);
     }
 

@@ -33,10 +33,11 @@ import java.util.UUID;
  *                             without-subtasks branch; null when unestimated
  * @param settledActualMinutes Σ {@code actual_duration_minutes} of the task's settled blocks; the
  *                             work already spent, subtracted in the without-subtasks branch
- * @param dueInstant           the {@code core_executable.end_time} timestamp; when non-null,
- *                             constrains placement to the matching calendar day and pins the block's
- *                             end to this instant when within the planning window; null when no due
- *                             date is set
+ * @param dueInstant           the executable's due timestamp ({@code COALESCE(end_time, start_time)});
+ *                             when non-null it scopes WHICH day the executable is schedulable (the
+ *                             day-filter in {@code AgendaGenerationService}). Since ADR-026 D4 it no
+ *                             longer seeds WHERE inside the day the block lands — placement is the
+ *                             Planner's own authorship. Null when no due date is set
  * @param cycleId              the {@code core_executable.cycle_id} this executable belongs to; the
  *                             context key the humanized floor batches on (same Cycle/type placed
  *                             adjacently to cut context-switching, H1 rule 4); null when the executable

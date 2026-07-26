@@ -22,8 +22,7 @@ import java.util.UUID;
  *       comparable-priority bands, so the generator places same-context work adjacently.</li>
  *   <li><b>Generate (rules 1, 2, 5).</b> The {@link AgendaGenerator} places the batched work, reserving
  *       a transition buffer after each block (rule 1) and planning around the meal-anchor walls and any
- *       stable habit anchors already present in {@code state.occupied} / pinned via {@code dueInstant}
- *       (rules 2, 5).</li>
+ *       stable habit anchors already present in {@code state.occupied} (rules 2, 5).</li>
  *   <li><b>Humanize (rules 3, 6).</b> {@link AgendaHumanizer} drops sub-minimum slivers and trims the
  *       day to the occupancy cap.</li>
  * </ol>
