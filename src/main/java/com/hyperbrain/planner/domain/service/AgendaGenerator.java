@@ -148,27 +148,12 @@ public class AgendaGenerator {
                 continue;
             }
 
-            // Pinned-start placement: the reminder time is when to START. When the executable has a
-            // due instant that falls within the planning window, anchor the block's start to that
-            // instant and let it run for its remaining effort (reminder-driven scheduling).
-            OffsetDateTime dueInstant = executable.dueInstant();
-            if (dueInstant != null) {
-                OffsetDateTime pinnedStart = dueInstant;
-                OffsetDateTime pinnedEnd = pinnedStart.plusMinutes(minutes);
-                if (!pinnedStart.isBefore(state.windowStart()) && !pinnedEnd.isAfter(state.windowEnd())) {
-                    blocks.add(new AgendaBlock(executable.id(), pinnedStart, pinnedEnd, false, highLoad,
-                        rankReasonPinned(executable, minutes)));
-                    walls.add(new OccupiedInterval(executable.id(), pinnedStart, pinnedEnd, false));
-                    reserveTransitionBuffer(walls, pinnedEnd);
-                    placed.add(executable.id());
-                    if (highLoad) highLoadUsed++;
-                    urgentPlaced++;
-                    continue;
-                }
-                // Due instant outside window, or the block would run past bedtime (e.g. midnight) —
-                // fall through to cursor-based placement.
-            }
-
+            // Placement is the Planner's own authorship (ADR-026 D4): the deterministic floor places
+            // by its own logic — availability, effort, energy, hard walls — never seeding the start
+            // from the authorial reminder time. The due instant only scopes WHICH day an executable is
+            // schedulable (that day-filter lives upstream in AgendaGenerationService); it no longer
+            // dictates WHERE inside the day the block lands. The cognitive placement layer (ADR-029) is
+            // later work; here the block simply lands in the earliest wall-clearing gap by rank.
             Optional<OffsetDateTime> slot =
                 earliestSlot(state.windowStart(), rankingLimit, minutes, walls);
             if (slot.isEmpty()) {
@@ -298,12 +283,5 @@ public class AgendaGenerator {
         return String.format(
             "Ranked by priority %.3f, %d min remaining effort, %s",
             executable.rankingScore(), minutes, load);
-    }
-
-    private String rankReasonPinned(SchedulableExecutable executable, int minutes) {
-        String load = executable.isHighLoad(constraints.highLoadDrainFloor()) ? "high-load" : "standard";
-        return String.format(
-            "Pinned to start at reminder time %s, %d min remaining effort, priority %.3f, %s",
-            executable.dueInstant(), minutes, executable.rankingScore(), load);
     }
 }

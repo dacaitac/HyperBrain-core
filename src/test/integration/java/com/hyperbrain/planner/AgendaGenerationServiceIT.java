@@ -537,15 +537,16 @@ class AgendaGenerationServiceIT {
     @Test
     @DisplayName("H1 humanized floor: buffers, meal protection, no slivers and an occupancy cap hold together")
     void humanized_floor_invariants_hold_together() {
-        // A full day of work plus a sliver and a reminder-pinned task, over the cold-start 07:00–23:00
-        // window. The humanized floor must space, protect meals, drop the sliver, cap occupancy — and
-        // still honor the recent pinned-start sanitation (#12).
+        // A full day of work plus a sliver and a dated task, over the cold-start 07:00–23:00 window.
+        // The humanized floor must space, protect meals, drop the sliver and cap occupancy. Since
+        // ADR-026 D4 the authorial reminder hour no longer seeds placement — the dated task is placed
+        // by rank like any other, not anchored to its 15:00 due instant.
         for (int i = 0; i < 16; i++) {
             insertTask("Work " + i, 0.99 - i * 0.01, 60);
         }
         UUID sliver = insertTask("Sliver", 0.95, 10);
-        // Highest priority so it is anchored first, before the cursor fill can reach 15:00.
-        UUID pinned = insertTaskDueAt("Reminder at 15:00", 0.999, 60,
+        // Highest priority, so it is ranked first and placed at the window start by the cursor.
+        UUID dated = insertTaskDueAt("Reminder at 15:00", 0.999, 60,
             OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
 
         service.generate(USER, DAY, UTC, NOON, false);
@@ -571,10 +572,12 @@ class AgendaGenerationServiceIT {
         long busy = blocks.stream().mapToLong(AgendaGenerationServiceIT::minutesBetween).sum();
         assertThat(busy).isLessThanOrEqualTo(Math.round(960 * 0.85));
 
-        // #12 — the reminder-pinned task still starts exactly at its reminder instant.
-        OffsetDateTime pinnedStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, pinned);
-        assertThat(pinnedStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
+        // ADR-026 D4 — the dated task's placement is the Planner's own authorship: it is NOT anchored
+        // to its 15:00 reminder instant. Highest-ranked, it lands at the window start instead.
+        OffsetDateTime datedStart = jdbcTemplate.queryForObject(
+            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, dated);
+        assertThat(datedStart).isNotEqualTo(OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
+        assertThat(datedStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 7, 0, 0, 0, UTC));
     }
 
     @Test
