@@ -65,6 +65,28 @@ class NotionComputedScoreContractTest {
                 NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null);
             assertThat(decoded.urgencyScore()).isEqualTo(value);
         }
+
+        /**
+         * ADR-026 urgency is now a per-cycle value; a raw {@code Urgence} reflected to Notion must be
+         * a fixed point of one outbound→inbound pass, so the diff sees no change on the next tick and
+         * the reflection converges in one pass (never oscillates). Any per-cycle raw value, once
+         * written, decodes to itself and re-encodes to the identical Notion property.
+         */
+        @ParameterizedTest(name = "raw urgency {0} converges in one pass (reflection is a fixed point)")
+        @ValueSource(doubles = {0.0, 2.14, 4.28, 6.0})
+        void urgency_converges_in_one_pass(double value) {
+            Map<String, Object> firstPass =
+                NotionTaskMapper.map(snapshot().urgencyScore(value).build(), null, null);
+
+            NotionTaskPage echoed = pageWithNumbers(null, numberOf(firstPass, "Urgence"));
+            ExecutableSnapshot decoded =
+                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null);
+
+            Map<String, Object> secondPass =
+                NotionTaskMapper.map(snapshot().urgencyScore(decoded.urgencyScore()).build(), null, null);
+
+            assertThat(numberOf(secondPass, "Urgence")).isEqualTo(numberOf(firstPass, "Urgence"));
+        }
     }
 
     @SuppressWarnings("unchecked")
