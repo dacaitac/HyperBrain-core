@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
@@ -24,12 +25,13 @@ import static org.assertj.core.api.Assertions.within;
 
 /**
  * Verifies the JDBC read side of the Prioritizer against a real PostgreSQL: the recursive
- * {@code parent_cycle_id} walk that yields the graded-alignment contexts, and the deadline-anchored
- * raw urgency (Comité 2026-07-09). Black-box: only the public {@link PriorityStateRepository} is
- * exercised; the domain grading itself is unit-tested.
+ * {@code parent_cycle_id} walk that yields the graded-alignment contexts, and the cycle-deadline
+ * -anchored raw urgency (ADR-026) — urgency derived from {@code MIN(core_cycle.end_date)} across the
+ * executable's whole structural cycle chain, not from {@code executable.end_time}. Black-box: only the
+ * public {@link PriorityStateRepository} is exercised; the domain grading itself is unit-tested.
  */
 @IntegrationTest
-@DisplayName("JdbcPriorityStateRepository — graded alignment CTE + deadline-anchored urgency")
+@DisplayName("JdbcPriorityStateRepository — graded alignment CTE + cycle-deadline urgency (ADR-026)")
 class JdbcPriorityStateRepositoryIT {
 
     private static final UUID USER = DataFixture.SYSTEM_USER_ID;
@@ -112,57 +114,136 @@ class JdbcPriorityStateRepositoryIT {
     }
 
     @Test
-    @DisplayName("urgency is 0 while the deadline is beyond the 7-day horizon")
+    @DisplayName("ADR-026: a reminder-backed TASK (no end_time) inside a cycle with a near end_date now gets urgency")
+    void reminder_backed_task_in_dated_cycle_gets_urgency() {
+        // The hole ADR-026 closes: DR-01 strips end_time on reminder-backed rows, so before the
+        // re-anchor this task carried urgency 0 forever. Its cycle's end_date now drives urgency.
+        UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().plusDays(1));
+        UUID task = insertTaskInCycle("Due-soon task", cycle);
+
+        assertThat(urgencyOf(task)).isGreaterThan(0.0);
+    }
+
+    @Test
+    @DisplayName("ADR-026: urgency is 0 while the cycle deadline is beyond the 7-day horizon")
     void urgency_zero_outside_horizon() {
-        UUID task = insertTask("Far task", OffsetDateTime.now().plusDays(30));
+        UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().plusDays(30));
+        UUID task = insertTaskInCycle("Far task", cycle);
 
-        double urgency = urgencyOf(task);
-
-        assertThat(urgency).isCloseTo(0.0, within(1e-6));
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
     }
 
     @Test
-    @DisplayName("urgency ramps to ~5 at the deadline")
-    void urgency_five_at_deadline() {
-        UUID task = insertTask("Due now", OffsetDateTime.now().plusSeconds(2));
+    @DisplayName("ADR-026: urgency sits on the ramp for a cycle deadline inside the horizon (0 < u < 5)")
+    void urgency_on_the_ramp_inside_horizon() {
+        // end_date today + 3 -> deadline instant is the start of day +4, so days_to_deadline is in
+        // (3, 4] depending on the wall-clock time; urgency = 5·(1 − dtd/7) lands in (2.14, 2.86].
+        UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().plusDays(3));
+        UUID task = insertTaskInCycle("Mid-ramp task", cycle);
 
         double urgency = urgencyOf(task);
 
-        assertThat(urgency).isCloseTo(5.0, within(0.05));
+        assertThat(urgency).isGreaterThan(2.0).isLessThan(3.0);
     }
 
     @Test
-    @DisplayName("an old task with a far deadline is NOT permanently urgent (the v1 bug is gone)")
-    void old_task_far_deadline_is_not_urgent() {
-        UUID task = insertTask("Old but not due", OffsetDateTime.now().plusDays(14));
-        // Backdate creation far into the past — the old creation-anchored ramp would pin this at 5/6.
-        jdbcTemplate.update("UPDATE core_executable SET created_at = ? WHERE id = ?",
-            OffsetDateTime.now().minusDays(365), task);
+    @DisplayName("ADR-026: an overdue cycle deadline rises above 5 up to the cap 6")
+    void overdue_cycle_deadline_exceeds_five_capped_at_six() {
+        UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().minusDays(5));
+        UUID task = insertTaskInCycle("Overdue task", cycle);
 
         double urgency = urgencyOf(task);
 
-        assertThat(urgency).isCloseTo(0.0, within(1e-6));
+        assertThat(urgency).isGreaterThan(5.0).isLessThanOrEqualTo(6.0);
     }
 
     @Test
-    @DisplayName("an overdue task rises above 5 up to the cap 6")
-    void overdue_task_exceeds_five_capped_at_six() {
-        UUID task = insertTask("Overdue", OffsetDateTime.now().minusDays(3));
+    @DisplayName("ADR-026: MIN over the chain wins — an ancestor's earlier deadline drives urgency, NULLs are skipped")
+    void min_deadline_over_the_chain_wins() {
+        // near ancestor deadline < own far deadline; an intermediate cycle with no end_date is skipped.
+        UUID near = insertCycle("MCI", "ACTIVE", null, LocalDate.now().plusDays(1));
+        UUID middleNull = insertCycle("OBJECTIVE", "ACTIVE", near, null);
+        UUID own = insertCycle("PROJECT", "ACTIVE", middleNull, LocalDate.now().plusDays(60));
+        UUID task = insertTaskInCycle("Chained task", own);
 
-        double urgency = urgencyOf(task);
+        double chained = urgencyOf(task);
 
-        assertThat(urgency).isGreaterThan(5.0);
-        assertThat(urgency).isLessThanOrEqualTo(6.0);
+        // Same executable pinned only to its own far cycle would score ~0; the ancestor's near
+        // deadline lifts it well onto the ramp.
+        UUID isolated = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().plusDays(60));
+        double isolatedUrgency = urgencyOf(insertTaskInCycle("Isolated task", isolated));
+
+        assertThat(isolatedUrgency).isCloseTo(0.0, within(1e-6));
+        assertThat(chained).isGreaterThan(0.0);
     }
 
     @Test
-    @DisplayName("a task with no deadline carries no urgency signal")
-    void no_deadline_no_urgency() {
-        UUID task = insertTask("No deadline", null);
+    @DisplayName("ADR-026: a COMPLETED ancestor's earlier (past) deadline is ineligible — no spurious overdue urgency 6")
+    void completed_ancestor_deadline_is_ineligible() {
+        // Earliest end_date is on a COMPLETED ancestor in the past; only ACTIVE cycles feed the MIN,
+        // so the executable falls to its own ACTIVE far deadline and scores ~0, NOT the overdue 6.
+        UUID completedPast = insertCycle("MCI", "COMPLETED", null, LocalDate.now().minusDays(5));
+        UUID ownFarActive = insertCycle("PROJECT", "ACTIVE", completedPast, LocalDate.now().plusDays(60));
+        UUID task = insertTaskInCycle("Under a finished MCI", ownFarActive);
 
-        double urgency = urgencyOf(task);
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
+    }
 
-        assertThat(urgency).isCloseTo(0.0, within(1e-6));
+    @Test
+    @DisplayName("ADR-026: with the earliest deadline COMPLETED, urgency falls to the next ACTIVE cycle with an end_date")
+    void falls_to_next_active_cycle_with_deadline() {
+        // Chain: COMPLETED past (earliest) -> ACTIVE near -> own ACTIVE undated. The MIN over ACTIVE
+        // cycles is the near deadline, so urgency is on the ramp (>0, <6), not the spurious overdue 6.
+        UUID completedPast = insertCycle("MCI", "COMPLETED", null, LocalDate.now().minusDays(5));
+        UUID activeNear = insertCycle("OBJECTIVE", "ACTIVE", completedPast, LocalDate.now().plusDays(1));
+        UUID ownUndated = insertCycle("PROJECT", "ACTIVE", activeNear, null);
+        UUID task = insertTaskInCycle("Above a finished MCI", ownUndated);
+
+        assertThat(urgencyOf(task)).isGreaterThan(0.0).isLessThan(6.0);
+    }
+
+    @Test
+    @DisplayName("ADR-026: when every dated cycle in the chain is COMPLETED, urgency is 0 (no active deadline)")
+    void all_dated_cycles_completed_yields_zero() {
+        UUID completedParent = insertCycle("MCI", "COMPLETED", null, LocalDate.now().minusDays(2));
+        UUID completedOwn = insertCycle("PROJECT", "COMPLETED", completedParent, LocalDate.now().plusDays(3));
+        UUID task = insertTaskInCycle("Fully finished chain", completedOwn);
+
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
+    }
+
+    @Test
+    @DisplayName("ADR-026: two executables sharing a cycle share the same raw urgency (per-cycle granularity)")
+    void same_cycle_shares_urgency() {
+        UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().plusDays(3));
+        UUID a = insertTaskInCycle("A", cycle);
+        UUID b = insertTaskInCycle("B", cycle);
+
+        // Read both in a single query so they share one now(): the urgency is a pure function of the
+        // shared cycle deadline, so same-cycle executables must land the identical raw value.
+        Map<UUID, Double> urgencies = repository.findTodaysFactors(USER).stream()
+            .collect(java.util.stream.Collectors.toMap(
+                ExecutableFactors::executableId, ExecutableFactors::urgencyRaw));
+
+        assertThat(urgencies.get(a)).isEqualTo(urgencies.get(b));
+    }
+
+    @Test
+    @DisplayName("ADR-026: default 0 with no cycle_id at all (the existing 'no urgency' zero, no new sentinel)")
+    void no_cycle_no_urgency() {
+        UUID task = insertTask("No cycle", null);
+
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
+    }
+
+    @Test
+    @DisplayName("ADR-026: default 0 when the whole cycle chain carries no end_date")
+    void chain_without_end_date_has_no_urgency() {
+        UUID parent = insertCycle("MCI", "ACTIVE", null, null);
+        UUID own = insertCycle("PROJECT", "ACTIVE", parent, null);
+        UUID task = insertTaskInCycle("Undated chain", own);
+
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
     }
 
     @Test
@@ -209,13 +290,16 @@ class JdbcPriorityStateRepositoryIT {
     }
 
     @Test
-    @DisplayName("findFactors returns one executable's factors; a system-generated row carries no priority")
+    @DisplayName("findFactors returns one executable's factors including its cycle-derived urgency; a system-generated row carries no priority")
     void find_factors_single_row() {
-        UUID task = insertTask("One", OffsetDateTime.now().plusSeconds(2));
+        // Overdue cycle deadline -> the single-executable read derives urgency identically to the day
+        // query, so an overdue chain caps at 6.
+        UUID cycle = insertCycle("PROJECT", "ACTIVE", null, LocalDate.now().minusDays(5));
+        UUID task = insertTaskInCycle("One", cycle);
 
         assertThat(repository.findFactors(task)).hasValueSatisfying(f -> {
             assertThat(f.executableId()).isEqualTo(task);
-            assertThat(f.urgencyRaw()).isCloseTo(5.0, within(0.05));
+            assertThat(f.urgencyRaw()).isGreaterThan(5.0).isLessThanOrEqualTo(6.0);
         });
 
         jdbcTemplate.update("UPDATE core_executable SET system_generated = true WHERE id = ?", task);
@@ -253,11 +337,15 @@ class JdbcPriorityStateRepositoryIT {
     }
 
     private UUID insertCycle(String type, String status, UUID parent) {
+        return insertCycle(type, status, parent, null);
+    }
+
+    private UUID insertCycle(String type, String status, UUID parent, LocalDate endDate) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_cycle (id, user_id, parent_cycle_id, name, type, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """, id, USER, parent, type + "-" + id, type, status);
+            INSERT INTO core_cycle (id, user_id, parent_cycle_id, name, type, status, end_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, id, USER, parent, type + "-" + id, type, status, endDate);
         return id;
     }
 
@@ -267,6 +355,15 @@ class JdbcPriorityStateRepositoryIT {
             INSERT INTO core_executable (id, user_id, name, type, status, end_time)
             VALUES (?, ?, ?, 'TASK', 'TODO', ?)
             """, id, USER, name, endTime);
+        return id;
+    }
+
+    private UUID insertTaskInCycle(String name, UUID cycleId) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, cycle_id, name, type, status)
+            VALUES (?, ?, ?, ?, 'TASK', 'TODO')
+            """, id, USER, cycleId, name);
         return id;
     }
 }

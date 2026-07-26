@@ -22,50 +22,96 @@ import java.util.UUID;
 /**
  * JDBC adapter for {@link PriorityStateRepository}. Reads aggregate state directly
  * ({@code core_executable} joined with {@code core_execution_profile}, and the {@code core_cycle}
- * hierarchy for graded alignment) and writes back only the score columns of {@code core_executable}
- * ({@code priority_score}, {@code urgency_score}, {@code priority_computed_at}), diffed so only rows
- * whose score moved are touched.
+ * hierarchy for graded alignment and for the urgency deadline) and writes back only the score columns
+ * of {@code core_executable} ({@code priority_score}, {@code urgency_score},
+ * {@code priority_computed_at}), diffed so only rows whose score moved are touched.
+ *
+ * <p><b>Time-zone assumption (ADR-026, pending Daniel's validation).</b> {@code core_cycle.end_date}
+ * is a {@code DATE}; a commitment is not overdue until its due day has ended, so the deadline instant
+ * is the start of the following day: {@code (end_date + INTERVAL '1 day')::timestamptz}. The
+ * {@code ::timestamptz} cast resolves that wall-clock midnight in the database session time zone.
  */
 @Repository
 class JdbcPriorityStateRepository implements PriorityStateRepository {
 
     /**
      * The fixed deadline horizon {@code H} (days) the raw urgency ramp is anchored to: urgency starts
-     * rising only once the due date is within {@code H} days of now (Daniel, Comité 2026-07-09). A
+     * rising only once the deadline is within {@code H} days of now (Daniel, Comité 2026-07-09). A
      * calibrable domain constant — replacing the old creation-anchored ramp that pinned every old task
      * at maximum urgency permanently.
      */
     private static final int URGENCY_HORIZON_DAYS = 7;
 
     /**
-     * The day's schedulable executables with their raw factors. Urgency is derived here onto the
-     * 0–6 source scale, re-anchored to a fixed deadline horizon {@code H} (days):
-     * {@code days_to_deadline = (end_time − now)} in days, and
+     * The deadline instant of a single cycle in the structural chain, on the 0–6 urgency ramp's time
+     * axis. {@code core_cycle.end_date} is a {@code DATE}; the commitment is not overdue until the due
+     * day has ended, so the instant is the start of the day <em>after</em> {@code end_date}. The
+     * {@code ::timestamptz} cast resolves that midnight in the database session time zone (see the
+     * class Javadoc — an explicit assumption pending Daniel's validation). {@code chain} is the joined
+     * chain-cycle alias in both deadline CTEs.
+     */
+    private static final String CYCLE_DEADLINE_INSTANT = "(chain.end_date + INTERVAL '1 day')::timestamptz";
+
+    /**
+     * The deadline-anchored raw urgency expression on the 0–6 source scale, over the precomputed
+     * {@code cd.deadline_instant} (ADR-026): the earliest end-of-day deadline across the executable's
+     * whole structural cycle chain — its own cycle plus every ancestor reached via
+     * {@code parent_cycle_id}. Only {@code ACTIVE} cycles contribute a deadline (Daniel, ADR-026): a
+     * {@code COMPLETED} ancestor is walked through structurally but its {@code end_date} is ineligible
+     * for the {@code MIN}, so a finished commitment with a past due date never injects a spurious
+     * overdue deadline — same single criterion as {@link #FIND_ALIGNMENT_CONTEXTS_SQL}. Let
+     * {@code days_to_deadline = (deadline_instant − now)} in days; then
      * {@code urgency = 5 · clamp(1 − days_to_deadline / H, 0, 1)} — {@code 0} while the deadline is more
      * than {@code H} days away, ramping to {@code 5} at the deadline, and rising above {@code 5} up to
-     * the cap {@code 6} once overdue. Executables with no due date carry no urgency signal ({@code 0}).
-     * SYSTEM-generated accounting rows and read-only AGENDA blocks are excluded — they are not the
-     * user's actionable work.
-     */
-    /**
-     * The deadline-anchored raw urgency expression on the 0–6 source scale, shared by the day query
-     * and the single-executable {@code rescore} read so both derive urgency identically.
+     * the cap {@code 6} once overdue. Executables whose chain carries no {@code end_date} on any active
+     * cycle (or that have no cycle) carry no urgency signal ({@code 0}). Shared by the day query and the
+     * single-executable {@code rescore} read so both derive urgency identically (DRY guarantee).
      */
     private static final String URGENCY_RAW_EXPR = """
         CASE
-            WHEN e.end_time IS NULL THEN 0
+            WHEN cd.deadline_instant IS NULL THEN 0
             ELSE LEAST(
                 6,
                 5 * GREATEST(
                     0,
-                    1 - (EXTRACT(EPOCH FROM (e.end_time - now())) / 86400.0)
+                    1 - (EXTRACT(EPOCH FROM (cd.deadline_instant - now())) / 86400.0)
                         / %d
                 )
             )
         END AS urgency_raw
         """.formatted(URGENCY_HORIZON_DAYS);
 
+    /**
+     * The day's schedulable executables with their raw factors. The recursive {@code cycle_chain} walks
+     * {@code parent_cycle_id} upward from every user cycle (same structural walk, cycle guard and
+     * depth bound 16 as {@link #FIND_ALIGNMENT_CONTEXTS_SQL}); {@code cycle_deadline} then keeps the
+     * earliest {@code end_date} across each chain <em>among its {@code ACTIVE} cycles only</em>, so a
+     * {@code COMPLETED} ancestor is traversed but does not lend its (possibly past) due date. Urgency is
+     * derived over that deadline (see {@link #URGENCY_RAW_EXPR}). SYSTEM-generated
+     * accounting rows and read-only AGENDA blocks are excluded — they are not the user's actionable
+     * work. Parameters: the walk's user filter and the projection's user filter (both the same user id).
+     */
     private static final String FIND_TODAYS_FACTORS_SQL = """
+        WITH RECURSIVE cycle_chain (source_id, current_id, depth, path) AS (
+            SELECT c.id, c.id, 0, ARRAY[c.id]
+            FROM core_cycle c
+            WHERE c.user_id = ?
+            UNION ALL
+            SELECT cc.source_id, parent.id, cc.depth + 1, cc.path || parent.id
+            FROM cycle_chain cc
+            JOIN core_cycle child ON child.id = cc.current_id
+            JOIN core_cycle parent ON parent.id = child.parent_cycle_id
+            WHERE cc.depth < 16
+              AND NOT parent.id = ANY(cc.path)
+        ),
+        cycle_deadline AS (
+            SELECT cc.source_id AS cycle_id,
+                   MIN(%s) AS deadline_instant
+            FROM cycle_chain cc
+            JOIN core_cycle chain ON chain.id = cc.current_id
+            WHERE chain.status = 'ACTIVE'
+            GROUP BY cc.source_id
+        )
         SELECT e.id,
                e.cycle_id,
                p.impact,
@@ -73,18 +119,40 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
                %s
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
+        LEFT JOIN cycle_deadline cd ON cd.cycle_id = e.cycle_id
         WHERE e.user_id = ?
           AND e.status IN ('TODO', 'IN_PROGRESS')
           AND e.type <> 'AGENDA'
           AND e.system_generated = false
-        """.formatted(URGENCY_RAW_EXPR);
+        """.formatted(CYCLE_DEADLINE_INSTANT, URGENCY_RAW_EXPR);
 
     /**
      * The same factor projection for one executable, applying the identical exclusions (read-only
      * AGENDA and system-generated rows carry no priority signal) so {@code rescore} of such a row is
-     * a clean no-op rather than a spurious zero score.
+     * a clean no-op rather than a spurious zero score. {@code cycle_chain} walks upward from the row's
+     * own cycle (single-source specialization of the day query's walk); {@code cycle_deadline} reduces
+     * the chain to its earliest {@code end_date} among its {@code ACTIVE} cycles only. Parameters: the executable id resolving the starting
+     * cycle, then the executable id of the projected row (the same id, bound twice).
      */
     private static final String FIND_FACTORS_BY_ID_SQL = """
+        WITH RECURSIVE cycle_chain (current_id, depth, path) AS (
+            SELECT c.id, 0, ARRAY[c.id]
+            FROM core_cycle c
+            WHERE c.id = (SELECT cycle_id FROM core_executable WHERE id = ?)
+            UNION ALL
+            SELECT parent.id, cc.depth + 1, cc.path || parent.id
+            FROM cycle_chain cc
+            JOIN core_cycle child ON child.id = cc.current_id
+            JOIN core_cycle parent ON parent.id = child.parent_cycle_id
+            WHERE cc.depth < 16
+              AND NOT parent.id = ANY(cc.path)
+        ),
+        cycle_deadline AS (
+            SELECT MIN(%s) AS deadline_instant
+            FROM cycle_chain cc
+            JOIN core_cycle chain ON chain.id = cc.current_id
+            WHERE chain.status = 'ACTIVE'
+        )
         SELECT e.id,
                e.cycle_id,
                p.impact,
@@ -92,10 +160,11 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
                %s
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
+        LEFT JOIN cycle_deadline cd ON true
         WHERE e.id = ?
           AND e.type <> 'AGENDA'
           AND e.system_generated = false
-        """.formatted(URGENCY_RAW_EXPR);
+        """.formatted(CYCLE_DEADLINE_INSTANT, URGENCY_RAW_EXPR);
 
     /**
      * The graded-alignment context per cycle for one user, computed in a single recursive pass. From
@@ -211,12 +280,14 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
 
     @Override
     public List<ExecutableFactors> findTodaysFactors(UUID userId) {
-        return jdbcTemplate.query(FIND_TODAYS_FACTORS_SQL, FACTORS_MAPPER, userId);
+        // Bound twice: the recursive walk's user filter and the projection's user filter.
+        return jdbcTemplate.query(FIND_TODAYS_FACTORS_SQL, FACTORS_MAPPER, userId, userId);
     }
 
     @Override
     public Optional<ExecutableFactors> findFactors(UUID executableId) {
-        return jdbcTemplate.query(FIND_FACTORS_BY_ID_SQL, FACTORS_MAPPER, executableId)
+        // Bound twice: the subquery resolving the starting cycle and the projected row's id filter.
+        return jdbcTemplate.query(FIND_FACTORS_BY_ID_SQL, FACTORS_MAPPER, executableId, executableId)
             .stream()
             .findFirst();
     }
