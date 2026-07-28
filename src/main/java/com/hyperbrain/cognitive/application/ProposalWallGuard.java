@@ -51,6 +51,7 @@ public class ProposalWallGuard {
         for (BlockDecision decision : propuesta.decisions()) {
             breaches.addAll(blockBreaches(decision, context));
         }
+        breaches.addAll(overlapBreaches(propuesta, context));
         return new WallGuardResult(List.copyOf(breaches));
     }
 
@@ -79,7 +80,7 @@ public class ProposalWallGuard {
         return breaches;
     }
 
-    /** The frontier / AGENDA / WIG walls for one decision. */
+    /** The frontier / AGENDA / WIG / meal walls for one decision. */
     private static List<WallBreach> blockBreaches(BlockDecision decision, AgendaProposalContext context) {
         UUID id = decision.blockId();
         if (decision.placement() == Placement.DROP) {
@@ -93,8 +94,8 @@ public class ProposalWallGuard {
             // An invented id already produced a STRUCTURAL breach; nothing more to check geometrically.
             return List.of();
         }
-        OffsetDateTime start = decision.placement() == Placement.MOVE ? decision.start() : candidate.start();
-        OffsetDateTime end = decision.placement() == Placement.MOVE ? decision.end() : candidate.end();
+        OffsetDateTime start = effectiveStart(decision, candidate);
+        OffsetDateTime end = effectiveEnd(decision, candidate);
 
         List<WallBreach> breaches = new ArrayList<>();
         if (start.isBefore(context.frontierStart()) || end.isAfter(context.frontierEnd())) {
@@ -104,7 +105,67 @@ public class ProposalWallGuard {
         if (overlapsAgenda) {
             breaches.add(new WallBreach(id, ProposalWall.AGENDA_READ_ONLY));
         }
+        // Meal windows are permeable ONLY to the block that matches them: a block sitting entirely inside
+        // a meal window IS the meal (breakfast/lunch/dinner block occupying its natural slot), which is
+        // allowed; any other block that merely bleeds work across the meal boundary is a breach (core#50,
+        // Part B). Without this the LLM could quietly schedule work over a protected meal.
+        boolean intrudesOnMeal = context.mealAttractors().stream()
+            .anyMatch(meal -> meal.overlaps(start, end) && !contains(meal, start, end));
+        if (intrudesOnMeal) {
+            breaches.add(new WallBreach(id, ProposalWall.MEAL_WINDOW));
+        }
         return breaches;
+    }
+
+    /**
+     * Block-vs-block non-overlap across the surviving (non-DROP) proposal (core#50, Part B): the LLM owns
+     * the arrangement but two blocks may never share the same minutes. Reports the later-starting block
+     * of each overlapping pair, so the breach points at the block that would collide.
+     */
+    private static List<WallBreach> overlapBreaches(AgendaPropuesta propuesta,
+                                                    AgendaProposalContext context) {
+        List<Placed> placed = new ArrayList<>();
+        for (BlockDecision decision : propuesta.decisions()) {
+            if (decision.placement() == Placement.DROP) {
+                continue;
+            }
+            AgendaBlock candidate = context.candidate(decision.blockId());
+            if (candidate == null) {
+                continue;
+            }
+            placed.add(new Placed(decision.blockId(),
+                effectiveStart(decision, candidate), effectiveEnd(decision, candidate)));
+        }
+        placed.sort(java.util.Comparator.comparing(Placed::start));
+        List<WallBreach> breaches = new ArrayList<>();
+        for (int i = 1; i < placed.size(); i++) {
+            Placed current = placed.get(i);
+            for (int j = 0; j < i; j++) {
+                Placed earlier = placed.get(j);
+                if (current.start().isBefore(earlier.end()) && current.end().isAfter(earlier.start())) {
+                    breaches.add(new WallBreach(current.id(), ProposalWall.BLOCK_OVERLAP));
+                    break;
+                }
+            }
+        }
+        return breaches;
+    }
+
+    private static OffsetDateTime effectiveStart(BlockDecision decision, AgendaBlock candidate) {
+        return decision.placement() == Placement.MOVE ? decision.start() : candidate.start();
+    }
+
+    private static OffsetDateTime effectiveEnd(BlockDecision decision, AgendaBlock candidate) {
+        return decision.placement() == Placement.MOVE ? decision.end() : candidate.end();
+    }
+
+    /** Whether {@code [start, end]} sits entirely inside the meal window. */
+    private static boolean contains(OccupiedInterval meal, OffsetDateTime start, OffsetDateTime end) {
+        return !start.isBefore(meal.start()) && !end.isAfter(meal.end());
+    }
+
+    /** A surviving block's effective placement, for the block-vs-block overlap scan. */
+    private record Placed(UUID id, OffsetDateTime start, OffsetDateTime end) {
     }
 
     /** The bounded set of hard walls the guard re-imposes on an LLM proposal. */
@@ -116,7 +177,11 @@ public class ProposalWallGuard {
         /** The WIG block was dropped or expelled — F1 is a hard floor. */
         WIG_PROTECTED,
         /** An invented, duplicated, or silently dropped block id (identity diff, anti-hallucination). */
-        STRUCTURAL_IDENTITY
+        STRUCTURAL_IDENTITY,
+        /** A block bled work across a protected meal window it does not itself occupy (core#50). */
+        MEAL_WINDOW,
+        /** Two surviving blocks overlapped in time — the arrangement double-booked the day (core#50). */
+        BLOCK_OVERLAP
     }
 
     /**

@@ -170,6 +170,60 @@ class WriteCommandFactoryTest {
             COMMAND_ID, CommandType.CALENDAR_EVENT, Operation.DELETED, "EK-9", null));
     }
 
+    @Test
+    @DisplayName("core#50: a placeholder (null start) reminder takes the Planner's scheduled hour + marker")
+    void placeholder_reminder_takes_scheduled_hour() {
+        CoreExecutable task = executable("TASK", "TODO", null, null, "HyperBrain");
+        OffsetDateTime scheduled = OffsetDateTime.of(2026, 7, 6, 15, 30, 0, 0, ZoneOffset.UTC);
+
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, task, Operation.UPDATED, "EK-1", Optional.of(scheduled));
+
+        ReminderPayload payload = (ReminderPayload) command.orElseThrow().payload();
+        assertThat(payload.dueDate()).isEqualTo(scheduled);
+        assertThat(payload.notes()).startsWith("⏱ Programado por HyperBrain 15:30");
+    }
+
+    @Test
+    @DisplayName("core#50: a midnight (all-day) start is a placeholder — the scheduled hour fills it")
+    void midnight_start_is_placeholder() {
+        OffsetDateTime midnight = OffsetDateTime.of(2026, 7, 6, 0, 0, 0, 0, ZoneOffset.UTC);
+        CoreExecutable task = executable("TASK", "TODO", midnight, null, "HyperBrain");
+        OffsetDateTime scheduled = OffsetDateTime.of(2026, 7, 6, 11, 0, 0, 0, ZoneOffset.UTC);
+
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, task, Operation.UPDATED, "EK-1", Optional.of(scheduled));
+
+        assertThat(((ReminderPayload) command.orElseThrow().payload()).dueDate()).isEqualTo(scheduled);
+    }
+
+    @Test
+    @DisplayName("core#50: a user-set hour is NEVER overwritten by the Planner's scheduled hour")
+    void user_set_hour_is_never_overwritten() {
+        CoreExecutable task = executable("TASK", "TODO", START, null, "HyperBrain"); // 09:00, user intent
+        OffsetDateTime scheduled = OffsetDateTime.of(2026, 7, 6, 15, 30, 0, 0, ZoneOffset.UTC);
+
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, task, Operation.UPDATED, "EK-1", Optional.of(scheduled));
+
+        ReminderPayload payload = (ReminderPayload) command.orElseThrow().payload();
+        assertThat(payload.dueDate()).isEqualTo(START);
+        assertThat(payload.notes()).isEqualTo("2L milk");
+    }
+
+    @Test
+    @DisplayName("core#50: a de-scheduled placeholder (no scheduled hour) keeps a null due date")
+    void descheduled_placeholder_keeps_null_due() {
+        CoreExecutable task = executable("TASK", "TODO", null, null, "HyperBrain");
+
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, task, Operation.UPDATED, "EK-1", Optional.empty());
+
+        ReminderPayload payload = (ReminderPayload) command.orElseThrow().payload();
+        assertThat(payload.dueDate()).isNull();
+        assertThat(payload.notes()).isEqualTo("2L milk");
+    }
+
     private static CoreExecutable executable(
         String type, String status, OffsetDateTime start, OffsetDateTime end, String sourceCalendar) {
         return new CoreExecutable(

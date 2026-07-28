@@ -11,6 +11,7 @@ import com.hyperbrain.sync.domain.model.PendingWriteCommand;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.model.WriteCommand;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
+import com.hyperbrain.sync.domain.port.out.ScheduledDueTimeProvider;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
@@ -74,19 +75,22 @@ public class AppleEventPropagator implements IEventPropagator {
     private final WriteCommandLogRepository commandLogRepo;
     private final WriteCommandPublisher commandPublisher;
     private final WriteCommandWireMapper wireMapper;
+    private final ScheduledDueTimeProvider scheduledDueTimeProvider;
 
     public AppleEventPropagator(
         CoreExecutableRepository executableRepo,
         SyncMappingRepository syncMappingRepo,
         WriteCommandLogRepository commandLogRepo,
         WriteCommandPublisher commandPublisher,
-        WriteCommandWireMapper wireMapper
+        WriteCommandWireMapper wireMapper,
+        ScheduledDueTimeProvider scheduledDueTimeProvider
     ) {
         this.executableRepo = executableRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.commandLogRepo = commandLogRepo;
         this.commandPublisher = commandPublisher;
         this.wireMapper = wireMapper;
+        this.scheduledDueTimeProvider = scheduledDueTimeProvider;
     }
 
     @Override
@@ -168,7 +172,8 @@ public class AppleEventPropagator implements IEventPropagator {
                     localId, inFlight.get().commandId(), event.id());
                 return;
             }
-            emit(WriteCommandFactory.forUpsert(commandId, executable.get(), Operation.CREATED, null),
+            emit(WriteCommandFactory.forUpsert(commandId, executable.get(), Operation.CREATED, null,
+                    scheduledStart(localId)),
                 event, userId, localId, localId.toString());
             return;
         }
@@ -184,8 +189,17 @@ public class AppleEventPropagator implements IEventPropagator {
 
         String externalId = mapping.get().externalId();
         emit(WriteCommandFactory.forUpsert(deterministicCommandId(event.id()), executable.get(),
-                Operation.UPDATED, externalId),
+                Operation.UPDATED, externalId, scheduledStart(localId)),
             event, userId, localId, externalId);
+    }
+
+    /**
+     * The hour the Planner scheduled this executable, for the reminder due-date projection (core#50,
+     * Part C). Empty for a calendar-event type or an executable with no live planner block — the factory
+     * then keeps the authored due date (or none), so this read is a cheap, harmless projection.
+     */
+    private Optional<java.time.OffsetDateTime> scheduledStart(UUID localId) {
+        return scheduledDueTimeProvider.scheduledStart(localId);
     }
 
     /**
@@ -204,7 +218,7 @@ public class AppleEventPropagator implements IEventPropagator {
         emit(Optional.of(deleteCommand), event, userId, localId, mapping.externalId());
 
         emit(WriteCommandFactory.forUpsert(deterministicCommandId(event.id(), "create"),
-                executable, Operation.CREATED, null),
+                executable, Operation.CREATED, null, scheduledStart(localId)),
             event, userId, localId, localId.toString());
         log.info("Executable {} changed Apple kind {} -> {}; deleted entity {} and re-created",
             localId, oldKind, newKind, mapping.externalId());

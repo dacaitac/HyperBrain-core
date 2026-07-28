@@ -5,6 +5,7 @@ import com.hyperbrain.cognitive.application.AgendaProposalPromptBuilder;
 import com.hyperbrain.cognitive.application.AgendaPropuestaParser;
 import com.hyperbrain.cognitive.application.ProposalTelemetry;
 import com.hyperbrain.cognitive.application.ProposalWallGuard;
+import com.hyperbrain.cognitive.application.ThemeQualityGuard;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import org.junit.jupiter.api.DisplayName;
@@ -128,6 +129,11 @@ class CognitiveLlmAutoConfigurationTest {
         @Bean
         ProposalWallGuard wallGuard() {
             return new ProposalWallGuard();
+        }
+
+        @Bean
+        ThemeQualityGuard themeGuard() {
+            return new ThemeQualityGuard();
         }
 
         @Bean

@@ -23,7 +23,9 @@ public record ValidationViolation(UUID executableId, Wall wall) {
         /** A high-load block beyond the F6 quota (the WIG is exempt). */
         HIGH_LOAD_QUOTA_EXCEEDED,
         /** Scheduled a read-only AGENDA executable as if it were work (ADR-009). */
-        SCHEDULES_READ_ONLY_AGENDA
+        SCHEDULES_READ_ONLY_AGENDA,
+        /** Folded a WIG lead measure into a block as a companion — WIG blocks are atomic (ADR-027 D4). */
+        WIG_AS_COMPANION
     }
 
     public ValidationViolation {

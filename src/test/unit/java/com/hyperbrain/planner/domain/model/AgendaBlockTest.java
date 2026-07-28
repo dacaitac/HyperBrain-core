@@ -112,6 +112,51 @@ class AgendaBlockTest {
         assertThat(moved.highLoad()).isEqualTo(block.highLoad());
     }
 
+    @Test
+    @DisplayName("a grouped block splits its duration in PROPORTION to each member's own effort, not evenly")
+    void planned_minutes_split_by_member_effort() {
+        // A 90-min container of three members whose own efforts are 60/20/10: the split must track the
+        // efforts (60/20/10), not the even 30/30/30 an unweighted split would mis-impute (ADR-013/034).
+        AgendaBlock block = AgendaBlock.grouped(
+            List.of(ANCHOR, SECOND, THIRD), List.of(60, 20, 10),
+            START, START.plusMinutes(90), false, "grouped");
+
+        assertThat(block.memberPlannedMinutes()).containsExactly(60, 20, 10);
+        assertThat(block.memberPlannedMinutes().stream().mapToInt(Integer::intValue).sum())
+            .isEqualTo((int) block.durationMinutes());
+    }
+
+    @Test
+    @DisplayName("a retimed grouped block re-apportions the new duration by the same effort weights, exactly")
+    void retimed_reapportions_by_effort_keeping_the_total() {
+        // Efforts 60/20/10 (sum 90) but the LLM retimed the block to 60 min: the split stays proportional
+        // (40/13/7) and still sums to the new duration — never losing or inventing a minute.
+        AgendaBlock block = AgendaBlock.grouped(
+            List.of(ANCHOR, SECOND, THIRD), List.of(60, 20, 10),
+            START, START.plusMinutes(90), false, "grouped");
+
+        AgendaBlock retimed = block.retimed(START, START.plusMinutes(60), "retimed");
+
+        assertThat(retimed.memberPlannedMinutes()).containsExactly(40, 13, 7);
+        assertThat(retimed.memberPlannedMinutes().stream().mapToInt(Integer::intValue).sum())
+            .isEqualTo(60);
+    }
+
+    @Test
+    @DisplayName("withTheme carries the theme while preserving membership, effort weights and window")
+    void with_theme_preserves_everything_else() {
+        AgendaBlock block = AgendaBlock.grouped(
+            List.of(ANCHOR, SECOND), List.of(40, 20), START, START.plusMinutes(60), false, "grouped");
+
+        AgendaBlock named = block.withTheme("  Deep work  ");
+
+        assertThat(named.theme()).isEqualTo("Deep work");
+        assertThat(named.members()).containsExactly(ANCHOR, SECOND);
+        assertThat(named.memberPlannedMinutes()).containsExactly(40, 20);
+        assertThat(named.start()).isEqualTo(block.start());
+        assertThat(named.withTheme("   ").theme()).isNull();
+    }
+
     private static AgendaBlock themed(int minutes, List<UUID> additionalMembers) {
         return themed(minutes, additionalMembers, null);
     }

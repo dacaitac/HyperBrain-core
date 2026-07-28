@@ -4,6 +4,7 @@ import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.sync.domain.port.out.ScheduledDueTimeProvider;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,6 +42,7 @@ class PlannerBlockMembershipIT {
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private PlannerStateRepository repository;
+    @Autowired private ScheduledDueTimeProvider scheduledDueTimeProvider;
 
     @BeforeEach
     void cleanState() throws Exception {
@@ -262,6 +264,28 @@ class PlannerBlockMembershipIT {
 
         assertThat(removed).containsExactly(droppedBlockId);
         assertThat(memberRows()).extracting(row -> row.get("executable_id")).containsExactly(anchor);
+    }
+
+    @Test
+    @DisplayName("core#50: the scheduled-due provider returns the block start for anchor AND companion")
+    void provider_returns_block_start_for_every_member() {
+        UUID anchor = insertTask("Anchor");
+        UUID companion = insertTask("Companion");
+        repository.reconcilePlannedBlocks(USER, DAY, ZONE,
+            List.of(themedBlock(anchor, List.of(companion), 15, 16)));
+
+        assertThat(scheduledDueTimeProvider.scheduledStart(anchor))
+            .hasValueSatisfying(t -> assertThat(t.toInstant()).isEqualTo(at(15).toInstant()));
+        assertThat(scheduledDueTimeProvider.scheduledStart(companion))
+            .hasValueSatisfying(t -> assertThat(t.toInstant()).isEqualTo(at(15).toInstant()));
+    }
+
+    @Test
+    @DisplayName("core#50: the provider is empty for an executable with no live planner block (de-scheduled)")
+    void provider_empty_for_unscheduled_executable() {
+        UUID lonely = insertTask("Unscheduled");
+
+        assertThat(scheduledDueTimeProvider.scheduledStart(lonely)).isEmpty();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

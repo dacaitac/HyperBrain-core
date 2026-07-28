@@ -14,6 +14,7 @@ import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlanningWindow;
+import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannerDayState;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepWindow;
@@ -70,6 +71,12 @@ public class AgendaGenerationService {
     private static final Logger log = LoggerFactory.getLogger(AgendaGenerationService.class);
 
     private static final String SOURCE_SYSTEM = "SYSTEM";
+
+    /** Aggregate/event/payload of the per-member reminder-due refresh fan-out (core#50, Part C). */
+    private static final String EXECUTABLE_AGGREGATE_TYPE = "CORE_EXECUTABLE";
+    private static final String EXECUTABLE_UPDATED_EVENT_TYPE = "ExecutableUpdatedEvent";
+    private static final String REMINDER_DUE_REFRESH_PAYLOAD =
+        "{\"reason\":\"planner_schedule_due_projection\"}";
 
     private final PlannerStateRepository repository;
     private final SleepFrontierCalculator sleepFrontierCalculator;
@@ -157,9 +164,12 @@ public class AgendaGenerationService {
         MaterializationInput input = proposeOrFloor(prepared);
         Agenda materialized =
             finalizeMaterialization(userId, targetDay, zone, now, fromNow, prepared, input);
+        // Every member the floor scheduled (not just the anchor, ADR-027 D1): the multi-day replan keys
+        // its cross-day exclusion on this set, so a grouped block's companions are excluded from later
+        // days too — otherwise a themed block's companion could be double-booked on the next day.
         List<UUID> floorScheduled = input.floorAgenda().blocks().stream()
             .filter(block -> !block.wig())
-            .map(AgendaBlock::executableId)
+            .flatMap(block -> block.members().stream())
             .toList();
         return new DayResult(materialized, floorScheduled);
     }
@@ -379,8 +389,11 @@ public class AgendaGenerationService {
             .filter(AgendaBlock::wig)
             .map(AgendaBlock::executableId)
             .collect(Collectors.toSet());
+        // Load titles for EVERY member, not only the anchors (ADR-027 D1, core#50): the LLM names a
+        // grouped block from what its members share, and the ThemeQualityGuard grounds the proposed theme
+        // against those member titles — so a companion's title must be available too.
         Set<UUID> candidateIds = floorAgenda.blocks().stream()
-            .map(AgendaBlock::executableId)
+            .flatMap(block -> block.members().stream())
             .collect(Collectors.toSet());
         return new AgendaProposalContext(
             floorAgenda.blocks(),
@@ -390,6 +403,7 @@ public class AgendaGenerationService {
             wigIds,
             prepared.state().energyProfile().highLoadQuota(),
             floorAgenda.energyCriterion(),
+            mealWindows(prepared),
             repository.loadExecutableTitles(candidateIds));
     }
 
@@ -427,13 +441,19 @@ public class AgendaGenerationService {
         } else {
             ValidationContext validationContext = new ValidationContext(
                 window.frontierStart(), window.frontierEnd(), occupied,
-                state.energyProfile().highLoadQuota(), readOnlyAgendaIds(occupied));
+                state.energyProfile().highLoadQuota(), readOnlyAgendaIds(occupied),
+                wigLeadMeasureIds(input.floorAgenda()));
             validated = agendaValidator.validate(agenda.blocks(), validationContext);
             if (!validated.isClean()) {
                 log.warn("AgendaValidator rejected {} block(s) for user {}: {}",
                     validated.violations().size(), userId, validated.violations());
             }
         }
+
+        // The executables scheduled BEFORE this run (from their current planner blocks): captured now so
+        // the ones this run de-schedules can have their reminder due date returned to a placeholder
+        // (core#50, Part C). Read before the reconcile mutates the blocks.
+        Set<UUID> scheduledBefore = scheduledExecutables(userId, targetDay, zone);
 
         // Identity-stable reconciliation (#15): a regeneration keeps a surviving block's id (so its
         // Apple EKEvent is UPDATED, not duplicated), inserts genuinely new blocks, and reports the
@@ -446,6 +466,17 @@ public class AgendaGenerationService {
             stageAgendaBlockDelivery(
                 userId, targetDay, zone, agenda.energyCriterion(), removedBlockIds, now);
         }
+
+        // Per-member reminder-due refresh (core#50, Part C): every executable this run scheduled OR
+        // de-scheduled gets a SYSTEM ExecutableUpdatedEvent so AppleEventPropagator re-reads its EKReminder
+        // and projects the block's hour (or clears it back to a placeholder). Reusing the generic event
+        // means Notion and the priority reflector also see it, but the due date lives on core_time_block —
+        // not core_executable — so nothing the mirror or the diff cares about changed, and both no-op
+        // (the Notion checksum guard skips the unchanged page; the reflector runs on ingestion, not drain).
+        Set<UUID> scheduledAfter = validated.accepted().stream()
+            .flatMap(block -> block.members().stream())
+            .collect(Collectors.toSet());
+        stageReminderDueRefresh(userId, union(scheduledBefore, scheduledAfter), now);
 
         if (fromNow) {
             log.info("Replan completed: {} block(s) planned, {} removed (from {})",
@@ -478,6 +509,39 @@ public class AgendaGenerationService {
             serialize(event),
             SOURCE_SYSTEM,
             now));
+    }
+
+    /** The executables the Planner currently has scheduled on the day (members of its planner blocks). */
+    private Set<UUID> scheduledExecutables(UUID userId, LocalDate targetDay, ZoneId zone) {
+        return repository.loadPlannedBlocksForDay(userId, targetDay, zone).stream()
+            .flatMap(block -> block.members().stream().map(PlannedBlockMember::executableId))
+            .collect(Collectors.toSet());
+    }
+
+    private static Set<UUID> union(Set<UUID> a, Set<UUID> b) {
+        Set<UUID> union = new LinkedHashSet<>(a);
+        union.addAll(b);
+        return union;
+    }
+
+    /**
+     * Stages one {@code SYSTEM ExecutableUpdatedEvent} per affected executable in the materialization
+     * transaction (Transactional Outbox), so the Apple write-back re-reads each reminder and projects the
+     * Planner's scheduled hour onto its due date (core#50, Part C). The event is the generic executable
+     * update by design (Daniel, 2026-07-26): the due date is a re-read projection off {@code
+     * core_time_block}, so the mirror sees no field change and no new contract is needed.
+     */
+    private void stageReminderDueRefresh(UUID userId, Set<UUID> executableIds, OffsetDateTime now) {
+        for (UUID executableId : executableIds) {
+            outboxRepository.append(new OutboxEvent(
+                UUID.randomUUID(),
+                EXECUTABLE_AGGREGATE_TYPE,
+                executableId.toString(),
+                EXECUTABLE_UPDATED_EVENT_TYPE,
+                REMINDER_DUE_REFRESH_PAYLOAD,
+                SOURCE_SYSTEM,
+                now));
+        }
     }
 
     /**
@@ -540,6 +604,19 @@ public class AgendaGenerationService {
     }
 
     /**
+     * The meal windows surfaced to the LLM as <b>attractors</b> (core#50, Part B): the same protected
+     * meal walls {@link #prepare} already folded into the day's occupancy, identified as the walls with
+     * no executable that are not read-only AGENDA. The proposer is told to pull habit/meal executables
+     * into their natural window; the {@code ProposalWallGuard} then re-imposes them permeably (a block
+     * may only overlap the meal window whose natural slot it matches).
+     */
+    private static List<OccupiedInterval> mealWindows(PreparedDay prepared) {
+        return prepared.occupied().stream()
+            .filter(wall -> wall.executableId() == null && !wall.readOnlyAgenda())
+            .toList();
+    }
+
+    /**
      * The occupancy minus the run's own regenerable blocks (same-day {@code PLANNER}/{@code PLANNED}).
      * A prior materialization persists those blocks and they are re-read as occupied walls; both the
      * generator and the idempotency hash must exclude them — the generator so a replan can re-place its
@@ -573,6 +650,18 @@ public class AgendaGenerationService {
             .filter(OccupiedInterval::readOnlyAgenda)
             .map(OccupiedInterval::executableId)
             .filter(id -> id != null)
+            .collect(Collectors.toSet());
+    }
+
+    /**
+     * The lead-measure ids the deterministic floor reserved as WIG blocks — passed to the validator so
+     * it rejects any block that folds one in as a companion (ADR-027 D4 defense in depth, core#50). Read
+     * from the floor's own output, so it is authoritative regardless of an LLM rearrangement.
+     */
+    private static Set<UUID> wigLeadMeasureIds(Agenda floorAgenda) {
+        return floorAgenda.blocks().stream()
+            .filter(AgendaBlock::wig)
+            .map(AgendaBlock::executableId)
             .collect(Collectors.toSet());
     }
 

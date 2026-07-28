@@ -5,6 +5,7 @@ import com.hyperbrain.cognitive.application.AgendaProposalService;
 import com.hyperbrain.cognitive.application.AgendaPropuestaParser;
 import com.hyperbrain.cognitive.application.ProposalTelemetry;
 import com.hyperbrain.cognitive.application.ProposalWallGuard;
+import com.hyperbrain.cognitive.application.ThemeQualityGuard;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import io.micrometer.observation.ObservationRegistry;
@@ -147,9 +148,10 @@ public class CognitiveLlmAutoConfiguration {
             AgendaProposalPromptBuilder promptBuilder,
             AgendaPropuestaParser parser,
             ProposalWallGuard wallGuard,
+            ThemeQualityGuard themeGuard,
             ProposalTelemetry telemetry,
             @Value("${app.cognitive.max-drop-fraction:0.8}") double maxDropFraction) {
-        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, telemetry,
+        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, themeGuard, telemetry,
             maxDropFraction);
     }
 }

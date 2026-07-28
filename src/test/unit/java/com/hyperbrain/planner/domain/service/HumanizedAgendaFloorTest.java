@@ -88,7 +88,7 @@ class HumanizedAgendaFloorTest {
     }
 
     @Test
-    @DisplayName("rule 4: same-context work is batched adjacently without breaking priority")
+    @DisplayName("rule 4: same-context work is batched adjacently and grouped into one themed container")
     void batches_same_context_adjacently() {
         HumanizationSettings settings = settings(0, List.of(), 0, 0.10, 1.0);
         UUID cycleA = UUID.randomUUID();
@@ -100,9 +100,11 @@ class HumanizedAgendaFloorTest {
         Agenda agenda = floor(settings).generate(
             state(WAKE, BEDTIME, List.of(a, b, c), List.of(), List.of()));
 
-        // Same-cycle A and C are placed adjacently (A, C), then B — all within one comparable band.
-        assertThat(agenda.blocks()).extracting(AgendaBlock::executableId)
-            .containsExactly(a.id(), c.id(), b.id());
+        // Same-cycle A and C are batched adjacently and then GROUPED into one affinity block (core#50):
+        // A anchors it and C rides along; B, a different context, stays its own block.
+        assertThat(agenda.blocks()).hasSize(2);
+        assertThat(agenda.blocks().get(0).members()).containsExactly(a.id(), c.id());
+        assertThat(agenda.blocks().get(1).members()).containsExactly(b.id());
     }
 
     @Test

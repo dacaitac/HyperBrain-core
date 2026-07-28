@@ -17,13 +17,18 @@ import java.util.UUID;
  * @param highLoadQuota  the F6 high-load quota; never negative
  * @param readOnlyAgendaIds the executables that are read-only AGENDA (ADR-009) and must never be
  *                          scheduled as work; never null
+ * @param wigLeadMeasureIds the lead-measure executables reserved as WIG blocks (F1): each may only be
+ *                          the atomic anchor of its own WIG block, never a companion folded into another
+ *                          block's theme — the defense-in-depth guard that keeps the {@code wigHit}
+ *                          signal unambiguous (ADR-027 D4, core#50); never null
  */
 public record ValidationContext(
     OffsetDateTime frontierStart,
     OffsetDateTime frontierEnd,
     List<OccupiedInterval> occupied,
     int highLoadQuota,
-    Set<UUID> readOnlyAgendaIds
+    Set<UUID> readOnlyAgendaIds,
+    Set<UUID> wigLeadMeasureIds
 ) {
 
     public ValidationContext {
@@ -39,5 +44,6 @@ public record ValidationContext(
         }
         occupied = occupied == null ? List.of() : List.copyOf(occupied);
         readOnlyAgendaIds = readOnlyAgendaIds == null ? Set.of() : Set.copyOf(readOnlyAgendaIds);
+        wigLeadMeasureIds = wigLeadMeasureIds == null ? Set.of() : Set.copyOf(wigLeadMeasureIds);
     }
 }

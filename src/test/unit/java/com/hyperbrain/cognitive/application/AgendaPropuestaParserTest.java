@@ -43,6 +43,21 @@ class AgendaPropuestaParserTest {
     }
 
     @Test
+    @DisplayName("core#50: parses the container theme; a decision without one leaves it null")
+    void parses_theme_when_present() {
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP","theme":"Informe de ventas"},
+              {"block_id":"22222222-2222-2222-2222-222222222222","placement":"KEEP"}
+            ]}""";
+
+        AgendaPropuesta result = parser.parse(json);
+
+        assertThat(result.decisions().get(0).theme()).isEqualTo("Informe de ventas");
+        assertThat(result.decisions().get(1).theme()).isNull();
+    }
+
+    @Test
     @DisplayName("unwraps a Markdown-fenced JSON object (chat models fence output)")
     void unwraps_markdown_fence() {
         String fenced = "Here is the plan:\n```json\n"

@@ -511,6 +511,33 @@ class NotionWriteBackIT {
         assertThat(checksum).hasSize(64).isNotEqualTo("previous-checksum");
     }
 
+    @Test
+    @DisplayName("core#50 Part C safeguard: the Planner due-projection fan-out never churns Notion when "
+        + "the executable is unchanged (a pure block move produces no spurious Notion write)")
+    void due_projection_fanout_is_a_notion_no_op_when_unchanged() {
+        UUID localId = insertExecutable("TASK", "TODO");
+        String externalId = "page0000000000000000000000dpr001";
+        // A stale checksum forces the FIRST write to actually patch and store the real checksum.
+        insertMapping(localId, externalId, "previous-checksum");
+        stubPatchPage(externalId);
+
+        // A genuine change writes the page once and stores the canonical checksum.
+        insertOutboxEvent(localId, "CORE_EXECUTABLE", "ExecutableUpdatedEvent", "APPLE");
+        outboxWorker.drainBatch();
+        NOTION.verify(1, patchRequestedFor(urlEqualTo("/v1/pages/" + externalId)));
+        NOTION.resetRequests();
+
+        // The Planner's per-member due-projection fan-out (core#50, Part C) reuses the generic
+        // ExecutableUpdatedEvent, but the due date it refreshes lives on core_time_block — the executable
+        // itself is unchanged. So the mirror already matches and the write-back is a pure no-op: no PATCH,
+        // no churn. The re-prioritization is likewise inert — the reflectors run on ingestion, not on the
+        // outbox drain, so a due-projection drain never recomputes a score.
+        insertDueProjectionEvent(localId);
+        outboxWorker.drainBatch();
+
+        assertThat(NOTION.findAll(patchRequestedFor(urlEqualTo("/v1/pages/" + externalId)))).isEmpty();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void stubCreatePage(String dataSourceId, String pageId) {
@@ -591,6 +618,15 @@ class NotionWriteBackIT {
             INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, source_system, occurred_at)
             VALUES (?, ?, ?, ?, '{}'::jsonb, ?, now())
             """, UUID.randomUUID(), aggregateType, localId.toString(), eventType, sourceSystem);
+    }
+
+    /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the core#50 Part C due-projection marker. */
+    private void insertDueProjectionEvent(UUID localId) {
+        jdbcTemplate.update("""
+            INSERT INTO outbox_events (id, aggregate_type, aggregate_id, event_type, payload, source_system, occurred_at)
+            VALUES (?, 'CORE_EXECUTABLE', ?, 'ExecutableUpdatedEvent',
+                    '{"reason":"planner_schedule_due_projection"}'::jsonb, 'SYSTEM', now())
+            """, UUID.randomUUID(), localId.toString());
     }
 
     /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the ADR-020 score-reflection marker. */

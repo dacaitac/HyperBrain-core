@@ -46,7 +46,8 @@ class AgendaProposalServiceTest {
     private final ProposalTelemetry telemetry = mock(ProposalTelemetry.class);
 
     private AgendaProposalService service(LlmGateway gateway) {
-        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard, telemetry, 0.8);
+        return new AgendaProposalService(gateway, promptBuilder, parser, wallGuard,
+            new ThemeQualityGuard(), telemetry, 0.8);
     }
 
     @Test
@@ -160,7 +161,7 @@ class AgendaProposalServiceTest {
             UUID.randomUUID(), WAKE.plusMinutes(120), WAKE.plusMinutes(180), true);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
-            WAKE, BEDTIME, List.of(agendaWall), Set.of(), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(agendaWall), Set.of(), 3, "NEUTRAL", List.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -225,7 +226,7 @@ class AgendaProposalServiceTest {
             throw new AssertionError("gateway must not be called for an empty run");
         };
         AgendaProposalContext empty = new AgendaProposalContext(
-            List.of(), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            List.of(), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(), Map.of());
 
         assertThat(service(neverCalled).propose(empty)).isEmpty();
     }
@@ -238,7 +239,7 @@ class AgendaProposalServiceTest {
             "floor reason", List.of(C), "Deep work morning");
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(themed, block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -265,7 +266,7 @@ class AgendaProposalServiceTest {
         AgendaBlock themed = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
             "floor reason", List.of(C), "Deep work morning");
         AgendaProposalContext context = new AgendaProposalContext(
-            List.of(themed), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            List.of(themed), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP"}
@@ -278,6 +279,44 @@ class AgendaProposalServiceTest {
             .isEqualTo(themed);
     }
 
+    @Test
+    @DisplayName("core#50: a grounded LLM theme is applied to the grouped block")
+    void applies_grounded_theme() {
+        AgendaBlock grouped = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
+            "floor reason", List.of(C));
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(grouped), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(),
+            Map.of(A, "Escribir informe de ventas", C, "Revisar informe anual"));
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP","theme":"Informe"}
+            ]}""";
+
+        Optional<Agenda> result = service(prompt -> json).propose(context);
+
+        assertThat(result.orElseThrow().blocks()).singleElement()
+            .satisfies(b -> assertThat(b.theme()).isEqualTo("Informe"));
+    }
+
+    @Test
+    @DisplayName("core#50: a hallucinated/generic LLM theme is rejected, leaving the block themeless")
+    void rejects_ungrounded_theme() {
+        AgendaBlock grouped = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
+            "floor reason", List.of(C));
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(grouped), WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(),
+            Map.of(A, "Escribir informe de ventas", C, "Revisar informe anual"));
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP","theme":"Varios"}
+            ]}""";
+
+        Optional<Agenda> result = service(prompt -> json).propose(context);
+
+        assertThat(result.orElseThrow().blocks()).singleElement()
+            .satisfies(b -> assertThat(b.theme()).isNull());
+    }
+
     private List<ProposalWall> interventionWalls() {
         ArgumentCaptor<WallGuardResult> captor = ArgumentCaptor.forClass(WallGuardResult.class);
         verify(telemetry).intervened(org.mockito.ArgumentMatchers.any(), captor.capture());
@@ -287,14 +326,14 @@ class AgendaProposalServiceTest {
     private static AgendaProposalContext twoBlockContext() {
         return new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL",
+            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(),
             Map.of(A, "Write the report", B, "Review PRs"));
     }
 
     private static AgendaProposalContext wigContext() {
         return new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), Set.of(A), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(), Set.of(A), 3, "NEUTRAL", List.of(), Map.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {

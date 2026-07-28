@@ -33,13 +33,18 @@ public record AgendaPropuesta(List<BlockDecision> decisions) {
      * @param end       the new end when {@code placement == MOVE}; null otherwise
      * @param coachNote the model's short justification — routed to the block's notes only (ADR-012),
      *                  never the canonical title; may be null or blank
+     * @param theme     the container's name the model proposes for a grouped block (ADR-029, core#50) —
+     *                  the LLM's only compositional authority: it names, never re-composes. Applied to
+     *                  the block only after passing the {@code ThemeQualityGuard}; may be null or blank
+     *                  (then the write-back falls back to the anchor's name)
      */
     public record BlockDecision(
         UUID blockId,
         Placement placement,
         OffsetDateTime start,
         OffsetDateTime end,
-        String coachNote
+        String coachNote,
+        String theme
     ) {
 
         public BlockDecision {

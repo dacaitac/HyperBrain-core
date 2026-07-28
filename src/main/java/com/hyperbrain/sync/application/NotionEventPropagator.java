@@ -144,6 +144,13 @@ public class NotionEventPropagator implements IEventPropagator {
     private static final String CANONICAL_REFLECTION_MARKER = "CANONICAL_STATE";
 
     /**
+     * Payload {@code reason} marking the Planner's per-member reminder-due refresh fan-out (core#50,
+     * Part C): its Notion write-back is a no-op when the mirror already matches, so it never churns the
+     * page. Must equal the value {@code AgendaGenerationService} stages.
+     */
+    private static final String DUE_PROJECTION_REASON = "planner_schedule_due_projection";
+
+    /**
      * The SYSTEM-owned Notion properties a scheduled score reflection may touch. Restricted to the
      * scores the Prioritizer computes; every other property stays exactly as the user left it.
      * ({@code priority_computed_at} is a Core-internal recompute timestamp and is not mirrored to
@@ -241,13 +248,15 @@ public class NotionEventPropagator implements IEventPropagator {
 
         boolean updateOnly = isExecutable && UPDATE_ONLY_EXECUTABLE_EVENTS.contains(event.eventType());
         Set<String> reflectionScope = isExecutable ? reflectionScope(event) : null;
+        boolean dueProjectionRefresh = isExecutable && isDueProjectionRefresh(event);
         try {
             if (operation == Operation.DELETED) {
                 propagateDelete(localId);
             } else if (isCycle) {
                 propagateCycleUpsert(event, localId);
             } else {
-                propagateExecutableUpsert(event, localId, updateOnly, reflectionScope);
+                propagateExecutableUpsert(event, localId, updateOnly, reflectionScope,
+                    dueProjectionRefresh);
             }
         } catch (NotionApiException ex) {
             onPersistentFailure(localId, ex);
@@ -281,6 +290,27 @@ public class NotionEventPropagator implements IEventPropagator {
         }
     }
 
+    /**
+     * Whether a drained executable event is the Planner's per-member reminder-due refresh fan-out
+     * (core#50, Part C): a SYSTEM {@code ExecutableUpdatedEvent} whose only purpose is to re-project a
+     * {@code core_time_block} hour onto an Apple reminder. Such an event changes nothing on the
+     * executable itself, so its Notion write-back is skipped when the mirror is already up to date —
+     * this is the surgical idempotency that keeps the fan-out from churning Notion, without touching the
+     * write path of a genuine domain change.
+     */
+    private boolean isDueProjectionRefresh(OutboxEvent event) {
+        if (ExternalSystem.from(event.sourceSystem()) != ExternalSystem.SYSTEM
+            || event.payload() == null) {
+            return false;
+        }
+        try {
+            return DUE_PROJECTION_REASON.equals(
+                objectMapper.readTree(event.payload()).path("reason").asText(null));
+        } catch (JsonProcessingException ex) {
+            return false;
+        }
+    }
+
     /** Reads the {@code local_id} field the HU-09 handlers embed in the outbox payload. */
     private UUID extractPayloadLocalId(OutboxEvent event) {
         if (event.payload() == null) {
@@ -297,7 +327,7 @@ public class NotionEventPropagator implements IEventPropagator {
     }
 
     private void propagateExecutableUpsert(OutboxEvent event, UUID localId, boolean updateOnly,
-                                           Set<String> reflectionScope) {
+                                           Set<String> reflectionScope, boolean skipIfUnchanged) {
         Optional<ExecutableSnapshot> snapshot = snapshotRepo.findExecutable(localId);
         if (snapshot.isEmpty()) {
             log.warn("Executable {} not found for outbox event {}; skipping Notion write-back",
@@ -319,7 +349,7 @@ public class NotionEventPropagator implements IEventPropagator {
         Map<String, Object> props =
             NotionTaskMapper.map(snapshot.get(), cycleExternalId, parentExternalId);
         upsertPage(localId, snapshot.get().userId(), properties.getTasksDataSourceId(),
-            props, reflectionScope);
+            props, reflectionScope, skipIfUnchanged);
     }
 
     /** Returns whether the executable already has a Notion page (a {@code sync_mapping} row). */
@@ -336,7 +366,7 @@ public class NotionEventPropagator implements IEventPropagator {
         }
         String parentExternalId = resolveMappedExternalId(snapshot.get().parentCycleId());
         Map<String, Object> props = NotionCycleMapper.map(snapshot.get(), parentExternalId);
-        upsertPage(localId, snapshot.get().userId(), properties.getCyclesDataSourceId(), props, null);
+        upsertPage(localId, snapshot.get().userId(), properties.getCyclesDataSourceId(), props, null, false);
     }
 
     /**
@@ -360,7 +390,7 @@ public class NotionEventPropagator implements IEventPropagator {
      * and bounce back as a spurious update (RF-17 loop).
      */
     private void upsertPage(UUID localId, UUID userId, String dataSourceId,
-                            Map<String, Object> props, Set<String> patchScope) {
+                            Map<String, Object> props, Set<String> patchScope, boolean skipIfUnchanged) {
         Optional<SyncMapping> mapping =
             syncMappingRepo.findByExternalSystemAndLocalId(EXTERNAL_SYSTEM, localId);
         if (mapping.isEmpty()) {
@@ -368,6 +398,19 @@ public class NotionEventPropagator implements IEventPropagator {
             return;
         }
         String externalId = mapping.get().externalId();
+        // Surgical idempotent-echo short-circuit for the Planner due-projection fan-out only (core#50,
+        // Part C): that fan-out reuses the generic ExecutableUpdatedEvent but changes nothing on the
+        // executable (the due date it refreshes lives on core_time_block), so when the canonical props
+        // already hash to what is on the page, the write is a pure no-op and is skipped — the fan-out
+        // never churns Notion. This is deliberately NOT applied to genuine domain changes, whose
+        // write-back must proceed even when a checksum coincidence occurs (e.g. a create-then-relation
+        // update), preserving the existing sync semantics.
+        if (skipIfUnchanged
+            && checksum(externalId, Operation.UPDATED, props).equals(mapping.get().lastKnownChecksum())) {
+            log.debug("Notion page {} already reflects entity {} (due-projection no-op); write-back skipped",
+                externalId, localId);
+            return;
+        }
         if (patchScope == null && hasHumanEditInFlight(externalId, mapping.get())) {
             log.info("Notion page {} has a human edit in flight; write-back for entity {} discarded "
                 + "(SKIPPED_HUMAN_EDIT), inbound webhook reconciles", externalId, localId);

@@ -150,6 +150,6 @@ class AgendaProposalPromptBuilderTest {
     private static AgendaProposalContext context(String title) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title));
+            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", List.of(), Map.of(A, title));
     }
 }

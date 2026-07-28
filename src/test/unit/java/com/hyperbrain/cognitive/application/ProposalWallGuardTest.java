@@ -151,9 +151,60 @@ class ProposalWallGuardTest {
             .satisfies(w -> assertThat(w.wall()).isEqualTo(ProposalWall.AGENDA_READ_ONLY));
     }
 
+    @Test
+    @DisplayName("core#50: a block bleeding work across a meal window it does not occupy is a MEAL breach")
+    void meal_intrusion_is_a_breach() {
+        OccupiedInterval lunch = meal(330, 390); // 12:30–13:30
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE.plusMinutes(300), WAKE.plusMinutes(360))), // 12:00–13:00, crosses in
+            Set.of(), List.of(), List.of(lunch));
+
+        WallGuardResult result = guard.check(new AgendaPropuesta(List.of(keep(A))), context);
+
+        assertThat(result.breaches()).singleElement()
+            .satisfies(w -> assertThat(w.wall()).isEqualTo(ProposalWall.MEAL_WINDOW));
+    }
+
+    @Test
+    @DisplayName("core#50: the meal block itself, sitting inside its window, is permeable and passes")
+    void meal_block_inside_its_window_passes() {
+        OccupiedInterval lunch = meal(330, 390); // 12:30–13:30
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE.plusMinutes(330), WAKE.plusMinutes(360))), // 12:30–13:00, contained
+            Set.of(), List.of(), List.of(lunch));
+
+        assertThat(guard.check(new AgendaPropuesta(List.of(keep(A))), context).clean()).isTrue();
+    }
+
+    @Test
+    @DisplayName("core#50: two surviving blocks overlapping in time is a BLOCK_OVERLAP breach")
+    void overlapping_blocks_breach() {
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60)),
+                block(B, WAKE.plusMinutes(30), WAKE.plusMinutes(90))), // overlaps A
+            Set.of(), List.of());
+
+        WallGuardResult result = guard.check(new AgendaPropuesta(List.of(keep(A), keep(B))), context);
+
+        assertThat(result.breaches()).anySatisfy(
+            w -> assertThat(w.wall()).isEqualTo(ProposalWall.BLOCK_OVERLAP));
+    }
+
+    private static OccupiedInterval meal(int startOffsetMinutes, int endOffsetMinutes) {
+        return new OccupiedInterval(null, WAKE.plusMinutes(startOffsetMinutes),
+            WAKE.plusMinutes(endOffsetMinutes), false);
+    }
+
     private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
                                                  List<OccupiedInterval> agendaWalls) {
-        return new AgendaProposalContext(candidates, WAKE, BEDTIME, agendaWalls, wigIds, 3, "NEUTRAL", Map.of());
+        return context(candidates, wigIds, agendaWalls, List.of());
+    }
+
+    private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
+                                                 List<OccupiedInterval> agendaWalls,
+                                                 List<OccupiedInterval> mealAttractors) {
+        return new AgendaProposalContext(candidates, WAKE, BEDTIME, agendaWalls, wigIds, 3, "NEUTRAL",
+            mealAttractors, Map.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {
@@ -161,14 +212,14 @@ class ProposalWallGuardTest {
     }
 
     private static BlockDecision keep(UUID id) {
-        return new BlockDecision(id, Placement.KEEP, null, null, null);
+        return new BlockDecision(id, Placement.KEEP, null, null, null, null);
     }
 
     private static BlockDecision move(UUID id, OffsetDateTime start, OffsetDateTime end) {
-        return new BlockDecision(id, Placement.MOVE, start, end, "moved");
+        return new BlockDecision(id, Placement.MOVE, start, end, "moved", null);
     }
 
     private static BlockDecision drop(UUID id) {
-        return new BlockDecision(id, Placement.DROP, null, null, null);
+        return new BlockDecision(id, Placement.DROP, null, null, null, null);
     }
 }

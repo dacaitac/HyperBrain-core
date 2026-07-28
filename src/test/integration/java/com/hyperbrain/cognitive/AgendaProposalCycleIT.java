@@ -157,23 +157,31 @@ class AgendaProposalCycleIT {
         assertThat(localDayCount(bogota, 2026, 7, 22)).isGreaterThan(5);
     }
 
+    /**
+     * Counts the executables the Planner scheduled on a local day — {@code core_time_block_member} rows,
+     * not blocks, so the affinity grouping (core#50) packing several executables into one themed block
+     * never under-reports the amount of scheduled work.
+     */
     private int localDayCount(java.time.ZoneId zone, int year, int month, int day) {
         OffsetDateTime start = java.time.LocalDate.of(year, month, day).atStartOfDay(zone).toOffsetDateTime();
         Integer n = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
-                + "AND date_start >= ? AND date_start < ?", Integer.class, start, start.plusDays(1));
+            "SELECT count(*) FROM core_time_block_member m JOIN core_time_block b ON b.id = m.block_id "
+                + "WHERE b.origin = 'PLANNER' AND b.status = 'PLANNED' "
+                + "AND b.date_start >= ? AND b.date_start < ?", Integer.class, start, start.plusDays(1));
         return n == null ? 0 : n;
     }
 
     @Test
-    @DisplayName("bypass: an accepted LLM arrangement with overlapping blocks materializes as-is "
-        + "(the floor validator never re-shuffles it)")
-    void accepted_llm_overlap_materializes_as_is() {
+    @DisplayName("core#50 Part B: an LLM arrangement with overlapping blocks is rejected (block-vs-block "
+        + "wall) and degrades to the floor's non-overlapping day")
+    void overlapping_llm_arrangement_degrades_to_floor() {
         insertTask("First", 0.9, 60);
         insertTask("Second", 0.3, 60);
         // The LLM moves both blocks into overlapping windows (09:00–10:00 and 09:30–10:30). Block-vs-block
-        // overlap is the LLM's arrangement authority — not a bounded wall — so the guard accepts it and
-        // the floor's AgendaValidator is bypassed. The deterministic floor would instead strip the second.
+        // overlap is now a bounded wall the ProposalWallGuard re-imposes (core#50 Part B), so the whole
+        // proposal is rejected and the day DEGRADES to the humanized floor — which never overlaps: the two
+        // blocks land at the floor's placements (window start, then after the first plus its buffer),
+        // never at the LLM's overlapping 09:00 / 09:30.
         gateway.respondWith(this::moveOverlapping);
 
         service.generate(USER, DAY, UTC, NOON, false);
@@ -181,14 +189,9 @@ class AgendaProposalCycleIT {
         List<OffsetDateTime> starts = jdbcTemplate.queryForList(
             "SELECT date_start FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
                 + "ORDER BY date_start", OffsetDateTime.class);
-        List<OffsetDateTime> ends = jdbcTemplate.queryForList(
-            "SELECT date_end FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
-                + "ORDER BY date_start", OffsetDateTime.class);
-        // Both blocks survive at their overlapping windows — nothing was stripped.
         assertThat(starts).containsExactly(
-            OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC),
-            OffsetDateTime.of(2026, 7, 10, 9, 30, 0, 0, UTC));
-        assertThat(starts.get(1)).isBefore(ends.get(0)); // they genuinely overlap
+            OffsetDateTime.of(2026, 7, 10, 7, 0, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 8, 5, 0, 0, UTC));
     }
 
     @Test

@@ -40,6 +40,10 @@ import java.util.UUID;
  * @param wigExecutableIds the WIG executable ids (never droppable); never null
  * @param highLoadQuota    the F6 high-load quota, soft guidance for the prompt; never negative
  * @param energyCriterion  the readable energy criterion; never blank
+ * @param mealAttractors   the protected meal windows (core#50, Part B) surfaced as <b>attractors</b>,
+ *                         not walls: the model is asked to pull habit/meal executables into their
+ *                         natural window. A soft preference — the deterministic floor already placed by
+ *                         {@code earliestSlot} — that degrades gracefully; never null
  * @param titles           executable id → display name (untrusted, delimited in the prompt); never null
  */
 public record AgendaProposalContext(
@@ -50,6 +54,7 @@ public record AgendaProposalContext(
     Set<UUID> wigExecutableIds,
     int highLoadQuota,
     String energyCriterion,
+    List<OccupiedInterval> mealAttractors,
     Map<UUID, String> titles
 ) {
 
@@ -70,6 +75,7 @@ public record AgendaProposalContext(
         candidateBlocks = candidateBlocks == null ? List.of() : List.copyOf(candidateBlocks);
         agendaWalls = agendaWalls == null ? List.of() : List.copyOf(agendaWalls);
         wigExecutableIds = wigExecutableIds == null ? Set.of() : Set.copyOf(wigExecutableIds);
+        mealAttractors = mealAttractors == null ? List.of() : List.copyOf(mealAttractors);
         titles = titles == null ? Map.of() : Map.copyOf(titles);
     }
 

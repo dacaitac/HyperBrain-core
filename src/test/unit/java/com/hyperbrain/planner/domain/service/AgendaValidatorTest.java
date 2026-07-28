@@ -65,7 +65,7 @@ class AgendaValidatorTest {
         AgendaBlock block = block(WAKE.plusMinutes(60), WAKE.plusMinutes(90), false, false);
 
         ValidatedAgenda result = validator.validate(List.of(block),
-            new ValidationContext(WAKE, BEDTIME, List.of(busy), 3, Set.of()));
+            new ValidationContext(WAKE, BEDTIME, List.of(busy), 3, Set.of(), Set.of()));
 
         assertThat(result.violations()).singleElement()
             .satisfies(v -> assertThat(v.wall()).isEqualTo(Wall.OVERLAPS_OCCUPIED));
@@ -79,7 +79,7 @@ class AgendaValidatorTest {
         AgendaBlock block = block(WAKE.plusMinutes(60), WAKE.plusMinutes(90), false, false);
 
         ValidatedAgenda result = validator.validate(List.of(block),
-            new ValidationContext(WAKE, BEDTIME, List.of(agendaWall), 3, Set.of()));
+            new ValidationContext(WAKE, BEDTIME, List.of(agendaWall), 3, Set.of(), Set.of()));
 
         assertThat(result.violations()).singleElement()
             .satisfies(v -> assertThat(v.wall()).isEqualTo(Wall.OVERLAPS_READ_ONLY_AGENDA));
@@ -167,8 +167,37 @@ class AgendaValidatorTest {
         assertThat(result.accepted()).contains(wig);
     }
 
+    @Test
+    @DisplayName("WIG defense in depth: a block folding a WIG lead measure in as a companion is rejected")
+    void rejects_wig_lead_measure_as_companion() {
+        UUID wigLead = UUID.fromString("99999999-9999-9999-9999-999999999999");
+        UUID anchor = UUID.fromString("11111111-1111-1111-1111-111111111111");
+        AgendaBlock smuggling = new AgendaBlock(anchor, WAKE, WAKE.plusMinutes(60), false, false,
+            "grouped", List.of(wigLead));
+
+        ValidatedAgenda result = validator.validate(List.of(smuggling),
+            new ValidationContext(WAKE, BEDTIME, List.of(), 3, Set.of(), Set.of(wigLead)));
+
+        assertThat(result.accepted()).isEmpty();
+        assertThat(result.violations()).singleElement()
+            .satisfies(v -> assertThat(v.wall()).isEqualTo(Wall.WIG_AS_COMPANION));
+    }
+
+    @Test
+    @DisplayName("WIG defense in depth: the atomic WIG block itself (its lead measure as anchor) is accepted")
+    void atomic_wig_block_is_accepted() {
+        UUID wigLead = UUID.fromString("99999999-9999-9999-9999-999999999999");
+        AgendaBlock wigBlock = new AgendaBlock(wigLead, WAKE, WAKE.plusMinutes(60), true, false, "WIG");
+
+        ValidatedAgenda result = validator.validate(List.of(wigBlock),
+            new ValidationContext(WAKE, BEDTIME, List.of(), 3, Set.of(), Set.of(wigLead)));
+
+        assertThat(result.isClean()).isTrue();
+        assertThat(result.accepted()).containsExactly(wigBlock);
+    }
+
     private ValidationContext context(int quota, Set<UUID> agendaIds) {
-        return new ValidationContext(WAKE, BEDTIME, List.of(), quota, agendaIds);
+        return new ValidationContext(WAKE, BEDTIME, List.of(), quota, agendaIds, Set.of());
     }
 
     private static AgendaBlock block(

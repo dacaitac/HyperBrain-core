@@ -44,16 +44,19 @@ public class AgendaProposalService implements AgendaProposer {
     private final AgendaProposalPromptBuilder promptBuilder;
     private final AgendaPropuestaParser parser;
     private final ProposalWallGuard wallGuard;
+    private final ThemeQualityGuard themeGuard;
     private final ProposalTelemetry telemetry;
     private final double maxDropFraction;
 
     public AgendaProposalService(LlmGateway gateway, AgendaProposalPromptBuilder promptBuilder,
                                  AgendaPropuestaParser parser, ProposalWallGuard wallGuard,
-                                 ProposalTelemetry telemetry, double maxDropFraction) {
+                                 ThemeQualityGuard themeGuard, ProposalTelemetry telemetry,
+                                 double maxDropFraction) {
         this.gateway = gateway;
         this.promptBuilder = promptBuilder;
         this.parser = parser;
         this.wallGuard = wallGuard;
+        this.themeGuard = themeGuard;
         this.telemetry = telemetry;
         this.maxDropFraction = maxDropFraction;
     }
@@ -111,6 +114,24 @@ public class AgendaProposalService implements AgendaProposer {
     }
 
     /**
+     * Applies the model's proposed theme to a block only when it clears the {@link ThemeQualityGuard}:
+     * a genuine, grounded name is carried onto the container; a generic or hallucinated one is dropped
+     * so the block falls back to the anchor's name. The grounding truth is the block's member titles.
+     */
+    private AgendaBlock named(AgendaBlock block, BlockDecision decision, AgendaProposalContext context) {
+        if (decision.theme() == null || decision.theme().isBlank()) {
+            return block;
+        }
+        java.util.Set<String> memberTitles = block.members().stream()
+            .map(id -> context.titles().getOrDefault(id, ""))
+            .filter(title -> !title.isBlank())
+            .collect(java.util.stream.Collectors.toSet());
+        return themeGuard.accepts(decision.theme(), memberTitles)
+            ? block.withTheme(decision.theme())
+            : block;
+    }
+
+    /**
      * Whether the proposal drops more than {@code maxDropFraction} of the day's non-WIG candidate
      * blocks — the catastrophic-over-drop signal. WIG blocks are never counted (they can never be
      * dropped). A day with no non-WIG candidates can never trip the guard.
@@ -136,12 +157,13 @@ public class AgendaProposalService implements AgendaProposer {
      * to the block's reason → notes only (ADR-012), falling back to the floor's reason when blank so
      * legibility is preserved. The caller re-attaches the floor's exclusions/paused account and criterion.
      *
-     * <p>The candidate is <b>retimed, never re-composed</b>: the model's authority is the arrangement
-     * (when a block runs), so the block's membership and theme (ADR-027 D1/D2) are carried over
-     * verbatim. Rebuilding the block from its scalar fields would silently drop the companions of a
-     * themed container.
+     * <p>The candidate is <b>retimed and (re)named, never re-composed</b>: the model's authority is the
+     * arrangement (when a block runs) and the container's name (ADR-029), so the block's membership and
+     * effort weights (ADR-027 D1/D2) are carried over verbatim while the theme is applied through the
+     * {@link ThemeQualityGuard}. Rebuilding the block from its scalar fields would silently drop the
+     * companions of a themed container.
      */
-    private static Agenda applyArrangement(AgendaPropuesta propuesta, AgendaProposalContext context) {
+    private Agenda applyArrangement(AgendaPropuesta propuesta, AgendaProposalContext context) {
         List<AgendaBlock> blocks = new ArrayList<>();
         for (BlockDecision decision : propuesta.decisions()) {
             if (decision.placement() == Placement.DROP) {
@@ -149,10 +171,11 @@ public class AgendaProposalService implements AgendaProposer {
             }
             AgendaBlock candidate = context.candidate(decision.blockId());
             boolean move = decision.placement() == Placement.MOVE;
-            blocks.add(candidate.retimed(
+            AgendaBlock retimed = candidate.retimed(
                 move ? decision.start() : candidate.start(),
                 move ? decision.end() : candidate.end(),
-                reason(decision.coachNote(), candidate.reason())));
+                reason(decision.coachNote(), candidate.reason()));
+            blocks.add(named(retimed, decision, context));
         }
         blocks.sort(java.util.Comparator.comparing(AgendaBlock::start));
         return new Agenda(blocks, List.of(), List.of(), context.energyCriterion(), false);

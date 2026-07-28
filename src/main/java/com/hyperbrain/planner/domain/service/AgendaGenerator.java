@@ -54,9 +54,16 @@ import java.util.UUID;
  */
 public class AgendaGenerator {
 
+    /**
+     * The WIP cap on a themed container (ADR-027, core#50): a group never grows past this many members,
+     * keeping a block a small, humane unit. Daniel's sanctioned cap is 3–4; 4 is the hard maximum.
+     */
+    static final int MAX_GROUP_MEMBERS = 4;
+
     private final PlannerConstraints constraints;
     private final HumanizationSettings humanization;
     private final WigPortfolioSelector wigPortfolioSelector;
+    private final AffinityGrouper affinityGrouper = new AffinityGrouper();
 
     /** Creates a generator using the sanctioned default constraints and no humanization (raw floor). */
     public AgendaGenerator() {
@@ -122,65 +129,59 @@ public class AgendaGenerator {
         int urgentBudget = state.dataComplete() ? Integer.MAX_VALUE : constraints.degradedUrgentCount();
         int urgentPlaced = 0;
 
-        for (SchedulableExecutable executable : state.rankedExecutables()) {
-            if (placed.contains(executable.id())) {
-                continue;
-            }
-            if (executable.type() == ExecutableType.AGENDA) {
-                excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.READ_ONLY_AGENDA));
-                continue;
-            }
+        // Compose the placeable executables into affinity groups the floor places as themed containers
+        // (ADR-027, core#50): same context + comparable priority band + load compatibility + WIP cap.
+        // Grouping is gated on the humanization batching band, so the raw floor (NO_OP) and F5 degraded
+        // mode keep the 1:1 shape; each group is then placed as a single unit sized by Σ member efforts.
+        List<List<SchedulableExecutable>> units = buildUnits(state, placed, excluded);
+        for (List<SchedulableExecutable> unit : units) {
             if (urgentPlaced >= urgentBudget) {
-                excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.NO_ROOM_IN_WINDOW));
+                excludeUnit(unit, ExclusionReason.NO_ROOM_IN_WINDOW, excluded);
                 continue;
             }
-
-            int minutes = RemainingEffortCalculator.remainingMinutes(executable);
-            if (minutes <= 0) {
-                excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.NO_REMAINING_EFFORT));
-                continue;
-            }
-
-            boolean highLoad = executable.isHighLoad(constraints.highLoadDrainFloor());
+            boolean highLoad = unit.stream().anyMatch(e -> e.isHighLoad(constraints.highLoadDrainFloor()));
             if (highLoad && highLoadUsed >= state.energyProfile().highLoadQuota()) {
-                excluded.add(new ExcludedExecutable(
-                    executable.id(), ExclusionReason.HIGH_LOAD_QUOTA_EXCEEDED));
+                excludeUnit(unit, ExclusionReason.HIGH_LOAD_QUOTA_EXCEEDED, excluded);
                 continue;
             }
 
-            // Placement is the Planner's own authorship (ADR-026 D4): the deterministic floor places
-            // by its own logic — availability, effort, energy, hard walls — never seeding the start
-            // from the authorial reminder time. The due instant only scopes WHICH day an executable is
-            // schedulable (that day-filter lives upstream in AgendaGenerationService); it no longer
-            // dictates WHERE inside the day the block lands.
+            List<Integer> memberEfforts = unit.stream()
+                .map(RemainingEffortCalculator::remainingMinutes)
+                .toList();
+            int minutes = memberEfforts.stream().mapToInt(Integer::intValue).sum();
+
+            // Placement is the Planner's own authorship (ADR-026 D4): the deterministic floor places by
+            // its own logic — availability, effort, energy, hard walls — never seeding the start from the
+            // authorial reminder time. The due instant only scopes WHICH day an executable is schedulable
+            // (that day-filter lives upstream in AgendaGenerationService); it no longer dictates WHERE
+            // inside the day the block lands.
             //
-            // Reschedule of a vencido block (ADR-026 D5): when the executable carries a reschedule seed
-            // — the hour of its last, now-EXPIRED core_time_block (D3) — the block is placed back at
-            // that hour, so a task the system already timed keeps its slot across days instead of
-            // drifting to the window start. The seed is a preference, never a licence to break a wall:
-            // it applies only when [seed, seed+effort] fits the usable window and clears every wall;
-            // otherwise the block falls back to the earliest wall-clearing gap by rank. This seeds from
-            // the Planner's OWN prior decision (D3), not the authorial reminder time D4 retired, so D4
-            // stays intact for genuinely fresh placements (seed null → identical to before).
+            // Reschedule of a vencido block (ADR-026 D5): when a single-member unit carries a reschedule
+            // seed — the hour of its last, now-EXPIRED core_time_block (D3) — the block is placed back at
+            // that hour, so a task the system already timed keeps its slot across days instead of drifting
+            // to the window start. The seed is a preference, never a licence to break a wall: it applies
+            // only when [seed, seed+effort] fits the usable window and clears every wall; otherwise the
+            // block falls back to the earliest wall-clearing gap by rank. A grouped unit is always a fresh
+            // placement (its members' individual seeds do not compose), so only a singleton is seeded.
+            OffsetDateTime seed = unit.size() == 1 ? unit.get(0).rescheduleSeed() : null;
             Optional<OffsetDateTime> seedSlot = rescheduleSlot(
-                executable.rescheduleSeed(), state.windowStart(), rankingLimit, minutes, walls);
+                seed, state.windowStart(), rankingLimit, minutes, walls);
             Optional<OffsetDateTime> slot = seedSlot.isPresent()
                 ? seedSlot
                 : earliestSlot(state.windowStart(), rankingLimit, minutes, walls);
             if (slot.isEmpty()) {
-                excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.NO_ROOM_IN_WINDOW));
+                excludeUnit(unit, ExclusionReason.NO_ROOM_IN_WINDOW, excluded);
                 continue;
             }
 
             OffsetDateTime start = slot.get();
             OffsetDateTime end = start.plusMinutes(minutes);
-            String reason = seedSlot.isPresent()
-                ? rankReasonRescheduled(executable, minutes)
-                : rankReason(executable, minutes);
-            blocks.add(new AgendaBlock(executable.id(), start, end, false, highLoad, reason));
-            walls.add(new OccupiedInterval(executable.id(), start, end, false));
+            List<UUID> memberIds = unit.stream().map(SchedulableExecutable::id).toList();
+            String reason = reasonForUnit(unit, seedSlot.isPresent(), minutes);
+            blocks.add(AgendaBlock.grouped(memberIds, memberEfforts, start, end, highLoad, reason));
+            walls.add(new OccupiedInterval(memberIds.get(0), start, end, false));
             reserveTransitionBuffer(walls, end);
-            placed.add(executable.id());
+            placed.addAll(memberIds);
             if (highLoad) {
                 highLoadUsed++;
             }
@@ -191,6 +192,57 @@ public class AgendaGenerator {
         blocks.sort(Comparator.comparing(AgendaBlock::start));
         return new Agenda(blocks, excluded, paused, state.energyProfile().criterion(),
             !state.dataComplete());
+    }
+
+    /**
+     * Filters the ranked executables down to the placeable ones (skipping already-placed WIGs, recording
+     * read-only AGENDA and zero-effort exclusions) and composes them into affinity groups. Grouping runs
+     * only with data complete and the humanization batching band on; the raw floor (NO_OP band) and F5
+     * degraded mode keep every executable in its own singleton unit, so their placement is unchanged.
+     */
+    private List<List<SchedulableExecutable>> buildUnits(PlannerDayState state, Set<UUID> placed,
+                                                         List<ExcludedExecutable> excluded) {
+        List<SchedulableExecutable> placeable = new ArrayList<>();
+        for (SchedulableExecutable executable : state.rankedExecutables()) {
+            if (placed.contains(executable.id())) {
+                continue;
+            }
+            if (executable.type() == ExecutableType.AGENDA) {
+                excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.READ_ONLY_AGENDA));
+                continue;
+            }
+            if (RemainingEffortCalculator.remainingMinutes(executable) <= 0) {
+                excluded.add(new ExcludedExecutable(executable.id(), ExclusionReason.NO_REMAINING_EFFORT));
+                continue;
+            }
+            placeable.add(executable);
+        }
+        // Grouping is a quality humanization, not a degraded-mode concern: F5 keeps the 1:1 shape so the
+        // WIG-plus-urgents fallback stays legible. The band gate keeps the raw floor unchanged too.
+        double band = state.dataComplete() ? humanization.batchBandWidth() : 0.0;
+        return affinityGrouper.group(placeable, constraints.highLoadDrainFloor(), band, MAX_GROUP_MEMBERS);
+    }
+
+    /** Records every member of an unplaced unit under the same exclusion reason (legibilidad). */
+    private static void excludeUnit(List<SchedulableExecutable> unit, ExclusionReason reason,
+                                    List<ExcludedExecutable> excluded) {
+        for (SchedulableExecutable executable : unit) {
+            excluded.add(new ExcludedExecutable(executable.id(), reason));
+        }
+    }
+
+    /** The readable reason for a placed unit: rescheduled, grouped, or a plain single-task placement. */
+    private String reasonForUnit(List<SchedulableExecutable> unit, boolean rescheduled, int minutes) {
+        SchedulableExecutable anchor = unit.get(0);
+        if (rescheduled) {
+            return rankReasonRescheduled(anchor, minutes);
+        }
+        if (unit.size() > 1) {
+            return String.format(
+                "Grouped by affinity (ADR-027): %d executables sharing context, %d min total effort",
+                unit.size(), minutes);
+        }
+        return rankReason(anchor, minutes);
     }
 
     /**

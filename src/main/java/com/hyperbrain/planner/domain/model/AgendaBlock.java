@@ -38,6 +38,12 @@ import java.util.UUID;
  * @param additionalMembers the non-anchor members of the themed block, in presentation order; never
  *                          null (empty for a single-executable block), never containing the anchor,
  *                          nulls nor duplicates, and always empty for a WIG block
+ * @param memberEfforts     each member's own remaining effort in minutes, aligned index-by-index with
+ *                          {@link #members()} (anchor first); the apportionment weights
+ *                          {@link #memberPlannedMinutes()} distributes the block duration by, so a
+ *                          member's imputed minutes track its <em>own</em> effort rather than an even
+ *                          share (ADR-013/ADR-027 D2, ADR-034). Null defaults to equal weights (the
+ *                          pre-grouping even split); never contains a negative value
  * @param theme             the container's theme; null on the deterministic floor (blank is
  *                          normalized to null)
  */
@@ -49,6 +55,7 @@ public record AgendaBlock(
     boolean highLoad,
     String reason,
     List<UUID> additionalMembers,
+    List<Integer> memberEfforts,
     String theme
 ) {
 
@@ -78,24 +85,69 @@ public record AgendaBlock(
             throw new IllegalArgumentException("a WIG block is atomic and must not group other executables");
         }
         additionalMembers = List.copyOf(members);
+
+        int memberCount = additionalMembers.size() + 1;
+        List<Integer> efforts = memberEfforts == null
+            ? equalWeights(memberCount)
+            : new ArrayList<>(memberEfforts);
+        if (efforts.size() != memberCount) {
+            throw new IllegalArgumentException(
+                "memberEfforts must have one entry per member (" + memberCount + "): " + efforts);
+        }
+        if (efforts.stream().anyMatch(e -> e == null || e < 0)) {
+            throw new IllegalArgumentException("memberEfforts must be non-null and non-negative: " + efforts);
+        }
+        memberEfforts = List.copyOf(efforts);
         theme = theme == null || theme.isBlank() ? null : theme.strip();
     }
 
     /** Builds a single-executable, themeless block — the shape the deterministic floor produces. */
     public AgendaBlock(UUID executableId, OffsetDateTime start, OffsetDateTime end, boolean wig,
                        boolean highLoad, String reason) {
-        this(executableId, start, end, wig, highLoad, reason, List.of(), null);
+        this(executableId, start, end, wig, highLoad, reason, List.of(), null, null);
     }
 
-    /** Builds a themeless block with an explicit membership. */
+    /** Builds a themeless block with an explicit membership and the even-split default effort weights. */
     public AgendaBlock(UUID executableId, OffsetDateTime start, OffsetDateTime end, boolean wig,
                        boolean highLoad, String reason, List<UUID> additionalMembers) {
-        this(executableId, start, end, wig, highLoad, reason, additionalMembers, null);
+        this(executableId, start, end, wig, highLoad, reason, additionalMembers, null, null);
+    }
+
+    /** Builds a themed block with an explicit membership and the even-split default effort weights. */
+    public AgendaBlock(UUID executableId, OffsetDateTime start, OffsetDateTime end, boolean wig,
+                       boolean highLoad, String reason, List<UUID> additionalMembers, String theme) {
+        this(executableId, start, end, wig, highLoad, reason, additionalMembers, null, theme);
     }
 
     /**
-     * Returns a copy of this block retimed to a new window, preserving its membership and theme. Used
-     * by the LLM arrangement path, where the model may move a block but never re-compose it.
+     * Builds a themeless grouped block from an ordered membership (anchor first) and each member's own
+     * effort — the shape the deterministic affinity grouper produces (ADR-027 D1/D2). The block duration
+     * is the callers' responsibility (typically {@code Σ memberEfforts}); the theme is left null so it
+     * degrades to the anchor's name until the LLM names it.
+     *
+     * @param members       the ordered membership, anchor first; never null nor empty
+     * @param memberEfforts each member's own remaining effort in minutes, aligned with {@code members}
+     * @param start         the block start instant; never null
+     * @param end           the block end instant; never null, strictly after {@code start}
+     * @param highLoad      true when the group carries a high-load member (F6 quota)
+     * @param reason        the readable placement reason; never blank
+     * @return the grouped block; never null
+     */
+    public static AgendaBlock grouped(List<UUID> members, List<Integer> memberEfforts,
+                                      OffsetDateTime start, OffsetDateTime end, boolean highLoad,
+                                      String reason) {
+        if (members == null || members.isEmpty()) {
+            throw new IllegalArgumentException("members must not be empty");
+        }
+        UUID anchor = members.get(0);
+        List<UUID> additional = List.copyOf(members.subList(1, members.size()));
+        return new AgendaBlock(anchor, start, end, false, highLoad, reason, additional, memberEfforts, null);
+    }
+
+    /**
+     * Returns a copy of this block retimed to a new window, preserving its membership, effort weights
+     * and theme. Used by the LLM arrangement path, where the model may move a block but never
+     * re-compose it.
      *
      * @param newStart the new start instant; never null
      * @param newEnd   the new end instant; never null, strictly after {@code newStart}
@@ -104,7 +156,20 @@ public record AgendaBlock(
      */
     public AgendaBlock retimed(OffsetDateTime newStart, OffsetDateTime newEnd, String newReason) {
         return new AgendaBlock(executableId, newStart, newEnd, wig, highLoad, newReason,
-            additionalMembers, theme);
+            additionalMembers, memberEfforts, theme);
+    }
+
+    /**
+     * Returns a copy of this block carrying the given theme, preserving everything else. The LLM names
+     * the container (ADR-029); a blank theme normalizes to null so the write-back falls back to the
+     * anchor's name.
+     *
+     * @param newTheme the container's theme; may be null or blank (normalized to null)
+     * @return the re-themed block; never null
+     */
+    public AgendaBlock withTheme(String newTheme) {
+        return new AgendaBlock(executableId, start, end, wig, highLoad, reason,
+            additionalMembers, memberEfforts, newTheme);
     }
 
     /**
@@ -123,17 +188,61 @@ public record AgendaBlock(
     }
 
     /**
-     * Splits the container's duration across its members as evenly as possible, so
-     * {@code Σ planned_minutes} of the persisted {@code core_time_block_member} rows always equals the
-     * block's duration (ADR-027 D2 — the fine-grained counterpart of the ADR-013 imputation). The
-     * remainder goes to the leading members, keeping the split a pure function of the block.
+     * Splits the container's duration across its members <b>in proportion to each member's own
+     * effort</b> (ADR-027 D2 — the fine-grained counterpart of the ADR-013 imputation), so a member's
+     * imputed {@code planned_minutes} tracks the work it actually carries rather than an even share.
+     * Using an even split mis-imputes {@code planned}/{@code actual_minutes} per executable and corrupts
+     * both the remaining-effort loop (ADR-013) and the completion ledger (ADR-034); this apportions by
+     * weight instead.
+     *
+     * <p>The split is exact: {@code Σ planned_minutes} always equals the block duration. It uses the
+     * largest-remainder (Hamilton) method — floor each member's proportional share, then hand the leftover
+     * minutes to the members with the largest fractional parts (ties broken by member order) — so the
+     * result is a deterministic pure function of the block. When the effort weights are all equal (the
+     * pre-grouping default) this reduces to the previous even split; when they are all zero it falls back
+     * to an even split to avoid a division by zero.
      *
      * @return one planned-minutes share per member, aligned index-by-index with {@link #members()};
-     *         never null, same size as {@code members()}
+     *         never null, same size as {@code members()}, summing to {@link #durationMinutes()}
      */
     public List<Integer> memberPlannedMinutes() {
-        int memberCount = additionalMembers.size() + 1;
+        int memberCount = memberEfforts.size();
         int total = (int) durationMinutes();
+        long weightSum = memberEfforts.stream().mapToLong(Integer::longValue).sum();
+        if (weightSum <= 0) {
+            return evenSplit(total, memberCount);
+        }
+
+        // Floor each proportional share, tracking the fractional remainders to distribute the leftover.
+        Integer[] shares = new Integer[memberCount];
+        int assigned = 0;
+        double[] remainders = new double[memberCount];
+        for (int index = 0; index < memberCount; index++) {
+            double exact = (double) total * memberEfforts.get(index) / weightSum;
+            int floor = (int) Math.floor(exact);
+            shares[index] = floor;
+            remainders[index] = exact - floor;
+            assigned += floor;
+        }
+        // Hand the leftover minutes to the largest fractional remainders, earliest member breaking ties.
+        int leftover = total - assigned;
+        List<Integer> order = new ArrayList<>(memberCount);
+        for (int index = 0; index < memberCount; index++) {
+            order.add(index);
+        }
+        order.sort((a, b) -> {
+            int byRemainder = Double.compare(remainders[b], remainders[a]);
+            return byRemainder != 0 ? byRemainder : Integer.compare(a, b);
+        });
+        for (int i = 0; i < leftover; i++) {
+            int index = order.get(i);
+            shares[index] = shares[index] + 1;
+        }
+        return List.of(shares);
+    }
+
+    /** An even split of {@code total} minutes across {@code memberCount} members, remainder to the front. */
+    private static List<Integer> evenSplit(int total, int memberCount) {
         int share = total / memberCount;
         int remainder = total % memberCount;
         List<Integer> minutes = new ArrayList<>(memberCount);
@@ -141,5 +250,14 @@ public record AgendaBlock(
             minutes.add(index < remainder ? share + 1 : share);
         }
         return List.copyOf(minutes);
+    }
+
+    /** Equal apportionment weights (all 1) for a block whose per-member effort is not supplied. */
+    private static List<Integer> equalWeights(int memberCount) {
+        List<Integer> weights = new ArrayList<>(memberCount);
+        for (int index = 0; index < memberCount; index++) {
+            weights.add(1);
+        }
+        return weights;
     }
 }

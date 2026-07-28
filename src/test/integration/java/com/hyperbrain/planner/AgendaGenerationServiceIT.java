@@ -365,12 +365,19 @@ class AgendaGenerationServiceIT {
         assertThat(firstStartLocal.toLocalDate()).isEqualTo(java.time.LocalDate.of(2026, 7, 22));
     }
 
+    /**
+     * Counts the executables the Planner scheduled on a local day. It counts {@code core_time_block_member}
+     * rows, not blocks, so the assertion measures scheduled WORK rather than block count — the affinity
+     * grouping (core#50) packs several executables into one themed block, so a block count would
+     * under-report the same amount of scheduled work.
+     */
     private int localDayCount(java.time.ZoneId zone, int year, int month, int day) {
         OffsetDateTime start = java.time.LocalDate.of(year, month, day).atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime end = start.plusDays(1);
         Integer n = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
-                + "AND date_start >= ? AND date_start < ?", Integer.class, start, end);
+            "SELECT count(*) FROM core_time_block_member m JOIN core_time_block b ON b.id = m.block_id "
+                + "WHERE b.origin = 'PLANNER' AND b.status = 'PLANNED' "
+                + "AND b.date_start >= ? AND b.date_start < ?", Integer.class, start, end);
         return n == null ? 0 : n;
     }
 
@@ -393,7 +400,10 @@ class AgendaGenerationServiceIT {
         service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, replan, true);
         int afterReplan = localDayCount(bogota, 2026, 7, 22);
 
-        assertThat(afterDispatch).isGreaterThan(8); // the dispatch filled the day
+        // The dispatch filled the day with a substantial amount of work (counted as scheduled
+        // executables; the affinity grouping (core#50) packs them into fewer, larger themed blocks and
+        // the occupancy cap trims whole blocks, so the count is coarser than the pre-grouping 1:1 day).
+        assertThat(afterDispatch).isGreaterThan(5);
         assertThat(afterReplan).isGreaterThanOrEqualTo(afterDispatch - 2); // the replan keeps it full
     }
 

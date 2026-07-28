@@ -74,8 +74,9 @@ public class AgendaPropuestaParser {
         OffsetDateTime start = readInstant(node, "start");
         OffsetDateTime end = readInstant(node, "end");
         String coachNote = node.hasNonNull("coach_note") ? node.get("coach_note").asText() : null;
+        String theme = node.hasNonNull("theme") ? node.get("theme").asText() : null;
         try {
-            return new BlockDecision(blockId, placement, start, end, coachNote);
+            return new BlockDecision(blockId, placement, start, end, coachNote, theme);
         } catch (IllegalArgumentException ex) {
             // A MOVE without a valid window is a schema breach, not a wall breach: fail the parse.
             throw new AgendaPropuestaParseException(ex.getMessage(), ex);

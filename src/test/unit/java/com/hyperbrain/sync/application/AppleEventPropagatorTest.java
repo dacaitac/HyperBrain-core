@@ -12,6 +12,7 @@ import com.hyperbrain.sync.domain.model.PendingWriteCommand;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.model.WriteCommand;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
+import com.hyperbrain.sync.domain.port.out.ScheduledDueTimeProvider;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
@@ -47,6 +48,7 @@ class AppleEventPropagatorTest {
     private SyncMappingRepository syncMappingRepo;
     private WriteCommandLogRepository commandLogRepo;
     private WriteCommandPublisher commandPublisher;
+    private ScheduledDueTimeProvider scheduledDueTimeProvider;
     private AppleEventPropagator service;
 
     @BeforeEach
@@ -55,10 +57,12 @@ class AppleEventPropagatorTest {
         syncMappingRepo = mock(SyncMappingRepository.class);
         commandLogRepo = mock(WriteCommandLogRepository.class);
         commandPublisher = mock(WriteCommandPublisher.class);
+        scheduledDueTimeProvider = mock(ScheduledDueTimeProvider.class);
         WriteCommandWireMapper wireMapper =
             new WriteCommandWireMapper(new ObjectMapper().registerModule(new JavaTimeModule()));
         service = new AppleEventPropagator(
-            executableRepo, syncMappingRepo, commandLogRepo, commandPublisher, wireMapper);
+            executableRepo, syncMappingRepo, commandLogRepo, commandPublisher, wireMapper,
+            scheduledDueTimeProvider);
     }
 
     @Test

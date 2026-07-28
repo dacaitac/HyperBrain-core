@@ -89,6 +89,13 @@ public class AgendaValidator {
         if (block.members().stream().anyMatch(context.readOnlyAgendaIds()::contains)) {
             return Wall.SCHEDULES_READ_ONLY_AGENDA;
         }
+        // Defense in depth for the WIG's atomicity (ADR-027 D4, core#50): a WIG lead measure may only be
+        // the atomic anchor of its own reserved WIG block. If it appears in ANY block as a companion —
+        // or as the anchor of a non-WIG block — a grouping bug is smuggling it into a theme, which would
+        // split its wigHit signal; reject the block regardless of who composed it.
+        if (block.members().stream().anyMatch(context.wigLeadMeasureIds()::contains) && !block.wig()) {
+            return Wall.WIG_AS_COMPANION;
+        }
         if (outsideFrontier(block, context)) {
             return Wall.OUTSIDE_SLEEP_FRONTIER;
         }

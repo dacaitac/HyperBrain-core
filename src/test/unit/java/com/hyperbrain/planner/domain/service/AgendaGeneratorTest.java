@@ -7,6 +7,7 @@ import com.hyperbrain.planner.domain.model.EnergyTier;
 import com.hyperbrain.planner.domain.model.ExcludedExecutable;
 import com.hyperbrain.planner.domain.model.ExclusionReason;
 import com.hyperbrain.planner.domain.model.ExecutableType;
+import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
@@ -420,10 +421,53 @@ class AgendaGeneratorTest {
         assertThat(block.end()).isBeforeOrEqualTo(BEDTIME);
     }
 
+    @Test
+    @DisplayName("core#50: same-cycle adjacent tasks in a comparable band group into one themed block")
+    void groups_same_cycle_adjacent_tasks() {
+        // With the humanized batching band on (0.10), two same-cycle tasks at comparable priority are
+        // composed into ONE affinity block, sized by the SUM of their efforts and imputed per member.
+        AgendaGenerator grouping =
+            new AgendaGenerator(PlannerConstraints.DEFAULT, HumanizationSettings.DEFAULT);
+        UUID cycle = UUID.randomUUID();
+        SchedulableExecutable a = cycleTask(cycle, 0.90, 40);
+        SchedulableExecutable b = cycleTask(cycle, 0.86, 20);
+        PlannerDayState state = state(List.of(a, b), List.of(), List.of(), NEUTRAL, true);
+
+        Agenda agenda = grouping.generate(state);
+
+        assertThat(agenda.blocks()).hasSize(1);
+        AgendaBlock block = agenda.blocks().get(0);
+        assertThat(block.members()).containsExactly(a.id(), b.id());
+        assertThat(block.durationMinutes()).isEqualTo(60);
+        assertThat(block.memberPlannedMinutes()).containsExactly(40, 20);
+        assertThat(block.theme()).isNull();
+    }
+
+    @Test
+    @DisplayName("core#50: grouping is disabled in F5 degraded mode — same-cycle tasks stay 1:1")
+    void degraded_mode_keeps_blocks_ungrouped() {
+        AgendaGenerator grouping =
+            new AgendaGenerator(PlannerConstraints.DEFAULT, HumanizationSettings.DEFAULT);
+        UUID cycle = UUID.randomUUID();
+        SchedulableExecutable a = cycleTask(cycle, 0.90, 30);
+        SchedulableExecutable b = cycleTask(cycle, 0.88, 30);
+        PlannerDayState state = state(List.of(a, b), List.of(), List.of(), NEUTRAL, false);
+
+        Agenda agenda = grouping.generate(state);
+
+        assertThat(agenda.blocks()).hasSize(2);
+        assertThat(agenda.blocks()).allSatisfy(b2 -> assertThat(b2.additionalMembers()).isEmpty());
+    }
+
     private static PlannerDayState state(
         List<SchedulableExecutable> ranked, List<MciWig> wigs,
         List<OccupiedInterval> occupied, EnergyProfile energy, boolean dataComplete) {
         return new PlannerDayState(WAKE, BEDTIME, ranked, wigs, occupied, energy, dataComplete);
+    }
+
+    private static SchedulableExecutable cycleTask(UUID cycleId, double priority, int estimatedMinutes) {
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null,
+            null, 0, estimatedMinutes, 0, null, cycleId);
     }
 
     private static MciWig mci(UUID leadMeasureId, double aggregatedProgress, double remainingFraction) {
