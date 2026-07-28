@@ -185,12 +185,25 @@ public final class SourceAwareMerge {
      * Applies a Notion status pair with the loss-aware rule: when the current status projects
      * to the same {@code Status} option and the same {@code Complete} flag, nothing changed
      * in Notion and the (richer) domain status is kept. A null option carries no information
-     * and never regresses the status by itself. Any real change delegates to
-     * {@link NotionTaskInboundMapper#resolveStatus}, inheriting the "either signal completes"
-     * authority (Option B): a still-completed {@code Status=Done} keeps {@code DONE} even after
-     * the checkbox is cleared, while both signals non-completed re-opens the task.
+     * and never regresses the status by itself.
+     *
+     * <p><b>Re-opening is Complete-authoritative.</b> Once an item is {@code DONE}, the outbound
+     * canonical reflection leaves {@code Status=Done} on its page; clearing the {@code Complete}
+     * checkbox is therefore the reliable re-open signal — it re-opens even though the reflected
+     * {@code Status} still reads {@code Done} (the item drops to {@code TODO} here and DR-02 lifts it
+     * to {@code IN_PROGRESS}). A deliberate {@code Status} change away from {@code Done} is left to the
+     * loss-aware path and honored verbatim. On a not-yet-{@code DONE} item a fresh {@code Status=Done}
+     * still completes (Option B, so calendar items with no {@code Complete} checkbox can be completed
+     * via {@code Status}); the CREATE interpretation in
+     * {@link NotionTaskInboundMapper#resolveStatus} is unchanged.
      */
     static String mergeStatus(String currentStatus, String statusName, Boolean complete) {
+        if (Boolean.FALSE.equals(complete)
+            && STATUS_DONE.equals(currentStatus)
+            && (statusName == null
+                || STATUS_DONE.equals(NotionTaskInboundMapper.STATUS_FROM_NOTION.get(statusName)))) {
+            return STATUS_TODO;
+        }
         boolean completeProjection = STATUS_DONE.equals(currentStatus);
         boolean completeMatches = complete == null || complete == completeProjection;
         boolean statusMatches = statusName == null

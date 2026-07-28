@@ -502,6 +502,31 @@ class NotionEventPropagatorTest {
         assertThat(mapping.getValue().lastKnownChecksum()).hasSize(64).isNotEqualTo("old-checksum");
     }
 
+    @Test
+    @DisplayName("canonical reflection PATCHes scores + Status + Complete so a Notion completion reaches its own page, and skips the pre-read")
+    void canonical_reflection_patches_scores_and_completion() {
+        // Given a mapped executable the ingestion just marked DONE and a SYSTEM canonical reflection
+        // (the on-ingestion marker); the bot id is configured, so a full mirror would pre-read.
+        properties.setBotUserId(BOT_USER_ID);
+        givenExecutable(taskSnapshotWithScores("DONE", 0.8, 0.6),
+            mapping(LOCAL_ID, "page123", "old-checksum"));
+
+        // When
+        service.propagate(canonicalReflectionEvent());
+
+        // Then the scores AND the canonical completion are patched — nothing else (name/date/etc.)
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> props = ArgumentCaptor.forClass(Map.class);
+        verify(notion).updatePage(eq("page123"), props.capture());
+        assertThat(props.getValue())
+            .containsOnlyKeys("Priority Score", "Urgence", "Status", "Complete");
+        assertThat(props.getValue().get("Status"))
+            .isEqualTo(Map.of("status", Map.of("name", "Done")));
+        assertThat(props.getValue().get("Complete")).isEqualTo(Map.of("checkbox", true));
+        // And the page is never re-read (a reflection cannot collide with a human free-text edit)
+        verify(notion, never()).retrievePage(anyString());
+    }
+
     // ── ADR-020: outbound staleness guard for full-mirror write-backs ─────────
 
     @Test
@@ -632,10 +657,17 @@ class NotionEventPropagatorTest {
             eventType, "{}", sourceSystem, OffsetDateTime.now());
     }
 
-    /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the ADR-020 score-reflection marker. */
+    /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the ADR-020 score-reflection marker (tick). */
     private static OutboxEvent reflectionEvent() {
         return new OutboxEvent(UUID.randomUUID(), "CORE_EXECUTABLE", LOCAL_ID.toString(),
             "ExecutableUpdatedEvent", "{\"operation\":\"UPDATED\",\"reflection\":\"PRIORITY_SCORE\"}",
+            "SYSTEM", OffsetDateTime.now());
+    }
+
+    /** A SYSTEM {@code ExecutableUpdatedEvent} carrying the on-ingestion canonical-reflection marker. */
+    private static OutboxEvent canonicalReflectionEvent() {
+        return new OutboxEvent(UUID.randomUUID(), "CORE_EXECUTABLE", LOCAL_ID.toString(),
+            "ExecutableUpdatedEvent", "{\"operation\":\"UPDATED\",\"reflection\":\"CANONICAL_STATE\"}",
             "SYSTEM", OffsetDateTime.now());
     }
 

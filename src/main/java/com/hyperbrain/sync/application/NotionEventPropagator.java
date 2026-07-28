@@ -70,9 +70,12 @@ import java.util.UUID;
  * <p>Concurrency with in-flight human edits (ADR-020, burst protection): the write-back is not a
  * blind full-page mirror any more.
  * <ul>
- *   <li><b>Priority reflections</b> (SYSTEM tick / on-ingestion, marked {@code
- *       reflection=PRIORITY_SCORE}) PATCH only the SYSTEM-owned score properties and skip the
- *       pre-read — the user never edits scores, so they cannot collide with a manual edit.
+ *   <li><b>Reflections</b> (SYSTEM, marked {@code reflection=PRIORITY_SCORE} for the scheduled
+ *       score tick or {@code reflection=CANONICAL_STATE} for the on-ingestion re-assertion) PATCH
+ *       only their field-scoped SYSTEM-owned properties and skip the pre-read: the tick touches the
+ *       scores the user never edits, and the on-ingestion reflection additionally re-asserts the
+ *       canonical completion ({@code Status}/{@code Complete}) the ingestion just derived, so a
+ *       completion made in Notion is mirrored back onto its own page past the RF-17 loop guard.
  *   <li><b>Genuine domain changes</b> (USER/APPLE and non-priority SYSTEM rules) still mirror the
  *       full page, but first run the outbound staleness guard ({@link #hasHumanEditInFlight}): if a
  *       person is editing the page in the same minute, the write-back is <em>discarded</em> (not
@@ -122,22 +125,42 @@ public class NotionEventPropagator implements IEventPropagator {
         Set.of("ExecutableUpdatedEvent", "TaskCompletedEvent");
 
     /**
-     * Payload marker (staged by {@code OnIngestionPriorityReflector} and {@code
-     * PriorityReflectionService}) identifying a write-back that only re-asserts the SYSTEM-owned
-     * scores. Such a reflection PATCHes only {@link #PRIORITY_REFLECTION_PROPS} instead of mirroring
-     * the whole page, and skips the outbound human-edit pre-read (ADR-020): the user never edits
-     * scores, so a manual-edit burst can never collide with it, which also saves a Notion read.
+     * Payload markers identifying a write-back that only re-asserts SYSTEM-owned fields instead of
+     * mirroring the whole page: it PATCHes just the scoped properties and skips the outbound
+     * human-edit pre-read (ADR-020 write-back field scoping).
+     * <ul>
+     *   <li>{@code PRIORITY_SCORE} (scheduled tick, {@code PriorityReflectionService}) re-asserts only
+     *       the computed scores — the user never edits them, so it can never collide with a manual
+     *       edit, and a stale scheduled sweep can never clobber a human-owned field.
+     *   <li>{@code CANONICAL_STATE} (on-ingestion, {@code OnIngestionPriorityReflector}) additionally
+     *       re-asserts the canonical completion ({@code Status} + {@code Complete}) so a completion the
+     *       user made in Notion is reflected back onto the same page past the RF-17 loop guard. It is
+     *       safe to include the human-owned {@code Complete} here — unlike the tick — because this
+     *       reflection is staged in the very ingestion transaction that processed the user's edit, so
+     *       it can only re-assert the state that edit just produced.
+     * </ul>
      */
     private static final String PRIORITY_REFLECTION_MARKER = "PRIORITY_SCORE";
+    private static final String CANONICAL_REFLECTION_MARKER = "CANONICAL_STATE";
 
     /**
-     * The SYSTEM-owned Notion properties a priority reflection is allowed to touch. Restricted to
-     * the scores the Prioritizer computes; every other property stays exactly as the user left it.
+     * The SYSTEM-owned Notion properties a scheduled score reflection may touch. Restricted to the
+     * scores the Prioritizer computes; every other property stays exactly as the user left it.
      * ({@code priority_computed_at} is a Core-internal recompute timestamp and is not mirrored to
      * Notion — it has no Tasks-database property.)
      */
     private static final Set<String> PRIORITY_REFLECTION_PROPS =
         Set.of(NotionSchema.PROP_PRIORITY_SCORE, NotionSchema.PROP_URGENCE);
+
+    /**
+     * The properties an on-ingestion reflection re-asserts: the computed scores plus the canonical
+     * completion projection ({@code Status} + {@code Complete}). This is what carries a completion the
+     * user made in Notion back onto its own page — the RF-17 loop guard suppresses the NOTION-origin
+     * event, so without this the derived {@code Status=Done} would never reach the origin page.
+     */
+    private static final Set<String> CANONICAL_REFLECTION_PROPS =
+        Set.of(NotionSchema.PROP_PRIORITY_SCORE, NotionSchema.PROP_URGENCE,
+            NotionSchema.PROP_STATUS, NotionSchema.PROP_COMPLETE);
 
     private static final Map<String, Operation> SYNC_APPLE_EVENT_OPERATIONS = Map.of(
         "ReminderSyncedEvent", Operation.UPDATED,
@@ -217,14 +240,14 @@ public class NotionEventPropagator implements IEventPropagator {
         }
 
         boolean updateOnly = isExecutable && UPDATE_ONLY_EXECUTABLE_EVENTS.contains(event.eventType());
-        boolean priorityReflection = isExecutable && isPriorityReflection(event);
+        Set<String> reflectionScope = isExecutable ? reflectionScope(event) : null;
         try {
             if (operation == Operation.DELETED) {
                 propagateDelete(localId);
             } else if (isCycle) {
                 propagateCycleUpsert(event, localId);
             } else {
-                propagateExecutableUpsert(event, localId, updateOnly, priorityReflection);
+                propagateExecutableUpsert(event, localId, updateOnly, reflectionScope);
             }
         } catch (NotionApiException ex) {
             onPersistentFailure(localId, ex);
@@ -233,20 +256,28 @@ public class NotionEventPropagator implements IEventPropagator {
     }
 
     /**
-     * Whether a drained executable event is a SYSTEM priority reflection (tick or on-ingestion,
-     * ADR-020) rather than a genuine domain change. Only these are field-scoped to the score
-     * properties; every other SYSTEM write-back (focus, progress, settlement) stays a full mirror.
+     * The field scope for a drained executable event when it is a Prioritizer reflection (ADR-020),
+     * or {@code null} for a genuine domain change that mirrors the full page. Keyed on the SYSTEM
+     * payload marker: {@code PRIORITY_SCORE} → scores only (scheduled tick); {@code CANONICAL_STATE}
+     * → scores plus the canonical completion (on-ingestion). Non-SYSTEM events, unmarked payloads and
+     * unknown markers are full mirrors.
      */
-    private boolean isPriorityReflection(OutboxEvent event) {
+    private Set<String> reflectionScope(OutboxEvent event) {
         if (ExternalSystem.from(event.sourceSystem()) != ExternalSystem.SYSTEM
             || event.payload() == null) {
-            return false;
+            return null;
         }
         try {
-            return PRIORITY_REFLECTION_MARKER.equals(
-                objectMapper.readTree(event.payload()).path("reflection").asText(null));
+            String marker = objectMapper.readTree(event.payload()).path("reflection").asText(null);
+            if (CANONICAL_REFLECTION_MARKER.equals(marker)) {
+                return CANONICAL_REFLECTION_PROPS;
+            }
+            if (PRIORITY_REFLECTION_MARKER.equals(marker)) {
+                return PRIORITY_REFLECTION_PROPS;
+            }
+            return null;
         } catch (JsonProcessingException ex) {
-            return false;
+            return null;
         }
     }
 
@@ -266,7 +297,7 @@ public class NotionEventPropagator implements IEventPropagator {
     }
 
     private void propagateExecutableUpsert(OutboxEvent event, UUID localId, boolean updateOnly,
-                                           boolean priorityReflection) {
+                                           Set<String> reflectionScope) {
         Optional<ExecutableSnapshot> snapshot = snapshotRepo.findExecutable(localId);
         if (snapshot.isEmpty()) {
             log.warn("Executable {} not found for outbox event {}; skipping Notion write-back",
@@ -287,9 +318,8 @@ public class NotionEventPropagator implements IEventPropagator {
         String parentExternalId = resolveMappedExternalId(snapshot.get().parentId());
         Map<String, Object> props =
             NotionTaskMapper.map(snapshot.get(), cycleExternalId, parentExternalId);
-        Set<String> patchScope = priorityReflection ? PRIORITY_REFLECTION_PROPS : null;
         upsertPage(localId, snapshot.get().userId(), properties.getTasksDataSourceId(),
-            props, patchScope);
+            props, reflectionScope);
     }
 
     /** Returns whether the executable already has a Notion page (a {@code sync_mapping} row). */
@@ -319,8 +349,9 @@ public class NotionEventPropagator implements IEventPropagator {
      *       rule). Touches human-editable fields, so before patching it runs the outbound staleness
      *       guard ({@link #hasHumanEditInFlight}) and discards the write-back when a person is editing
      *       the page, letting the inbound webhook reconcile.
-     *   <li><b>a property subset (score reflection)</b> — patches only those SYSTEM-owned properties
-     *       and skips the pre-read: the user never edits scores, so it cannot collide.
+     *   <li><b>a property subset (reflection)</b> — patches only those SYSTEM-owned properties and
+     *       skips the pre-read. The scheduled score reflection touches fields the user never edits;
+     *       the on-ingestion reflection also re-asserts the canonical completion it just derived.
      * </ul>
      *
      * <p>The stored checksum is always computed over the <em>full</em> canonical {@code props}, even
@@ -359,7 +390,7 @@ public class NotionEventPropagator implements IEventPropagator {
             externalId, checksum, STATUS_SYNCED, notionClockNow()));
         recordWrite(Operation.UPDATED);
         log.info("Notion page {} updated for entity {}{}", externalId, localId,
-            patchScope != null ? " (score reflection, field-scoped)" : "");
+            patchScope != null ? " (reflection, field-scoped)" : "");
     }
 
     /**
