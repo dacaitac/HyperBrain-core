@@ -77,6 +77,32 @@ class OnIngestionPriorityReflectorTest {
     }
 
     @Test
+    @DisplayName("NOTION origin, completion in sync: the reflection is score-only (reflection=PRIORITY_SCORE)")
+    void notion_completion_in_sync_reflects_scores_only() {
+        when(prioritizerService.rescore(EXECUTABLE))
+            .thenReturn(RescoreResult.scored(new PriorityScore(EXECUTABLE, 0.7, 3.0, 0.5), true));
+
+        reflector.reflect(EXECUTABLE, ExternalSystem.NOTION, false);
+
+        ArgumentCaptor<OutboxEvent> outbox = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxRepo).append(outbox.capture());
+        assertThat(outbox.getValue().payload()).contains("\"reflection\":\"PRIORITY_SCORE\"");
+    }
+
+    @Test
+    @DisplayName("NOTION origin, completion out of sync: the reflection re-asserts completion (reflection=CANONICAL_STATE)")
+    void notion_completion_out_of_sync_reflects_canonical_state() {
+        when(prioritizerService.rescore(EXECUTABLE))
+            .thenReturn(RescoreResult.scored(new PriorityScore(EXECUTABLE, 0.7, 3.0, 0.5), true));
+
+        reflector.reflect(EXECUTABLE, ExternalSystem.NOTION, true);
+
+        ArgumentCaptor<OutboxEvent> outbox = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxRepo).append(outbox.capture());
+        assertThat(outbox.getValue().payload()).contains("\"reflection\":\"CANONICAL_STATE\"");
+    }
+
+    @Test
     @DisplayName("APPLE origin + score moved: stages no extra event — the APPLE event already reflects the score; returns false")
     void apple_moved_stages_no_event() {
         when(prioritizerService.rescore(EXECUTABLE))

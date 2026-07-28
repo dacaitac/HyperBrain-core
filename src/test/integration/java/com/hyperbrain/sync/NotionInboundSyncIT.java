@@ -219,6 +219,26 @@ class NotionInboundSyncIT {
     }
 
     @Test
+    @DisplayName("completing a Task via the Complete checkbox then clearing it re-opens to IN_PROGRESS (reflected Status=Done notwithstanding)")
+    void checkbox_complete_then_uncheck_reopens() {
+        String pageId = newPageId();
+        deliverAutomation(pageId, taskPage(pageId, "Task", "In progress", false, "Task",
+            "2026-07-07T15:00:00.000Z", null));
+        // The user ticks Complete → DONE; the on-ingestion canonical reflection then leaves
+        // Status=Done on the page (that is the very bug fix under test on the outbound side)
+        deliverAutomation(pageId, taskPage(pageId, "Task", "In progress", true, "Task",
+            "2026-07-07T15:01:00.000Z", null));
+        assertThat(mappedStatus(pageId)).isEqualTo("DONE");
+
+        // When the user clears only the checkbox — Status still reads the reflected "Done"
+        deliverAutomation(pageId, taskPage(pageId, "Task", "Done", false, "Task",
+            "2026-07-07T15:02:00.000Z", null));
+
+        // Then Complete is authoritative for the re-open: the item drops to TODO and DR-02 lifts it
+        assertThat(mappedStatus(pageId)).isEqualTo("IN_PROGRESS");
+    }
+
+    @Test
     @DisplayName("scenario 4 — DELETE: a trashed page removes the entity and its mapping (CA-7)")
     void trashed_page_deletes_entity() {
         String pageId = newPageId();

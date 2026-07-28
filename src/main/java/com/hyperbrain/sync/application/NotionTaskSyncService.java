@@ -60,6 +60,9 @@ public class NotionTaskSyncService {
     private static final String EXTERNAL_SYSTEM = "NOTION";
     private static final String STATUS_SYNCED = "SYNCED";
     private static final String AGGREGATE_TYPE = "CORE_EXECUTABLE";
+    private static final String STATUS_DONE = "DONE";
+    // Notion "status" option that represents completion — mirrors NotionTaskMapper.STATUS_TO_NOTION.
+    private static final String NOTION_STATUS_DONE = "Done";
 
     private final CoreExecutableRepository executableRepo;
     private final SyncSnapshotRepository snapshotRepo;
@@ -160,11 +163,16 @@ public class NotionTaskSyncService {
         appendOutbox(localId, page.pageId(), snapshot.type(),
             operation == Operation.CREATED ? "ExecutableCreatedEvent" : "ExecutableUpdatedEvent",
             operation);
-        // Recompute the priority on the just-upserted merged row. For NOTION origin the reflector
-        // always stages a SYSTEM ExecutableUpdatedEvent so the canonical Core state (status, scores,
-        // all fields) reaches Notion past the loop guard (RF-17) — unconditionally, not only when
-        // the score moved.
-        priorityReflector.reflect(localId, ExternalSystem.NOTION);
+        // Recompute the priority on the just-upserted merged row and stage the NOTION-origin SYSTEM
+        // reflection (RF-17: the NOTION event itself cannot reach Notion). It re-asserts Status +
+        // Complete onto the page ONLY when the page's completion is out of sync with the canonical
+        // row — i.e. the user toggled the Complete checkbox (or Status) and the derived DONE-ness no
+        // longer matches what the page shows. Restricting it to that case keeps a burst of free-text
+        // edits from ever re-writing the human-owned Complete checkbox; otherwise it is score-only.
+        boolean canonicalDone = STATUS_DONE.equals(snapshot.status());
+        boolean completionOutOfSync = canonicalDone != NOTION_STATUS_DONE.equals(page.statusName())
+            || canonicalDone != Boolean.TRUE.equals(page.complete());
+        priorityReflector.reflect(localId, ExternalSystem.NOTION, completionOutOfSync);
         log.info("TASK page {} ({}) persisted as executable {}", page.pageId(), operation, localId);
         return operation == Operation.CREATED ? SyncOutcome.CREATED : SyncOutcome.UPDATED;
     }

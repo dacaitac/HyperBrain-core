@@ -206,15 +206,17 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("Option B uncompletion: DONE only re-opens when BOTH Notion signals are non-completed")
-        void uncompletion_requires_both_signals() {
-            // Clearing only the checkbox while Status stays Done keeps DONE (still completed)
-            assertThat(SourceAwareMerge.mergeStatus("DONE", "Done", false)).isEqualTo("DONE");
+        @DisplayName("un-completion is Complete-authoritative: clearing the checkbox re-opens even if the reflected Status stays Done")
+        void uncompletion_is_complete_authoritative() {
+            // Clearing the checkbox re-opens a DONE item even though the outbound reflection left
+            // Status=Done on the page (the user only toggled the checkbox). Drops to TODO here; DR-02
+            // then lifts it to IN_PROGRESS.
+            assertThat(SourceAwareMerge.mergeStatus("DONE", "Done", false)).isEqualTo("TODO");
             // An echo of a completed row (Status=Done + checked) is a no-op that keeps DONE
             assertThat(SourceAwareMerge.mergeStatus("DONE", "Done", true)).isEqualTo("DONE");
-            // Both signals non-completed re-opens: Status=In progress + checkbox off (bug #1 fix)
+            // A deliberate Status change away from Done (checkbox off) is honored verbatim (bug #1)
             assertThat(SourceAwareMerge.mergeStatus("DONE", "In progress", false)).isEqualTo("IN_PROGRESS");
-            // Both signals non-completed via Not started + checkbox off drops to TODO (DR-02 then lifts it)
+            // Status=Not started + checkbox off drops to TODO (DR-02 then lifts it)
             assertThat(SourceAwareMerge.mergeStatus("DONE", "Not started", false)).isEqualTo("TODO");
         }
 

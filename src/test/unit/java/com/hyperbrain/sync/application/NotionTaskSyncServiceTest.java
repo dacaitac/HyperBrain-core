@@ -108,8 +108,9 @@ class NotionTaskSyncServiceTest {
                 .name("Write tests").build()));
         when(cycleSyncService.resolveOrImport(CYCLE_PAGE_ID)).thenReturn(CYCLE_LOCAL_ID);
         // Reflector already handles the SYSTEM reflection (priority moved); the status-change path
-        // must not fire a duplicate event.
-        when(priorityReflector.reflect(LOCAL_ID, ExternalSystem.NOTION)).thenReturn(true);
+        // must not fire a duplicate event. The page arrives Done + Complete and the row is DONE, so
+        // completion is in sync — the reflection is score-only (reAssertCompletion=false).
+        when(priorityReflector.reflect(LOCAL_ID, ExternalSystem.NOTION, false)).thenReturn(true);
 
         // When
         SyncOutcome outcome = service.apply(page("Renamed", "Done", true, EDITED_AT));
@@ -128,7 +129,8 @@ class NotionTaskSyncServiceTest {
         assertThat(outbox.getValue().eventType()).isEqualTo("ExecutableUpdatedEvent");
         // #66a: the post-upsert priority reflection is delegated to the shared reflector with the
         // NOTION origin; whether a SYSTEM event follows is the reflector's decision (tested there).
-        verify(priorityReflector).reflect(LOCAL_ID, ExternalSystem.NOTION);
+        // Completion is in sync (page Done+Complete, row DONE), so it does not re-assert completion.
+        verify(priorityReflector).reflect(LOCAL_ID, ExternalSystem.NOTION, false);
     }
 
 
