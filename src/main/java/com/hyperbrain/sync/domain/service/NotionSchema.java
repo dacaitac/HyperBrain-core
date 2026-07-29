@@ -37,6 +37,9 @@ public final class NotionSchema {
     public static final String PROP_INACTIVE = "Inactive";
     // Self-relation of the Cycles DB (ADR-015 horizon ladder): points to the parent cycle.
     public static final String PROP_PARENT_CYCLE = "Cycle Parent (Objective)";
+    // Self-relation of the Cycles DB (ADR-036): the life AREAs this cycle serves (M:N,
+    // core_cycle_area). Points to Cycles pages whose Type is "Area".
+    public static final String PROP_AREAS = "Areas";
 
     // ── Canonical select options (1-based domain scale ↔ option index) ────────
     // Shared by the outbound (HU-10) and inbound (HU-14) mappers so both directions

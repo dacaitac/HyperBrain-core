@@ -11,10 +11,11 @@ import java.util.UUID;
  * @param userId        owning user
  * @param parentCycleId parent cycle in the ADR-015 horizon ladder (self-nesting), or null
  * @param name          cycle name
- * @param type          cycle type ({@code MCI}, {@code ROUTINE}, {@code PHASE})
- * @param status        lifecycle status ({@code ACTIVE}, {@code COMPLETED})
+ * @param type          cycle type ({@code MCI}, {@code ROUTINE}, {@code PHASE}, {@code AREA}, ...)
+ * @param status        lifecycle status ({@code ACTIVE}, {@code COMPLETED}); an {@code AREA} is
+ *                      always {@code ACTIVE} (ADR-036 perpetuity)
  * @param startDate     optional start date
- * @param endDate       optional end date
+ * @param endDate       optional end date; always null for an {@code AREA} (ADR-036 perpetuity)
  */
 public record CycleSnapshot(
     UUID id,

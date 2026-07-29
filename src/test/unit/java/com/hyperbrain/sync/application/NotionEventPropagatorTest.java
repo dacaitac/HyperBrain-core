@@ -9,6 +9,7 @@ import com.hyperbrain.sync.domain.NotionPageNotFoundException;
 import com.hyperbrain.sync.domain.model.CycleSnapshot;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.model.SyncMapping;
+import com.hyperbrain.sync.domain.port.out.CoreCycleAreaRepository;
 import com.hyperbrain.sync.domain.port.out.NotionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
@@ -59,6 +60,7 @@ class NotionEventPropagatorTest {
 
     private SyncSnapshotRepository snapshotRepo;
     private SyncMappingRepository syncMappingRepo;
+    private CoreCycleAreaRepository cycleAreaRepo;
     private NotionPort notion;
     private SimpleMeterRegistry meterRegistry;
     private NotionSyncProperties properties;
@@ -68,13 +70,14 @@ class NotionEventPropagatorTest {
     void setUp() {
         snapshotRepo = mock(SyncSnapshotRepository.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
+        cycleAreaRepo = mock(CoreCycleAreaRepository.class);
         notion = mock(NotionPort.class);
         meterRegistry = new SimpleMeterRegistry();
         properties = new NotionSyncProperties();
         properties.setEnabled(true);
         properties.setTasksDataSourceId(TASKS_DS);
         properties.setCyclesDataSourceId(CYCLES_DS);
-        service = new NotionEventPropagator(snapshotRepo, syncMappingRepo, notion,
+        service = new NotionEventPropagator(snapshotRepo, syncMappingRepo, cycleAreaRepo, notion,
             new NotionPageParser(), properties, new ObjectMapper(), meterRegistry);
     }
 

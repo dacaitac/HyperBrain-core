@@ -7,6 +7,7 @@ import com.hyperbrain.sync.domain.NotionPageNotFoundException;
 import com.hyperbrain.sync.domain.model.CycleSnapshot;
 import com.hyperbrain.sync.domain.model.NotionCyclePage;
 import com.hyperbrain.sync.domain.model.SyncMapping;
+import com.hyperbrain.sync.domain.port.out.CoreCycleAreaRepository;
 import com.hyperbrain.sync.domain.port.out.CoreCycleRepository;
 import com.hyperbrain.sync.domain.port.out.NotionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
@@ -21,11 +22,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,6 +45,7 @@ class NotionCycleSyncServiceTest {
         OffsetDateTime.of(2026, 7, 7, 15, 0, 0, 0, ZoneOffset.UTC);
 
     @Mock private CoreCycleRepository cycleRepo;
+    @Mock private CoreCycleAreaRepository cycleAreaRepo;
     @Mock private SyncMappingRepository syncMappingRepo;
     @Mock private OutboxRepository outboxRepo;
     @Mock private NotionPort notion;
@@ -49,8 +54,8 @@ class NotionCycleSyncServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new NotionCycleSyncService(cycleRepo, syncMappingRepo, outboxRepo, notion,
-            new NotionPageParser(), new ObjectMapper(), USER_ID);
+        service = new NotionCycleSyncService(cycleRepo, cycleAreaRepo, syncMappingRepo, outboxRepo,
+            notion, new NotionPageParser(), new ObjectMapper(), USER_ID);
     }
 
     @Test
@@ -118,7 +123,7 @@ class NotionCycleSyncServiceTest {
 
         // When
         SyncOutcome outcome = service.apply(new NotionCyclePage(PAGE_ID, EDITED_AT, true,
-            null, null, null, null, null, null));
+            null, null, null, null, null, null, List.of()));
 
         // Then
         assertThat(outcome).isEqualTo(SyncOutcome.DELETED);
@@ -233,6 +238,52 @@ class NotionCycleSyncServiceTest {
         assertThat(snapshot.getValue().parentCycleId()).isNull();
     }
 
+    @Test
+    @DisplayName("ADR-036: the Areas relation is mirrored into core_cycle_area, keeping only valid AREA targets")
+    void areas_relation_reconciled_into_bridge() {
+        // Given a mapped cycle (so its local id is deterministic) whose Areas relation points to a
+        // mapped AREA and to a mapped non-AREA cycle
+        String areaPage = "areapage0000000000000000000000a1";
+        String notAreaPage = "cyclepage000000000000000000000b2";
+        UUID areaLocal = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1");
+        UUID notAreaLocal = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2");
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
+            .thenReturn(Optional.of(mapping("prev-checksum", EDITED_AT)));
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", areaPage))
+            .thenReturn(Optional.of(areaMapping(areaLocal, areaPage)));
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", notAreaPage))
+            .thenReturn(Optional.of(areaMapping(notAreaLocal, notAreaPage)));
+        when(cycleRepo.findType(areaLocal)).thenReturn(Optional.of("AREA"));
+        when(cycleRepo.findType(notAreaLocal)).thenReturn(Optional.of("PROJECT"));
+
+        // When
+        service.apply(pageWithAreas(EDITED_AT, List.of(areaPage, notAreaPage)));
+
+        // Then only the AREA target survives the containment rule
+        verify(cycleAreaRepo).replaceMembershipsForCycle(eq(LOCAL_ID), eq(Set.of(areaLocal)));
+    }
+
+    @Test
+    @DisplayName("ADR-036: an unmapped area relation is omitted from the bridge (repaired by a later webhook)")
+    void unmapped_area_relation_is_omitted() {
+        // Given a mapped cycle whose only Areas relation is not mapped yet
+        String areaPage = "areapage0000000000000000000000a1";
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
+            .thenReturn(Optional.of(mapping("prev-checksum", EDITED_AT)));
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", areaPage)).thenReturn(Optional.empty());
+
+        // When
+        service.apply(pageWithAreas(EDITED_AT, List.of(areaPage)));
+
+        // Then the membership set is cleared (nothing valid to link)
+        verify(cycleAreaRepo).replaceMembershipsForCycle(LOCAL_ID, Set.of());
+    }
+
+    private static SyncMapping areaMapping(UUID localId, String externalId) {
+        return new SyncMapping(UUID.randomUUID(), USER_ID, localId, "NOTION", externalId,
+            "checksum", "SYNCED", EDITED_AT);
+    }
+
     private static NotionCyclePage page(String name, Boolean inactive, OffsetDateTime editedAt) {
         return pageWithParent(name, inactive, editedAt, null);
     }
@@ -240,7 +291,12 @@ class NotionCycleSyncServiceTest {
     private static NotionCyclePage pageWithParent(String name, Boolean inactive,
                                                   OffsetDateTime editedAt, String parentRelationId) {
         return new NotionCyclePage(PAGE_ID, editedAt, false, name, "MCI",
-            "2026-07-01", "2026-07-14", inactive, parentRelationId);
+            "2026-07-01", "2026-07-14", inactive, parentRelationId, List.of());
+    }
+
+    private static NotionCyclePage pageWithAreas(OffsetDateTime editedAt, List<String> areaRelationIds) {
+        return new NotionCyclePage(PAGE_ID, editedAt, false, "Serves areas", "PROJECT",
+            "2026-07-01", "2026-07-14", false, null, areaRelationIds);
     }
 
     private static SyncMapping mapping(String checksum, OffsetDateTime lastSyncedAt) {

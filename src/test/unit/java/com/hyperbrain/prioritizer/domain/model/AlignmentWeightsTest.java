@@ -32,6 +32,12 @@ class AlignmentWeightsTest {
     }
 
     @Test
+    @DisplayName("AREA carries no alignment weight (0.0) — classification, out of the chain (ADR-036)")
+    void area_has_zero_band_weight() {
+        assertThat(AlignmentWeights.DEFAULT.bandWeight(CycleType.AREA)).isEqualTo(0.0);
+    }
+
+    @Test
     @DisplayName("decay is δ(0)=δ(1)=1.0, δ(2)=0.9, δ(≥3)=0.8")
     void decay_schedule() {
         AlignmentWeights w = AlignmentWeights.DEFAULT;

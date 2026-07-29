@@ -9,9 +9,11 @@ import com.hyperbrain.sync.domain.model.CycleSnapshot;
 import com.hyperbrain.sync.domain.model.NotionCyclePage;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SyncMapping;
+import com.hyperbrain.sync.domain.port.out.CoreCycleAreaRepository;
 import com.hyperbrain.sync.domain.port.out.CoreCycleRepository;
 import com.hyperbrain.sync.domain.port.out.NotionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
+import com.hyperbrain.sync.domain.service.AreaContainmentPolicy;
 import com.hyperbrain.sync.domain.service.NotionCycleInboundMapper;
 import com.hyperbrain.sync.domain.service.NotionCycleMapper;
 import com.hyperbrain.sync.infrastructure.NotionPageParser;
@@ -22,8 +24,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -58,6 +63,7 @@ public class NotionCycleSyncService {
     private static final String AGGREGATE_TYPE = "CORE_CYCLE";
 
     private final CoreCycleRepository cycleRepo;
+    private final CoreCycleAreaRepository cycleAreaRepo;
     private final SyncMappingRepository syncMappingRepo;
     private final OutboxRepository outboxRepo;
     private final NotionPort notion;
@@ -67,6 +73,7 @@ public class NotionCycleSyncService {
 
     public NotionCycleSyncService(
         CoreCycleRepository cycleRepo,
+        CoreCycleAreaRepository cycleAreaRepo,
         SyncMappingRepository syncMappingRepo,
         OutboxRepository outboxRepo,
         NotionPort notion,
@@ -75,6 +82,7 @@ public class NotionCycleSyncService {
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
         this.cycleRepo = cycleRepo;
+        this.cycleAreaRepo = cycleAreaRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.outboxRepo = outboxRepo;
         this.notion = notion;
@@ -105,7 +113,8 @@ public class NotionCycleSyncService {
         UUID parentCycleId = resolveParent(page.parentRelationId(), localId);
         CycleSnapshot snapshot =
             NotionCycleInboundMapper.toSnapshot(page, localId, defaultUserId, parentCycleId);
-        Map<String, Object> canonicalProps = NotionCycleMapper.map(snapshot, page.parentRelationId());
+        Map<String, Object> canonicalProps =
+            NotionCycleMapper.map(snapshot, page.parentRelationId(), page.areaRelationIds());
         if (mapping.isPresent()
             && ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(),
                 canonicalProps, objectMapper)) {
@@ -114,6 +123,7 @@ public class NotionCycleSyncService {
         }
 
         cycleRepo.upsert(snapshot);
+        reconcileAreaMemberships(localId, page.areaRelationIds());
         String checksum = ChecksumSupport.compute(page.pageId(), canonicalProps, objectMapper);
         OffsetDateTime syncedAt = page.lastEditedTime() != null ? page.lastEditedTime() : OffsetDateTime.now();
         Operation operation = mapping.isEmpty() ? Operation.CREATED : Operation.UPDATED;
@@ -207,6 +217,38 @@ public class NotionCycleSyncService {
             return null;
         }
         return parentLocalId;
+    }
+
+    /**
+     * Full-mirrors the cycle's {@code Areas} relation into the {@code core_cycle_area} bridge (ADR-036):
+     * resolves each related page id to a local cycle, drops the ones that are unmapped (repaired by the
+     * next webhook, like an unmapped parent), applies the {@link AreaContainmentPolicy} containment rule
+     * (no self-reference, target must be an {@code AREA}) and replaces the whole membership set of the
+     * cycle. A cleared relation therefore clears every membership. Runs inside the ingestion
+     * transaction; the SYSTEM-origin membership authoring path (LLM/agenda) is deferred (ADR-036).
+     *
+     * @param cycleId          the local cycle being upserted
+     * @param areaRelationIds  normalized Notion page ids of the {@code Areas} relation; never null
+     */
+    private void reconcileAreaMemberships(UUID cycleId, List<String> areaRelationIds) {
+        Map<UUID, String> candidateTypes = new LinkedHashMap<>();
+        for (String areaExternalId : areaRelationIds) {
+            Optional<SyncMapping> areaMapping =
+                syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, areaExternalId);
+            if (areaMapping.isEmpty()) {
+                log.warn("Area cycle page {} is not mapped yet; membership omitted", areaExternalId);
+                continue;
+            }
+            UUID areaLocalId = areaMapping.get().localId();
+            candidateTypes.put(areaLocalId, cycleRepo.findType(areaLocalId).orElse(null));
+        }
+        Set<UUID> validAreaIds = AreaContainmentPolicy.validate(cycleId, candidateTypes);
+        if (validAreaIds.size() < candidateTypes.size()) {
+            log.warn("Cycle {} had {} area relation(s) rejected by the containment rule (self-reference "
+                + "or non-AREA target); keeping {}", cycleId,
+                candidateTypes.size() - validAreaIds.size(), validAreaIds.size());
+        }
+        cycleAreaRepo.replaceMembershipsForCycle(cycleId, validAreaIds);
     }
 
     private SyncOutcome deleteMapped(String pageId, Optional<SyncMapping> mapping) {

@@ -1,5 +1,6 @@
 package com.hyperbrain.sync.domain.model;
 
+import java.util.List;
 import java.time.OffsetDateTime;
 
 /**
@@ -11,12 +12,15 @@ import java.time.OffsetDateTime;
  * @param lastEditedTime {@code last_edited_time} of the page (monotonicity guard, CA-29)
  * @param archived       true when the page is {@code archived} or {@code in_trash} (CA-7)
  * @param name           plain text of the {@code Name} title property
- * @param typeName       {@code Type} select option name ({@code MCI}/{@code Routine}/{@code Phase})
+ * @param typeName       {@code Type} select option name ({@code MCI}/{@code Routine}/{@code Phase}/{@code Area})
  * @param dateStart        raw {@code Date.start} string, or null
  * @param dateEnd          raw {@code Date.end} string, or null
  * @param inactive         {@code Inactive} checkbox; true maps to status {@code COMPLETED}
  * @param parentRelationId normalized Notion page id of the {@code Cycle Parent (Objective)}
  *                         self-relation (limit-1: first id), or null when the relation is empty
+ * @param areaRelationIds  normalized Notion page ids of the {@code Areas} self-relation (the life
+ *                         AREAs this cycle serves, ADR-036); never null, empty when the relation is
+ *                         empty or the property is absent
  */
 public record NotionCyclePage(
     String pageId,
@@ -27,6 +31,7 @@ public record NotionCyclePage(
     String dateStart,
     String dateEnd,
     Boolean inactive,
-    String parentRelationId
+    String parentRelationId,
+    List<String> areaRelationIds
 ) {
 }

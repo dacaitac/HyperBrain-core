@@ -15,7 +15,9 @@ import java.util.Map;
  *
  * <p><b>Bands (default).</b> MCI 1.0 · GOAL 0.5 · OBJECTIVE 0.4 · PROJECT 0.3 · ROUTINE 0.15.
  * {@code PHASE} is not one of the five bands Daniel fixed; it maps to the nearest structural level,
- * {@code PROJECT} (0.3) — reported for confirmation.
+ * {@code PROJECT} (0.3) — reported for confirmation. {@code AREA} is a life-area classification, not a
+ * horizon on the alignment ladder (ADR-036): it lies outside the {@code parent_cycle_id} chain the
+ * resolver walks and carries {@code 0.0} so it contributes no alignment signal.
  *
  * <p><b>Decay (default).</b> {@code δ(0)=1.0, δ(1)=1.0, δ(2)=0.9, δ(≥3)=0.8}.
  *
@@ -93,6 +95,10 @@ public record AlignmentWeights(
         bands.put(CycleType.PROJECT, 0.3);
         bands.put(CycleType.PHASE, 0.3);
         bands.put(CycleType.ROUTINE, 0.15);
+        // ADR-036: AREA is a life-area classification outside the parent_cycle_id chain; it never acts
+        // as an aligning ancestor, so it carries no alignment weight. Mapping it is mandatory — the
+        // compact constructor rejects any unmapped CycleType, which would break the DEFAULT static init.
+        bands.put(CycleType.AREA, 0.0);
         return bands;
     }
 
