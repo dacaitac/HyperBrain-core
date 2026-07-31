@@ -9,6 +9,7 @@ import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.CoreExecutable;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.PendingWriteCommand;
+import com.hyperbrain.sync.domain.model.ReminderPayload;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.model.WriteCommand;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
@@ -234,6 +235,32 @@ class AppleEventPropagatorTest {
         ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
         verify(commandPublisher).publish(captor.capture(), eq("EK-1"));
         assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
+        verify(commandLogRepo, org.mockito.Mockito.times(1)).upsertPending(any());
+    }
+
+    @Test
+    @DisplayName("BUYING re-lists on a same-kind UPDATE: the reminder is pinned to the 'Compras' list")
+    void buying_update_targets_shopping_list() {
+        // Given a BUYING executable already mapped and last written as a REMINDER (e.g. it used to
+        // be a TASK): the kind is unchanged (REMINDER->REMINDER), so it is a plain UPDATE that must
+        // move the reminder to the dedicated shopping list — even though its source_calendar is
+        // "HyperBrain" (the helper default).
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("BUYING", "TODO")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.REMINDER));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then a single UPDATE whose reminder payload targets the "Compras" list, not "HyperBrain"
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-1"));
+        WriteCommand command = captor.getValue();
+        assertThat(command.operation()).isEqualTo(Operation.UPDATED);
+        assertThat(command.commandType()).isEqualTo(CommandType.REMINDER);
+        assertThat(((ReminderPayload) command.payload()).listName()).isEqualTo("Compras");
         verify(commandLogRepo, org.mockito.Mockito.times(1)).upsertPending(any());
     }
 

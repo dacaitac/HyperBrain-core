@@ -19,7 +19,7 @@ import java.util.UUID;
  * and decides the effective operation.
  *
  * <p>Write-back type mapping (single source of truth: {@link #APPLE_COMMAND_TYPES}):
- * {@code TASK}, {@code HABIT}, {@code LEAD_MEASURE} → {@code REMINDER};
+ * {@code TASK}, {@code HABIT}, {@code LEAD_MEASURE}, {@code BUYING} → {@code REMINDER};
  * {@code ACTIVITY}, {@code LEARNING_SESSION} → {@code CALENDAR_EVENT}.
  * {@code AGENDA} is read-only by contract (ADR-009) and any other type has no Apple
  * counterpart — both are skipped.
@@ -32,7 +32,10 @@ import java.util.UUID;
  * <p>The Core does not persist EventKit list/calendar identifiers, so {@code list_id} /
  * {@code calendar_id} travel empty and {@code list_name} / {@code calendar_name} carry
  * {@code source_calendar}; SentinelAPI resolves the target list by name or falls back to
- * the default one.
+ * the default one. The one exception is {@code BUYING}: shopping items are gathered in a
+ * dedicated {@link #BUYING_LIST_NAME} list regardless of their source, so SentinelAPI
+ * resolve-or-creates that list, and a type transition into or out of {@code BUYING}
+ * re-targets the reminder's list (moved on update by SentinelAPI).
  */
 public final class WriteCommandFactory {
 
@@ -41,10 +44,20 @@ public final class WriteCommandFactory {
         "TASK", CommandType.REMINDER,
         "HABIT", CommandType.REMINDER,
         "LEAD_MEASURE", CommandType.REMINDER,
+        "BUYING", CommandType.REMINDER,
         "ACTIVITY", CommandType.CALENDAR_EVENT,
         "LEARNING_SESSION", CommandType.CALENDAR_EVENT);
 
     private static final String STATUS_DONE = "DONE";
+
+    /** Executable type whose reminders are gathered in the dedicated shopping list. */
+    private static final String BUYING_TYPE = "BUYING";
+
+    /**
+     * Reminders list that gathers shopping items ({@code BUYING}), independent of their source
+     * list. SentinelAPI resolve-or-creates it by name, mirroring the managed event calendar.
+     */
+    private static final String BUYING_LIST_NAME = "Compras";
 
     private WriteCommandFactory() {}
 
@@ -126,7 +139,20 @@ public final class WriteCommandFactory {
             STATUS_DONE.equals(executable.status()),
             0,
             "",
-            executable.sourceCalendar() != null ? executable.sourceCalendar() : "");
+            reminderListName(executable));
+    }
+
+    /**
+     * Resolves the target reminders list name. {@code BUYING} executables always go to the
+     * dedicated {@link #BUYING_LIST_NAME} list regardless of their {@code source_calendar}, so
+     * shopping items stay grouped; every other reminder type keeps its {@code source_calendar}
+     * (empty when unknown, letting SentinelAPI fall back to the default list).
+     */
+    private static String reminderListName(CoreExecutable executable) {
+        if (BUYING_TYPE.equals(executable.type())) {
+            return BUYING_LIST_NAME;
+        }
+        return executable.sourceCalendar() != null ? executable.sourceCalendar() : "";
     }
 
     private static CalendarEventPayload calendarEventPayload(CoreExecutable executable) {

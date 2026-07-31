@@ -193,7 +193,10 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
         WHERE e.user_id = ?
           AND e.status IN ('TODO', 'IN_PROGRESS')
-          AND e.type <> 'AGENDA'
+          -- AGENDA is the read-only wall (ADR-009); BUYING is a dateless shopping-list reminder
+          -- that never enters the daily floor and is outside the ExecutableType planner mirror,
+          -- so it must be filtered here before the row reaches ExecutableType.valueOf.
+          AND e.type NOT IN ('AGENDA', 'BUYING')
           AND e.system_generated = false
           AND (e.last_completed_at IS NULL
                OR e.last_completed_at <  ?

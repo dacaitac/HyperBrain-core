@@ -55,6 +55,23 @@ class WriteCommandFactoryTest {
     }
 
     @Test
+    @DisplayName("BUYING maps to a REMINDER pinned to the 'Compras' list, ignoring source_calendar")
+    void buying_maps_to_reminder_in_shopping_list() {
+        // Given a BUYING item whose source_calendar is some other list.
+        CoreExecutable buying = executable("BUYING", "TODO", null, null, "Personal");
+
+        // When
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, buying, Operation.CREATED, null);
+
+        // Then it is a reminder pinned to the dedicated shopping list, not "Personal".
+        assertThat(command).isPresent();
+        assertThat(command.get()).usingRecursiveComparison().isEqualTo(new WriteCommand(
+            COMMAND_ID, CommandType.REMINDER, Operation.CREATED, null,
+            new ReminderPayload("Buy groceries", "2L milk", null, false, 0, "", "Compras")));
+    }
+
+    @Test
     @DisplayName("LEARNING_SESSION maps to a CALENDAR_EVENT command")
     void learning_session_maps_to_calendar_event() {
         CoreExecutable session = executable("LEARNING_SESSION", "TODO", START, END, "Study");
@@ -140,7 +157,7 @@ class WriteCommandFactoryTest {
     @Test
     @DisplayName("reminder types and event types are writable; AGENDA and unknown are not")
     void writable_types() {
-        for (String type : new String[] {"TASK", "HABIT", "LEAD_MEASURE", "ACTIVITY", "LEARNING_SESSION"}) {
+        for (String type : new String[] {"TASK", "HABIT", "LEAD_MEASURE", "BUYING", "ACTIVITY", "LEARNING_SESSION"}) {
             assertThat(WriteCommandFactory.isWritable(type)).as("writable %s", type).isTrue();
         }
         assertThat(WriteCommandFactory.isWritable("AGENDA")).isFalse();
@@ -153,6 +170,7 @@ class WriteCommandFactoryTest {
         assertThat(WriteCommandFactory.commandTypeForExecutableType("TASK")).contains(CommandType.REMINDER);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("HABIT")).contains(CommandType.REMINDER);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("LEAD_MEASURE")).contains(CommandType.REMINDER);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("BUYING")).contains(CommandType.REMINDER);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("ACTIVITY")).contains(CommandType.CALENDAR_EVENT);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("LEARNING_SESSION")).contains(CommandType.CALENDAR_EVENT);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("AGENDA")).isEmpty();

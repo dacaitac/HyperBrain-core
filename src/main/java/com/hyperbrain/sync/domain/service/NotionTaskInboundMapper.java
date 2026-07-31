@@ -58,7 +58,8 @@ public final class NotionTaskInboundMapper {
         "Lead Measure", "LEAD_MEASURE",
         "Activity", "ACTIVITY",
         "Agenda", "AGENDA",
-        "Learning Session", "LEARNING_SESSION");
+        "Learning Session", "LEARNING_SESSION",
+        "Buying", "BUYING");
 
     private NotionTaskInboundMapper() {
     }

@@ -115,7 +115,8 @@ class NotionTaskInboundMapperTest {
         "Activity, ACTIVITY",
         "Agenda, AGENDA",
         "Learning Session, LEARNING_SESSION",
-        "Buying, TASK",
+        "Buying, BUYING",
+        "Chores, TASK",
         ", TASK"})
     @DisplayName("maps the Type select, degrading unknown options to TASK")
     void maps_type_select(String notionType, String domainType) {
