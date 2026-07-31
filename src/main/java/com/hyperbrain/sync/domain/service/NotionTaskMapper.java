@@ -67,7 +67,8 @@ public final class NotionTaskMapper {
         "LEAD_MEASURE", "Lead Measure",
         "ACTIVITY", "Activity",
         "AGENDA", "Agenda",
-        "LEARNING_SESSION", "Learning Session");
+        "LEARNING_SESSION", "Learning Session",
+        "BUYING", "Buying");
 
     private NotionTaskMapper() {
     }

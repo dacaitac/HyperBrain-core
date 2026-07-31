@@ -73,9 +73,12 @@ CREATE TABLE core_executable (
     cycle_id           UUID REFERENCES core_cycle (id) ON DELETE SET NULL,
     name               TEXT NOT NULL,
     description        TEXT,
+    -- Mirrors HyperBrain-Infra: BUYING gathers shopping items in a dedicated Reminders list
+    -- (Core → Apple write-back); it is a dateless reminder type, never agenda-scheduled.
     type               TEXT NOT NULL
                            CHECK (type IN ('TASK', 'HABIT', 'LEAD_MEASURE',
-                                           'ACTIVITY', 'AGENDA', 'LEARNING_SESSION')),
+                                           'ACTIVITY', 'AGENDA', 'LEARNING_SESSION',
+                                           'BUYING')),
     status             TEXT NOT NULL DEFAULT 'TODO'
                            CHECK (status IN ('TODO', 'IN_PROGRESS', 'DONE',
                                              'FAILED', 'PLANNED', 'WAITING')),

@@ -34,7 +34,7 @@ class EndTimeInvariantRuleTest {
     }
 
     @ParameterizedTest(name = "type={0}")
-    @ValueSource(strings = {"TASK", "HABIT", "LEAD_MEASURE"})
+    @ValueSource(strings = {"TASK", "HABIT", "LEAD_MEASURE", "BUYING"})
     @DisplayName("clears end_time for reminder types")
     void clears_end_time_for_non_time_block_types(String type) {
         ExecutableSnapshot result =

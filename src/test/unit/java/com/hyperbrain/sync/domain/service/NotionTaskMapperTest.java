@@ -173,7 +173,8 @@ class NotionTaskMapperTest {
             "LEAD_MEASURE, Lead Measure",
             "ACTIVITY, Activity",
             "AGENDA, Agenda",
-            "LEARNING_SESSION, Learning Session"
+            "LEARNING_SESSION, Learning Session",
+            "BUYING, Buying"
         })
         @DisplayName("maps every domain type to its Notion select option")
         void maps_type(String domainType, String notionType) {
