@@ -5,6 +5,7 @@ import com.hyperbrain.sync.domain.model.CycleSnapshot;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static java.util.Collections.singletonMap;
 
@@ -25,6 +26,8 @@ import static java.util.Collections.singletonMap;
  *   <li>{@code status} → {@code Inactive} (checkbox, inverted: true iff COMPLETED)</li>
  *   <li>{@code parent_cycle_id} → {@code Cycle Parent (Objective)} (self-relation; unresolved
  *       or absent → empty relation list, ADR-015 horizon ladder)</li>
+ *   <li>{@code core_cycle_area} memberships → {@code Areas} (self-relation; the life AREAs this
+ *       cycle serves, ADR-036). Empty → empty relation list.</li>
  * </ul>
  *
  * <p>Full-mirror contract (ADR-012 D3): null {@code type}/{@code start_date} clear their
@@ -36,13 +39,15 @@ import static java.util.Collections.singletonMap;
 public final class NotionCycleMapper {
 
     // ADR-015: horizon ladder — CORE_CYCLE absorbs the former CORE_PROJECT (type PROJECT).
+    // ADR-036: AREA classifies life areas.
     private static final Map<String, String> TYPE_TO_NOTION = Map.of(
         "MCI", "MCI",
         "GOAL", "Goal",
         "OBJECTIVE", "Objective",
         "PROJECT", "Project",
         "PHASE", "Phase",
-        "ROUTINE", "Routine");
+        "ROUTINE", "Routine",
+        "AREA", "Area");
 
     private NotionCycleMapper() {
     }
@@ -54,9 +59,14 @@ public final class NotionCycleMapper {
      *
      * @param snapshot         the cycle state to propagate
      * @param parentExternalId Notion page id of the parent cycle, or null when unmapped/absent
+     * @param areaExternalIds  Notion page ids of the AREAs this cycle serves (core_cycle_area,
+     *                         ADR-036); never null, empty clears the relation. Sorted internally so
+     *                         the produced relation — and therefore the sync checksum — is
+     *                         order-independent of the caller (loop protection, RF-17).
      * @return an insertion-ordered property map, guaranteed free of read-only properties
      */
-    public static Map<String, Object> map(CycleSnapshot snapshot, String parentExternalId) {
+    public static Map<String, Object> map(CycleSnapshot snapshot, String parentExternalId,
+                                           List<String> areaExternalIds) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(NotionSchema.PROP_NAME, NotionTaskMapper.title(snapshot.name()));
         String notionType = snapshot.type() != null ? TYPE_TO_NOTION.get(snapshot.type()) : null;
@@ -73,7 +83,23 @@ public final class NotionCycleMapper {
         props.put(NotionSchema.PROP_PARENT_CYCLE, parentExternalId != null
             ? NotionTaskMapper.relation(parentExternalId)
             : Map.of("relation", List.of()));
+        props.put(NotionSchema.PROP_AREAS, areasRelation(areaExternalIds));
         NotionSchema.assertWritable(props);
         return props;
+    }
+
+    /**
+     * Builds the {@code Areas} self-relation value (ADR-036), sorted for a deterministic, caller-order
+     * -independent representation so the inbound and outbound sync checksums agree (RF-17).
+     *
+     * @param areaExternalIds the AREA page ids; never null
+     * @return the Notion relation property value (empty list clears the relation)
+     */
+    private static Object areasRelation(List<String> areaExternalIds) {
+        List<Object> relations = areaExternalIds.stream()
+            .sorted()
+            .map(id -> Map.<String, Object>of("id", id))
+            .collect(Collectors.toList());
+        return Map.of("relation", relations);
     }
 }

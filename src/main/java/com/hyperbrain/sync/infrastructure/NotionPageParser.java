@@ -9,6 +9,8 @@ import org.springframework.stereotype.Component;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -68,7 +70,8 @@ public class NotionPageParser {
             dateBound(props.path(NotionSchema.PROP_DATE), "start"),
             dateBound(props.path(NotionSchema.PROP_DATE), "end"),
             checkbox(props.path(NotionSchema.PROP_INACTIVE)),
-            firstRelationId(props.path(NotionSchema.PROP_PARENT_CYCLE)));
+            firstRelationId(props.path(NotionSchema.PROP_PARENT_CYCLE)),
+            allRelationIds(props.path(NotionSchema.PROP_AREAS)));
     }
 
     /**
@@ -137,6 +140,28 @@ public class NotionPageParser {
             return null;
         }
         return normalizeId(relations.get(0).path("id").asText(null));
+    }
+
+    /**
+     * Extracts every id of a relation property, normalized. Missing or non-array relations (e.g. a
+     * property not yet configured in the Notion database) yield an empty list, not null.
+     *
+     * @param property the relation property node
+     * @return the normalized relation ids, in Notion order; empty when absent
+     */
+    private static List<String> allRelationIds(JsonNode property) {
+        JsonNode relations = property.path("relation");
+        if (!relations.isArray() || relations.isEmpty()) {
+            return List.of();
+        }
+        List<String> ids = new ArrayList<>(relations.size());
+        for (JsonNode relation : relations) {
+            String id = normalizeId(relation.path("id").asText(null));
+            if (id != null) {
+                ids.add(id);
+            }
+        }
+        return List.copyOf(ids);
     }
 
     private static OffsetDateTime parseTimestamp(String value) {

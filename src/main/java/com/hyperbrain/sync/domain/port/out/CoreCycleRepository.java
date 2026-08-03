@@ -2,6 +2,7 @@ package com.hyperbrain.sync.domain.port.out;
 
 import com.hyperbrain.sync.domain.model.CycleSnapshot;
 
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -16,6 +17,15 @@ public interface CoreCycleRepository {
      * @param snapshot the state to persist
      */
     void upsert(CycleSnapshot snapshot);
+
+    /**
+     * Reads the {@code type} of a cycle — the lightweight lookup the area-containment rule uses to
+     * verify that a bridge {@code area_id} really points to an {@code AREA} cycle (ADR-036, R2).
+     *
+     * @param id surrogate key
+     * @return the cycle type ({@code MCI}, {@code AREA}, ...), or empty when the cycle does not exist
+     */
+    Optional<String> findType(UUID id);
 
     /**
      * Deletes the cycle with the given id. No-op if it does not exist; executables that

@@ -10,6 +10,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,7 +31,7 @@ class NotionCycleInboundMapperTest {
             OffsetDateTime.of(2026, 7, 7, 15, 0, 0, 0, ZoneOffset.UTC),
             false,
             "Sprint 2", "MCI", "2026-07-01", "2026-07-14", false,
-            "parentcycle00000000000000000001");
+            "parentcycle00000000000000000001", List.of());
 
         // When
         CycleSnapshot snapshot = NotionCycleInboundMapper.toSnapshot(page, ID, USER_ID, PARENT_ID);
@@ -63,10 +64,28 @@ class NotionCycleInboundMapperTest {
 
     @ParameterizedTest(name = "Type \"{0}\" → {1}")
     @CsvSource({"MCI, MCI", "Goal, GOAL", "Objective, OBJECTIVE", "Project, PROJECT",
-                "Phase, PHASE", "Routine, ROUTINE", "Whatever, PHASE", ", PHASE"})
-    @DisplayName("maps the Type select, degrading unknown options to PHASE")
+                "Phase, PHASE", "Routine, ROUTINE", "Area, AREA", "Whatever, PHASE", ", PHASE"})
+    @DisplayName("maps the Type select — Area maps to AREA (never degrades to PHASE), unknown → PHASE")
     void maps_type_select(String notionType, String domainType) {
         assertThat(NotionCycleInboundMapper.mapType(notionType)).isEqualTo(domainType);
+    }
+
+    @Test
+    @DisplayName("ADR-036: an AREA is coerced to perpetual — no end_date and always ACTIVE, whatever the page carries")
+    void area_is_coerced_to_perpetual() {
+        // Given an "Area" page a person wrongly gave an end date and marked Inactive
+        NotionCyclePage page = new NotionCyclePage(
+            "cycle000000000000000000000000003", null, false,
+            "Family", "Area", "2026-07-01", "2026-12-31", true, null, List.of());
+
+        // When
+        CycleSnapshot snapshot = NotionCycleInboundMapper.toSnapshot(page, ID, USER_ID, null);
+
+        // Then the AREA is perpetual: no end_date, ACTIVE — the start_date is left untouched
+        assertThat(snapshot.type()).isEqualTo("AREA");
+        assertThat(snapshot.endDate()).isNull();
+        assertThat(snapshot.status()).isEqualTo("ACTIVE");
+        assertThat(snapshot.startDate()).isEqualTo(LocalDate.of(2026, 7, 1));
     }
 
     @Test
@@ -81,6 +100,6 @@ class NotionCycleInboundMapperTest {
 
     private static NotionCyclePage page(String type, Boolean inactive) {
         return new NotionCyclePage("cycle000000000000000000000000002", null, false,
-            "Sprint 2", type, null, null, inactive, null);
+            "Sprint 2", type, null, null, inactive, null, List.of());
     }
 }

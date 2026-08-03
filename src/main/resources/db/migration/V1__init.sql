@@ -49,9 +49,12 @@ CREATE TABLE core_cycle (
     name             TEXT NOT NULL,
     start_date       DATE,
     end_date         DATE,
-    -- ADR-015: type absorbs the former CORE_PROJECT (PROJECT) and horizon levels (GOAL, OBJECTIVE)
+    -- ADR-015: type absorbs the former CORE_PROJECT (PROJECT) and horizon levels (GOAL, OBJECTIVE).
+    -- ADR-036: AREA classifies life areas (Family, Money, ...); it is out of the parent_cycle_id chain
+    -- and linked only by the core_cycle_area bridge.
     type             TEXT NOT NULL
-                         CHECK (type IN ('MCI', 'GOAL', 'OBJECTIVE', 'PROJECT', 'PHASE', 'ROUTINE')),
+                         CONSTRAINT core_cycle_type_check
+                         CHECK (type IN ('MCI', 'GOAL', 'OBJECTIVE', 'PROJECT', 'PHASE', 'ROUTINE', 'AREA')),
     status           TEXT NOT NULL DEFAULT 'ACTIVE'
                          CHECK (status IN ('ACTIVE', 'COMPLETED')),
     woop_obstacle    TEXT,
@@ -59,11 +62,27 @@ CREATE TABLE core_cycle (
     -- Mirrors HyperBrain-Infra (ADR-029 v2.1.0, docs#80): the commitment's "why", fed to the
     -- agenda LLM as prompt context. Closes the ERD<->DB<->Notion gap (Notion's `Description`
     -- property had no column to sync to).
-    description      TEXT
+    description      TEXT,
+    -- ADR-036: an AREA is perpetual (no deadline, always ACTIVE); it never carries an end_date.
+    CONSTRAINT core_cycle_area_perpetual CHECK (type <> 'AREA' OR end_date IS NULL)
 );
 
 CREATE INDEX idx_core_cycle_user   ON core_cycle (user_id);
 CREATE INDEX idx_core_cycle_parent ON core_cycle (parent_cycle_id);
+
+-- ADR-036: many-to-many "serves" bridge. A commitment cycle (MCI/GOAL/PROJECT/...) is linked to the
+-- life AREAs it serves. area_id must reference a core_cycle whose type = 'AREA' (enforced in the
+-- domain by AreaContainmentPolicy; the DB CHECK below only rules out self-reference). Tenancy is
+-- derived through the FKs, mirroring core_time_block_member (no own user_id column).
+-- Mirrors HyperBrain-Infra (ADR-036).
+CREATE TABLE core_cycle_area (
+    cycle_id UUID NOT NULL REFERENCES core_cycle (id) ON DELETE CASCADE,
+    area_id  UUID NOT NULL REFERENCES core_cycle (id) ON DELETE CASCADE,
+    PRIMARY KEY (cycle_id, area_id),
+    CONSTRAINT core_cycle_area_no_self CHECK (cycle_id <> area_id)
+);
+
+CREATE INDEX idx_core_cycle_area_area ON core_cycle_area (area_id);
 
 CREATE TABLE core_executable (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),

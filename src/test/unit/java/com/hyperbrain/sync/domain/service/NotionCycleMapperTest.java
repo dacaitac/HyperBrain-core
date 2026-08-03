@@ -29,9 +29,9 @@ class NotionCycleMapperTest {
         return new CycleSnapshot(ID, USER_ID, null, "Sprint 2", type, status, start, end);
     }
 
-    /** Maps with no parent external id resolved (the common case in these attribute tests). */
+    /** Maps with no parent and no areas resolved (the common case in these attribute tests). */
     private static Map<String, Object> map(CycleSnapshot snapshot) {
-        return NotionCycleMapper.map(snapshot, null);
+        return NotionCycleMapper.map(snapshot, null, List.of());
     }
 
     @Nested
@@ -60,7 +60,8 @@ class NotionCycleMapperTest {
             "OBJECTIVE, Objective",
             "PROJECT, Project",
             "PHASE, Phase",
-            "ROUTINE, Routine"
+            "ROUTINE, Routine",
+            "AREA, Area"
         })
         @DisplayName("maps every domain cycle type to its Notion select option")
         void maps_type(String domainType, String notionType) {
@@ -131,7 +132,7 @@ class NotionCycleMapperTest {
         @DisplayName("writes the parent self-relation with the resolved page id")
         void maps_parent_relation() {
             Map<String, Object> props = NotionCycleMapper.map(
-                cycle("PHASE", "ACTIVE", null, null), "parentcyclepage999");
+                cycle("PHASE", "ACTIVE", null, null), "parentcyclepage999", List.of());
 
             assertThat(props.get("Cycle Parent (Objective)")).isEqualTo(
                 Map.of("relation", List.of(Map.of("id", "parentcyclepage999"))));
@@ -146,6 +147,28 @@ class NotionCycleMapperTest {
     }
 
     @Nested
+    @DisplayName("core_cycle_area → Areas (self-relation, ADR-036)")
+    class AreasRelation {
+
+        @Test
+        @DisplayName("writes the Areas self-relation, sorted so the checksum is order-independent (RF-17)")
+        void maps_areas_relation_sorted() {
+            Map<String, Object> props = NotionCycleMapper.map(
+                cycle("PROJECT", "ACTIVE", null, null), null, List.of("areaZ", "areaA"));
+
+            assertThat(props.get("Areas")).isEqualTo(Map.of("relation",
+                List.of(Map.of("id", "areaA"), Map.of("id", "areaZ"))));
+        }
+
+        @Test
+        @DisplayName("clears the Areas relation explicitly when the cycle serves no area (full mirror)")
+        void clears_empty_areas_relation() {
+            assertThat(map(cycle("PROJECT", "ACTIVE", null, null)).get("Areas"))
+                .isEqualTo(Map.of("relation", List.of()));
+        }
+    }
+
+    @Nested
     @DisplayName("read-only properties (CA-9)")
     class ReadOnly {
 
@@ -154,11 +177,11 @@ class NotionCycleMapperTest {
         void never_emits_read_only_properties() {
             Map<String, Object> props = NotionCycleMapper.map(
                 cycle("PHASE", "COMPLETED", LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 14)),
-                "parentcyclepage999");
+                "parentcyclepage999", List.of("area1"));
 
             assertThat(props.keySet())
                 .doesNotContainAnyElementsOf(NotionSchema.READ_ONLY_PROPERTIES)
-                .containsOnly("Name", "Type", "Date", "Inactive", "Cycle Parent (Objective)");
+                .containsOnly("Name", "Type", "Date", "Inactive", "Cycle Parent (Objective)", "Areas");
         }
     }
 }

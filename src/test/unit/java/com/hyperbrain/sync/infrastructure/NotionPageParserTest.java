@@ -8,6 +8,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -110,7 +111,10 @@ class NotionPageParserTest {
                 "Date": { "type": "date", "date": { "start": "2026-07-01", "end": "2026-07-14" } },
                 "Inactive": { "type": "checkbox", "checkbox": true },
                 "Cycle Parent (Objective)": { "type": "relation",
-                  "relation": [ { "id": "1bf8bc9c-5d91-81aa-bbbb-000000000009" } ] }
+                  "relation": [ { "id": "1bf8bc9c-5d91-81aa-bbbb-000000000009" } ] },
+                "Areas": { "type": "relation", "relation": [
+                  { "id": "1bf8bc9c-5d91-81aa-bbbb-0000000000a1" },
+                  { "id": "1bf8bc9c-5d91-81aa-bbbb-0000000000a2" } ] }
               }
             }
             """;
@@ -121,7 +125,28 @@ class NotionPageParserTest {
             "1bf8bc9c5d9181d882cfe1f4aa38f295",
             OffsetDateTime.parse("2026-07-07T15:00:00Z"),
             false, "Sprint 2", "MCI", "2026-07-01", "2026-07-14", true,
-            "1bf8bc9c5d9181aabbbb000000000009"));
+            "1bf8bc9c5d9181aabbbb000000000009",
+            List.of("1bf8bc9c5d9181aabbbb0000000000a1", "1bf8bc9c5d9181aabbbb0000000000a2")));
+    }
+
+    @Test
+    @DisplayName("a Cycles page with no Areas relation parses to an empty areaRelationIds list (ADR-036)")
+    void parses_cycle_page_without_areas() throws Exception {
+        String json = """
+            {
+              "object": "page",
+              "id": "1bf8bc9c-5d91-81d8-82cf-e1f4aa38f295",
+              "properties": {
+                "Name": { "type": "title", "title": [ { "plain_text": "Sprint 2" } ] },
+                "Type": { "type": "select", "select": { "name": "MCI" } },
+                "Inactive": { "type": "checkbox", "checkbox": false }
+              }
+            }
+            """;
+
+        NotionCyclePage page = parser.parseCycle(objectMapper.readTree(json));
+
+        assertThat(page.areaRelationIds()).isEmpty();
     }
 
     @Test

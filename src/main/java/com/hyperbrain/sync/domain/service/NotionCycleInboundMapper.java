@@ -24,18 +24,27 @@ import java.util.UUID;
  *   <li>{@code Date} range → {@code start_date}/{@code end_date} (date part only).
  * </ul>
  *
+ * <p><b>AREA perpetuity (ADR-036).</b> An {@code AREA} is a perpetual life-area classification: it
+ * never carries an {@code end_date} and is always {@code ACTIVE}. Whatever a person set on the Notion
+ * page, an {@code AREA} snapshot is coerced to {@code end_date = null} / {@code status = ACTIVE} before
+ * persistence, honouring the {@code core_cycle_area_perpetual} DB CHECK (belt-and-suspenders).
+ *
  * <p>Thread-safe: stateless, static methods only.
  */
 public final class NotionCycleInboundMapper {
 
+    private static final String AREA = "AREA";
+
     // ADR-015: horizon ladder — CORE_CYCLE absorbs the former CORE_PROJECT (type PROJECT).
+    // ADR-036: AREA classifies life areas.
     private static final Map<String, String> TYPE_FROM_NOTION = Map.of(
         "MCI", "MCI",
         "Goal", "GOAL",
         "Objective", "OBJECTIVE",
         "Project", "PROJECT",
         "Phase", "PHASE",
-        "Routine", "ROUTINE");
+        "Routine", "ROUTINE",
+        "Area", AREA);
 
     private NotionCycleInboundMapper() {
     }
@@ -54,15 +63,20 @@ public final class NotionCycleInboundMapper {
      */
     public static CycleSnapshot toSnapshot(NotionCyclePage page, UUID id, UUID userId,
                                            UUID resolvedParentCycleId) {
+        String type = mapType(page.typeName());
+        boolean isArea = AREA.equals(type);
+        // ADR-036: an AREA is perpetual — coerce away any end_date / COMPLETED a person may have set.
+        String status = isArea || !Boolean.TRUE.equals(page.inactive()) ? "ACTIVE" : "COMPLETED";
+        LocalDate endDate = isArea ? null : parseDate(page.dateEnd());
         return new CycleSnapshot(
             id,
             userId,
             resolvedParentCycleId,
             page.name() != null ? page.name() : "",
-            mapType(page.typeName()),
-            Boolean.TRUE.equals(page.inactive()) ? "COMPLETED" : "ACTIVE",
+            type,
+            status,
             parseDate(page.dateStart()),
-            parseDate(page.dateEnd()));
+            endDate);
     }
 
     static String mapType(String typeName) {

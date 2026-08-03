@@ -233,7 +233,8 @@ class AlignmentResolverTest {
         void custom_weights_applied() {
             AlignmentWeights flat = new AlignmentWeights(
                 Map.of(CycleType.MCI, 0.6, CycleType.GOAL, 0.6, CycleType.OBJECTIVE, 0.6,
-                    CycleType.PROJECT, 0.6, CycleType.PHASE, 0.6, CycleType.ROUTINE, 0.6),
+                    CycleType.PROJECT, 0.6, CycleType.PHASE, 0.6, CycleType.ROUTINE, 0.6,
+                    CycleType.AREA, 0.6),
                 1.0, 1.0, 1.0);
             AlignmentResolver flatResolver = new AlignmentResolver(flat);
 

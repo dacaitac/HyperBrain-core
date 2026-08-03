@@ -322,6 +322,20 @@ class JdbcPriorityStateRepositoryIT {
         });
     }
 
+    @Test
+    @DisplayName("ADR-036: an AREA cycle is out of the chain — it resolves with own_type AREA and injects no alignment or urgency")
+    void area_cycle_is_out_of_the_alignment_chain() {
+        // An AREA is a perpetual classification (no end_date) linked only by core_cycle_area, never by
+        // parent_cycle_id. The CTEs still see it as a source cycle, so valueOf('AREA') must resolve and
+        // it must contribute no signal: own band is 0.0 and, being perpetual, it lends no deadline.
+        UUID area = insertCycle("AREA", "ACTIVE", null, null);
+        UUID task = insertTaskInCycle("Task pinned straight to an AREA", area);
+
+        CycleAlignmentContext context = repository.findAlignmentContexts(USER).get(area);
+        assertThat(context.ownType()).isEqualTo(CycleType.AREA);
+        assertThat(urgencyOf(task)).isCloseTo(0.0, within(1e-6));
+    }
+
     private OffsetDateTime computedAt(UUID taskId) {
         return jdbcTemplate.queryForObject(
             "SELECT priority_computed_at FROM core_executable WHERE id = ?",

@@ -7,6 +7,8 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.Date;
 import java.time.LocalDate;
+import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -30,6 +32,8 @@ class JdbcCoreCycleRepository implements CoreCycleRepository {
 
     private static final String DELETE_BY_ID_SQL = "DELETE FROM core_cycle WHERE id = ?";
 
+    private static final String FIND_TYPE_SQL = "SELECT type FROM core_cycle WHERE id = ?";
+
     private final JdbcTemplate jdbcTemplate;
 
     JdbcCoreCycleRepository(JdbcTemplate jdbcTemplate) {
@@ -41,6 +45,13 @@ class JdbcCoreCycleRepository implements CoreCycleRepository {
         jdbcTemplate.update(UPSERT_SQL,
             c.id(), c.userId(), c.parentCycleId(), c.name(), c.type(), c.status(),
             toDate(c.startDate()), toDate(c.endDate()));
+    }
+
+    @Override
+    public Optional<String> findType(UUID id) {
+        List<String> types = jdbcTemplate.query(FIND_TYPE_SQL,
+            (rs, rowNum) -> rs.getString("type"), id);
+        return types.stream().findFirst();
     }
 
     @Override

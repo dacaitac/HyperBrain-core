@@ -13,6 +13,7 @@ import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.sync.domain.model.NotionPageEditState;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SyncMapping;
+import com.hyperbrain.sync.domain.port.out.CoreCycleAreaRepository;
 import com.hyperbrain.sync.domain.port.out.NotionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
@@ -30,6 +31,7 @@ import org.springframework.stereotype.Service;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -176,6 +178,7 @@ public class NotionEventPropagator implements IEventPropagator {
 
     private final SyncSnapshotRepository snapshotRepo;
     private final SyncMappingRepository syncMappingRepo;
+    private final CoreCycleAreaRepository cycleAreaRepo;
     private final NotionPort notion;
     private final NotionPageParser pageParser;
     private final NotionSyncProperties properties;
@@ -185,6 +188,7 @@ public class NotionEventPropagator implements IEventPropagator {
     public NotionEventPropagator(
         SyncSnapshotRepository snapshotRepo,
         SyncMappingRepository syncMappingRepo,
+        CoreCycleAreaRepository cycleAreaRepo,
         NotionPort notion,
         NotionPageParser pageParser,
         NotionSyncProperties properties,
@@ -193,6 +197,7 @@ public class NotionEventPropagator implements IEventPropagator {
     ) {
         this.snapshotRepo = snapshotRepo;
         this.syncMappingRepo = syncMappingRepo;
+        this.cycleAreaRepo = cycleAreaRepo;
         this.notion = notion;
         this.pageParser = pageParser;
         this.properties = properties;
@@ -335,8 +340,26 @@ public class NotionEventPropagator implements IEventPropagator {
             return;
         }
         String parentExternalId = resolveMappedExternalId(snapshot.get().parentCycleId());
-        Map<String, Object> props = NotionCycleMapper.map(snapshot.get(), parentExternalId);
+        List<String> areaExternalIds = resolveAreaExternalIds(localId);
+        Map<String, Object> props =
+            NotionCycleMapper.map(snapshot.get(), parentExternalId, areaExternalIds);
         upsertPage(localId, snapshot.get().userId(), properties.getCyclesDataSourceId(), props, null);
+    }
+
+    /**
+     * Resolves the Notion page ids of the AREAs a cycle serves (ADR-036 {@code core_cycle_area}), so the
+     * outbound write-back mirrors the {@code Areas} self-relation. An AREA whose page is not mapped yet
+     * is omitted (like an unmapped parent) and repaired on a later drain; the mapper sorts the ids, so
+     * the produced relation — and the sync checksum — is order-independent (RF-17).
+     *
+     * @param cycleId the local cycle
+     * @return the mapped AREA page ids, unmapped ones omitted; never null
+     */
+    private List<String> resolveAreaExternalIds(UUID cycleId) {
+        return cycleAreaRepo.findAreaIdsByCycle(cycleId).stream()
+            .map(this::resolveMappedExternalId)
+            .filter(java.util.Objects::nonNull)
+            .toList();
     }
 
     /**
@@ -499,7 +522,8 @@ public class NotionEventPropagator implements IEventPropagator {
         // The parent relation is only mirrored when the parent already has a page — an unmapped
         // parent is omitted rather than created in cascade (avoids orphan pages, ADR-015).
         String parentExternalId = resolveMappedExternalId(cycle.get().parentCycleId());
-        Map<String, Object> props = NotionCycleMapper.map(cycle.get(), parentExternalId);
+        List<String> areaExternalIds = resolveAreaExternalIds(cycleId);
+        Map<String, Object> props = NotionCycleMapper.map(cycle.get(), parentExternalId, areaExternalIds);
         String externalId = normalizePageId(
             notion.createPage(properties.getCyclesDataSourceId(), props));
         syncMappingRepo.insert(new SyncMapping(
