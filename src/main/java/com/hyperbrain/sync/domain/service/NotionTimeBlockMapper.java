@@ -176,6 +176,21 @@ public final class NotionTimeBlockMapper {
     }
 
     /**
+     * A single-property patch for the {@code Sync Note} field — the visibility channel of a
+     * page that has no domain counterpart to mirror (a Notion-side draft, ADR-038): nothing
+     * else on the page is touched.
+     *
+     * @param note the visible note; never null
+     * @return a property map carrying only the Sync Note
+     */
+    public static Map<String, Object> syncNoteProperty(String note) {
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put(NotionSchema.PROP_SYNC_NOTE, NotionTaskMapper.richText(note));
+        NotionSchema.assertWritable(props);
+        return props;
+    }
+
+    /**
      * The canonical relation value: page ids sorted ascending, so the same member set always
      * serializes identically regardless of the order Notion (or the caller) reports it in —
      * the checksum contract of ADR-038.

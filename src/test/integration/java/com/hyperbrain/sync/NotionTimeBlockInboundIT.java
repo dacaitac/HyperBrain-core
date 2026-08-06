@@ -407,6 +407,63 @@ class NotionTimeBlockInboundIT {
         assertThat(command.get("operation")).isEqualTo("CREATED");
     }
 
+    @Test
+    @DisplayName("core#57 visibility: a task-less Notion block gets a visible draft note, its echo no-ops, and materialization clears it")
+    void draft_block_gets_visible_note_then_materializes_cleanly() {
+        // Given a mapped task (not yet related) and a routine block page without task relations
+        UUID taskId = insertExecutable("Routine task", "TASK");
+        String taskPage = insertTaskMapping(taskId);
+        String pageId = newPageId();
+        NOTION.stubFor(com.github.tomakehurst.wiremock.client.WireMock.patch(
+                com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching("/v1/pages/.*"))
+            .willReturn(com.github.tomakehurst.wiremock.client.WireMock.aResponse()
+                .withStatus(200).withHeader("Content-Type", "application/json")
+                .withBody("{\"object\":\"page\",\"id\":\"" + pageId + "\"}")));
+        String draftNote = "Borrador — relaciona al menos una tarea en Tasks para agendar este bloque";
+
+        // When the task-less page arrives (Daniel's WakeUp/Daily routine case)
+        deliver(timeBlockPageWithNote(pageId, "WakeUp",
+            "2026-08-05T06:00:00.000-05:00", "2026-08-05T06:30:00.000-05:00", null));
+
+        // Then — nothing in PG, but the page visibly says why (Sync Note only, Status untouched)
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_mappings WHERE external_id = ?", Integer.class, pageId))
+            .isZero();
+        assertThat(totalOutboxEvents()).isZero();
+        List<com.github.tomakehurst.wiremock.verification.LoggedRequest> patches =
+            NOTION.findAll(com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor(
+                com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/pages/" + pageId)));
+        assertThat(patches).hasSize(1);
+        assertThat(patches.get(0).getBodyAsString()).contains("Borrador").contains("Sync Note");
+        assertThat(patches.get(0).getBodyAsString()).doesNotContain("\"Status\"");
+
+        // And the PATCH's own webhook echo converges to a no-op (no second write, no create)
+        deliver(timeBlockPageWithNote(pageId, "WakeUp",
+            "2026-08-05T06:00:00.000-05:00", "2026-08-05T06:30:00.000-05:00", draftNote));
+        assertThat(NOTION.findAll(com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor(
+            com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/pages/" + pageId))))
+            .hasSize(1);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_time_block", Integer.class)).isZero();
+
+        // And when Daniel relates a task, the block materializes and the mirror clears the note
+        deliver(timeBlockPageWithNote(pageId, "WakeUp",
+            "2026-08-05T06:00:00.000-05:00", "2026-08-05T06:30:00.000-05:00", draftNote,
+            taskPage));
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_mappings WHERE external_id = ?", Integer.class, pageId))
+            .isEqualTo(1);
+        outboxWorker.drainBatch();
+        List<com.github.tomakehurst.wiremock.verification.LoggedRequest> allPatches =
+            NOTION.findAll(com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor(
+                com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/v1/pages/" + pageId)));
+        String canonicalBody = allPatches.get(allPatches.size() - 1).getBodyAsString();
+        assertThat(canonicalBody).contains("\"Sync Note\":{\"rich_text\":[]}");
+        assertThat(canonicalBody).doesNotContain("Borrador");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void deliver(String pageJson) {
@@ -415,6 +472,18 @@ class NotionTimeBlockInboundIT {
              "timestamp":"%s",
              "payload":{"source":{"type":"automation","automation_id":"auto-1"},"data":%s}}
             """.formatted(UUID.randomUUID(), EDITED_NOW, pageJson));
+    }
+
+    /** A Time Blocks page that also carries a {@code Sync Note} (the draft-note echo shape). */
+    private String timeBlockPageWithNote(String pageId, String title, String start, String end,
+                                         String syncNote, String... taskPageIds) {
+        String base = timeBlockPage(pageId, title, start, end, false, taskPageIds);
+        if (syncNote == null) {
+            return base;
+        }
+        String noteProperty = "\"Sync Note\":{\"type\":\"rich_text\",\"rich_text\":"
+            + "[{\"plain_text\":\"" + syncNote + "\"}]},";
+        return base.replace("\"Name\":", noteProperty + "\"Name\":");
     }
 
     /** A Time Blocks page embedded in an automation delivery (relation ids in page order). */

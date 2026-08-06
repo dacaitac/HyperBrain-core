@@ -58,6 +58,7 @@ class NotionTimeBlockSyncServiceTest {
     private PlannerTimeBlockPort blockPort;
     private SyncMappingRepository syncMappingRepo;
     private NotionTimeBlockMirrorService mirrorService;
+    private com.hyperbrain.sync.domain.port.out.NotionPort notion;
     private OutboxRepository outboxRepo;
     private ObjectMapper objectMapper;
     private NotionTimeBlockSyncService service;
@@ -67,10 +68,11 @@ class NotionTimeBlockSyncServiceTest {
         blockPort = mock(PlannerTimeBlockPort.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
         mirrorService = mock(NotionTimeBlockMirrorService.class);
+        notion = mock(com.hyperbrain.sync.domain.port.out.NotionPort.class);
         outboxRepo = mock(OutboxRepository.class);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
         service = new NotionTimeBlockSyncService(blockPort, syncMappingRepo, mirrorService,
-            outboxRepo, objectMapper, USER_ID);
+            notion, outboxRepo, objectMapper, USER_ID);
     }
 
     @Test
@@ -232,8 +234,8 @@ class NotionTimeBlockSyncServiceTest {
     }
 
     @Test
-    @DisplayName("creation without a mapped member stays a Notion draft: nothing persisted")
-    void creation_without_members_is_skipped() {
+    @DisplayName("creation without a mapped member stays a draft: nothing persisted, visible Sync Note written")
+    void creation_without_members_writes_draft_note() {
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
             .thenReturn(Optional.empty());
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", TASK_PAGE_ID))
@@ -246,6 +248,30 @@ class NotionTimeBlockSyncServiceTest {
         assertThat(outcome).isEqualTo(SyncOutcome.SKIPPED_ECHO);
         verify(blockPort, never()).createUserBlock(any(), any(), any(), any(), any(), anyList());
         verify(syncMappingRepo, never()).insert(any());
+        verify(outboxRepo, never()).append(any());
+        // Visibility (core#57): the page itself tells Daniel why nothing was scheduled
+        ArgumentCaptor<Map<String, Object>> patch = ArgumentCaptor.forClass(Map.class);
+        verify(notion).updatePage(eq(PAGE_ID), patch.capture());
+        assertThat(patch.getValue()).containsOnlyKeys("Sync Note");
+        assertThat(patch.getValue().toString()).contains("Borrador");
+    }
+
+    @Test
+    @DisplayName("draft-note anti-loop: the PATCH's own echo (page already shows the note) writes nothing")
+    void draft_note_echo_converges_to_noop() {
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
+            .thenReturn(Optional.empty());
+        when(syncMappingRepo.findByExternalSystemAndId("NOTION", TASK_PAGE_ID))
+            .thenReturn(Optional.empty());
+
+        SyncOutcome outcome = service.apply(new NotionTimeBlockPage(PAGE_ID, EDITED_AT, false,
+            "Draft", START.toString(), null, null, null, null, null,
+            List.of(TASK_PAGE_ID), false,
+            "Borrador — relaciona al menos una tarea en Tasks para agendar este bloque"));
+
+        assertThat(outcome).isEqualTo(SyncOutcome.SKIPPED_ECHO);
+        verify(notion, never()).updatePage(any(), any());
+        verify(blockPort, never()).createUserBlock(any(), any(), any(), any(), any(), anyList());
     }
 
     @Test

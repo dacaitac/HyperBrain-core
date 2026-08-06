@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
+import com.hyperbrain.sync.domain.NotionApiException;
+import com.hyperbrain.sync.domain.NotionPageNotFoundException;
 import com.hyperbrain.sync.domain.model.NotionTimeBlockPage;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SyncMapping;
@@ -12,6 +14,7 @@ import com.hyperbrain.sync.domain.model.TimeBlockEditOutcome;
 import com.hyperbrain.sync.domain.model.TimeBlockMemberSnapshot;
 import com.hyperbrain.sync.domain.model.TimeBlockSnapshot;
 import com.hyperbrain.sync.domain.model.TimeBlockUserEdit;
+import com.hyperbrain.sync.domain.port.out.NotionPort;
 import com.hyperbrain.sync.domain.port.out.PlannerTimeBlockPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.service.NotionTimeBlockMapper;
@@ -75,9 +78,16 @@ public class NotionTimeBlockSyncService {
     private static final ZoneId NOTION_ZONE = ZoneId.of("America/Bogota");
     private static final String NOTE_SEPARATOR = " · ";
 
+    /** Visible draft notes (ADR-038 visibility condition; wording fixed with Daniel, core#57). */
+    private static final String DRAFT_NOTE_NO_TASKS =
+        "Borrador — relaciona al menos una tarea en Tasks para agendar este bloque";
+    private static final String DRAFT_NOTE_NO_DATE =
+        "Borrador — añade una fecha (Date) con inicio para agendar este bloque";
+
     private final PlannerTimeBlockPort blockPort;
     private final SyncMappingRepository syncMappingRepo;
     private final NotionTimeBlockMirrorService mirrorService;
+    private final NotionPort notion;
     private final OutboxRepository outboxRepo;
     private final ObjectMapper objectMapper;
     private final UUID defaultUserId;
@@ -86,6 +96,7 @@ public class NotionTimeBlockSyncService {
         PlannerTimeBlockPort blockPort,
         SyncMappingRepository syncMappingRepo,
         NotionTimeBlockMirrorService mirrorService,
+        NotionPort notion,
         OutboxRepository outboxRepo,
         ObjectMapper objectMapper,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
@@ -93,6 +104,7 @@ public class NotionTimeBlockSyncService {
         this.blockPort = blockPort;
         this.syncMappingRepo = syncMappingRepo;
         this.mirrorService = mirrorService;
+        this.notion = notion;
         this.outboxRepo = outboxRepo;
         this.objectMapper = objectMapper;
         this.defaultUserId = defaultUserId;
@@ -244,6 +256,7 @@ public class NotionTimeBlockSyncService {
         if (start == null) {
             log.info("TIME_BLOCK page {} has no usable Date.start; left as a Notion draft",
                 page.pageId());
+            writeDraftNote(page, DRAFT_NOTE_NO_DATE);
             return SyncOutcome.SKIPPED_ECHO;
         }
         if (page.taskRelationHasMore()) {
@@ -255,6 +268,7 @@ public class NotionTimeBlockSyncService {
         if (members.isEmpty()) {
             log.info("TIME_BLOCK page {} references no mapped task; left as a Notion draft",
                 page.pageId());
+            writeDraftNote(page, DRAFT_NOTE_NO_TASKS);
             return SyncOutcome.SKIPPED_ECHO;
         }
         OffsetDateTime end = parseNotionInstant(page.dateEnd());
@@ -269,6 +283,7 @@ public class NotionTimeBlockSyncService {
         if (!outcome.applied()) {
             log.info("TIME_BLOCK page {} not materialized ({}); left as a Notion draft",
                 page.pageId(), String.join("; ", outcome.rejections()));
+            writeDraftNote(page, buildNote(outcome.rejections(), List.of()));
             return SyncOutcome.REASSERTED;
         }
         TimeBlockSnapshot created = blockPort.findBlock(blockId).orElseThrow();
@@ -285,6 +300,35 @@ public class NotionTimeBlockSyncService {
             OffsetDateTime.now(), buildNote(outcome.rejections(), List.of())));
         log.info("TIME_BLOCK page {} materialized as USER/PLANNED block {}", page.pageId(), blockId);
         return SyncOutcome.CREATED;
+    }
+
+    /**
+     * Makes a Notion-side draft visible on its own page (ADR-038 visibility condition, core#57):
+     * a page that materialized nothing has no domain row, no mapping and no outbox aggregate to
+     * re-assert through, so the note is the one sanctioned direct PATCH — a single
+     * {@code Sync Note} property, {@code Status} deliberately untouched (there is no domain
+     * state to reflect).
+     *
+     * <p><b>Anti-loop guard:</b> the PATCH fires a webhook back; on that echo the page already
+     * shows the exact note, so this method converges to a no-op instead of re-writing forever.
+     * Failures never poison the queue: a draft note is presentation, not domain state — a gone
+     * page has nothing to annotate and an API failure is logged and abandoned (the next genuine
+     * edit re-derives the note).
+     */
+    private void writeDraftNote(NotionTimeBlockPage page, String note) {
+        if (note == null || note.equals(page.syncNote())) {
+            return; // the page already shows this note — the PATCH's own echo, converged
+        }
+        try {
+            notion.updatePage(page.pageId(), NotionTimeBlockMapper.syncNoteProperty(note));
+            log.info("TIME_BLOCK page {}: draft note written — {}", page.pageId(), note);
+        } catch (NotionPageNotFoundException ex) {
+            log.debug("TIME_BLOCK page {} gone before its draft note; nothing to annotate",
+                page.pageId());
+        } catch (NotionApiException ex) {
+            log.warn("TIME_BLOCK page {}: draft note could not be written; will re-derive on the "
+                + "next edit", page.pageId(), ex);
+        }
     }
 
     /**
