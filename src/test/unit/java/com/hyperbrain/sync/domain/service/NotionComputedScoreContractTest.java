@@ -36,13 +36,13 @@ class NotionComputedScoreContractTest {
         @ValueSource(doubles = {0.0, 0.25, 0.5, 0.77, 1.0})
         void priority_round_trips(double value) {
             Map<String, Object> props =
-                NotionTaskMapper.map(snapshot().priorityScore(value).build(), null, null);
+                NotionTaskMapper.map(snapshot().priorityScore(value).build(), null, null, null);
 
             assertThat(numberOf(props, "Priority Score")).isEqualTo(value);
 
             NotionTaskPage echoed = pageWithNumbers(value, null);
             ExecutableSnapshot decoded =
-                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null);
+                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null, null);
             assertThat(decoded.priorityScore()).isEqualTo(value);
         }
     }
@@ -55,14 +55,14 @@ class NotionComputedScoreContractTest {
         @ValueSource(doubles = {0.0, 1.5, 3.0, 5.0, 6.0})
         void urgency_round_trips_raw(double value) {
             Map<String, Object> props =
-                NotionTaskMapper.map(snapshot().urgencyScore(value).build(), null, null);
+                NotionTaskMapper.map(snapshot().urgencyScore(value).build(), null, null, null);
 
             // reflected raw on the 0-6 source scale, NOT normalized to [0, 1]
             assertThat(numberOf(props, "Urgence")).isEqualTo(value);
 
             NotionTaskPage echoed = pageWithNumbers(null, value);
             ExecutableSnapshot decoded =
-                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null);
+                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null, null);
             assertThat(decoded.urgencyScore()).isEqualTo(value);
         }
 
@@ -76,14 +76,14 @@ class NotionComputedScoreContractTest {
         @ValueSource(doubles = {0.0, 2.14, 4.28, 6.0})
         void urgency_converges_in_one_pass(double value) {
             Map<String, Object> firstPass =
-                NotionTaskMapper.map(snapshot().urgencyScore(value).build(), null, null);
+                NotionTaskMapper.map(snapshot().urgencyScore(value).build(), null, null, null);
 
             NotionTaskPage echoed = pageWithNumbers(null, numberOf(firstPass, "Urgence"));
             ExecutableSnapshot decoded =
-                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null);
+                NotionTaskInboundMapper.toSnapshot(echoed, ID(), USER(), null, null, null);
 
             Map<String, Object> secondPass =
-                NotionTaskMapper.map(snapshot().urgencyScore(decoded.urgencyScore()).build(), null, null);
+                NotionTaskMapper.map(snapshot().urgencyScore(decoded.urgencyScore()).build(), null, null, null);
 
             assertThat(numberOf(secondPass, "Urgence")).isEqualTo(numberOf(firstPass, "Urgence"));
         }
@@ -101,7 +101,7 @@ class NotionComputedScoreContractTest {
             OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
             "t", null, "Not started", false, null,
             null, null, priority, urgency, null, null, null,
-            null, null, null, null, null);
+            null, null, null, null, null, null);
     }
 
     private static java.util.UUID ID() {

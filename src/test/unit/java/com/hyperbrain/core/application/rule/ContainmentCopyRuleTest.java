@@ -55,7 +55,7 @@ class ContainmentCopyRuleTest {
     @Test
     @DisplayName("a contained reminder child copies the container start + cycle (end cleared by DR-01)")
     void contained_reminder_copies_start_and_cycle() {
-        when(stateRepo.findContainerSchedule(CHILD_ID, null)).thenReturn(Optional.of(
+        when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.of(
             new ContainerSchedule(BLOCK_ID, "Deep work", BLOCK_START, BLOCK_END, CYCLE_ID)));
 
         ExecutableSnapshot result = rule.apply(null, child("TASK", null, null, null),
@@ -69,7 +69,7 @@ class ContainmentCopyRuleTest {
     @Test
     @DisplayName("a contained event child copies the full window")
     void contained_event_copies_window() {
-        when(stateRepo.findContainerSchedule(CHILD_ID, null)).thenReturn(Optional.of(
+        when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.of(
             new ContainerSchedule(BLOCK_ID, "Deep work", BLOCK_START, BLOCK_END, CYCLE_ID)));
 
         ExecutableSnapshot result = rule.apply(null, child("ACTIVITY", null, null, null),
@@ -83,7 +83,7 @@ class ContainmentCopyRuleTest {
     @Test
     @DisplayName("an idempotent copy (values already equal) is an absolute no-op: no reassertion event")
     void idempotent_copy_stages_nothing() {
-        when(stateRepo.findContainerSchedule(CHILD_ID, null)).thenReturn(Optional.of(
+        when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.of(
             new ContainerSchedule(BLOCK_ID, "Deep work", BLOCK_START, null, CYCLE_ID)));
 
         ExecutableSnapshot result = rule.apply(
@@ -98,7 +98,7 @@ class ContainmentCopyRuleTest {
     @Test
     @DisplayName("an inbound human edit of a contained child's date is re-asserted with a visible Sync Note")
     void inbound_edit_reasserts_with_sync_note() {
-        when(stateRepo.findContainerSchedule(CHILD_ID, null)).thenReturn(Optional.of(
+        when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.of(
             new ContainerSchedule(BLOCK_ID, "Deep work", BLOCK_START, null, CYCLE_ID)));
         ExecutableSnapshot previous = child("TASK", BLOCK_START, null, CYCLE_ID);
         // The user dragged the child to a different day in Notion.
@@ -138,7 +138,7 @@ class ContainmentCopyRuleTest {
     @Test
     @DisplayName("an uncontained executable is left untouched")
     void uncontained_is_noop() {
-        when(stateRepo.findContainerSchedule(CHILD_ID, null)).thenReturn(Optional.empty());
+        when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.empty());
 
         ExecutableSnapshot merged = child("TASK", null, null, null);
         ExecutableSnapshot result = rule.apply(null, merged, ExternalSystem.NOTION);

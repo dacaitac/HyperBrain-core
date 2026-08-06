@@ -139,23 +139,24 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         INSERT INTO core_executable
             (id, user_id, parent_id, cycle_id, name, description, type, status,
              priority_score, urgency_score, effort_score, is_important, frequency,
-             start_time, end_time, source_calendar)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             start_time, end_time, source_calendar, container_block_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (id) DO UPDATE SET
-            parent_id       = EXCLUDED.parent_id,
-            cycle_id        = EXCLUDED.cycle_id,
-            name            = EXCLUDED.name,
-            description     = EXCLUDED.description,
-            type            = EXCLUDED.type,
-            status          = EXCLUDED.status,
-            priority_score  = EXCLUDED.priority_score,
-            urgency_score   = EXCLUDED.urgency_score,
-            effort_score    = EXCLUDED.effort_score,
-            is_important    = EXCLUDED.is_important,
-            frequency       = EXCLUDED.frequency,
-            start_time      = EXCLUDED.start_time,
-            end_time        = EXCLUDED.end_time,
-            source_calendar = EXCLUDED.source_calendar
+            parent_id          = EXCLUDED.parent_id,
+            cycle_id           = EXCLUDED.cycle_id,
+            name               = EXCLUDED.name,
+            description        = EXCLUDED.description,
+            type               = EXCLUDED.type,
+            status             = EXCLUDED.status,
+            priority_score     = EXCLUDED.priority_score,
+            urgency_score      = EXCLUDED.urgency_score,
+            effort_score       = EXCLUDED.effort_score,
+            is_important       = EXCLUDED.is_important,
+            frequency          = EXCLUDED.frequency,
+            start_time         = EXCLUDED.start_time,
+            end_time           = EXCLUDED.end_time,
+            source_calendar    = EXCLUDED.source_calendar,
+            container_block_id = EXCLUDED.container_block_id
         """;
 
     private static final String UPSERT_PROFILE_SQL = """
@@ -168,16 +169,17 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         """;
 
     /**
-     * The child's scheduling authority: its persisted container block wins over the merged
-     * parent (ADR-039). On CREATE the child row does not exist yet and the subquery yields
-     * null, so the merged parent decides alone.
+     * The child's scheduling authority (ADR-039): the merged in-flight container wins, then the
+     * persisted {@code container_block_id}, then the merged parent. On CREATE the child row does
+     * not exist yet, so the merged container/parent decide alone.
      */
     private static final String FIND_CONTAINER_SCHEDULE_SQL = """
         SELECT c.id, c.name, c.start_time, c.end_time, c.cycle_id
         FROM core_executable c
         WHERE c.id = COALESCE(
+            ?::uuid,
             (SELECT child.container_block_id FROM core_executable child WHERE child.id = ?),
-            ?)
+            ?::uuid)
         """;
 
     /**
@@ -349,13 +351,16 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
             s.id(), s.userId(), s.parentId(), s.cycleId(), s.name(), s.description(),
             s.type(), s.status(), s.priorityScore(), s.urgencyScore(), s.effortScore(),
             Boolean.TRUE.equals(s.isImportant()), s.frequency(),
-            toTimestamp(s.startTime()), toTimestamp(s.endTime()), s.sourceCalendar());
+            toTimestamp(s.startTime()), toTimestamp(s.endTime()), s.sourceCalendar(),
+            s.containerBlockId());
         jdbcTemplate.update(UPSERT_PROFILE_SQL,
             s.id(), s.energyDrain(), s.mentalLoad(), s.impact());
     }
 
     @Override
-    public Optional<ContainerSchedule> findContainerSchedule(UUID executableId, UUID mergedParentId) {
+    public Optional<ContainerSchedule> findContainerSchedule(UUID executableId,
+                                                             UUID mergedContainerId,
+                                                             UUID mergedParentId) {
         List<ContainerSchedule> rows = jdbcTemplate.query(FIND_CONTAINER_SCHEDULE_SQL,
             (rs, rowNum) -> new ContainerSchedule(
                 rs.getObject("id", UUID.class),
@@ -363,7 +368,7 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
                 toOffset(rs.getTimestamp("start_time")),
                 toOffset(rs.getTimestamp("end_time")),
                 rs.getObject("cycle_id", UUID.class)),
-            executableId, mergedParentId);
+            mergedContainerId, executableId, mergedParentId);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 

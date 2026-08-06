@@ -153,18 +153,20 @@ public interface ExecutableStateRepository {
     // ── ADR-039: containment, hard copy and streaks ───────────────────────────
 
     /**
-     * Resolves the scheduling authority of a contained executable: the {@code TIME_BLOCK}
-     * container its persisted row points at ({@code container_block_id} wins) or, failing
-     * that, the merged parent the ingestion is about to persist. The returned schedule is what
-     * the hard-copy rule asserts onto the child (date + cycle are SYSTEM-owned for contained
+     * Resolves the scheduling authority of a contained executable, honouring the in-flight merged
+     * state before it is persisted: the merged {@code container_block_id} wins, then the persisted
+     * row's {@code container_block_id}, then the merged {@code parent_id}. The returned schedule is
+     * what the hard-copy rule asserts onto the child (date + cycle are SYSTEM-owned for contained
      * children, ADR-012 D1 as amended by ADR-039).
      *
-     * @param executableId   the potentially contained executable (persisted row may not exist
-     *                       yet on CREATE)
-     * @param mergedParentId the parent id of the merged in-flight state; may be null
+     * @param executableId      the potentially contained executable (persisted row may not exist
+     *                          yet on CREATE)
+     * @param mergedContainerId the container id of the merged in-flight state; may be null
+     * @param mergedParentId    the parent id of the merged in-flight state; may be null
      * @return the container's schedule, or empty when the executable is not contained
      */
-    Optional<ContainerSchedule> findContainerSchedule(UUID executableId, UUID mergedParentId);
+    Optional<ContainerSchedule> findContainerSchedule(UUID executableId, UUID mergedContainerId,
+                                                      UUID mergedParentId);
 
     /**
      * Hard-copies a container's schedule onto every transitively contained descendant

@@ -178,8 +178,8 @@ class NotionTaskSyncServiceTest {
         // Given a mapping whose checksum equals the canonical props of the incoming state
         NotionTaskPage page = page("Write tests", "In progress", false, EDITED_AT);
         ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(
-            page, LOCAL_ID, USER_ID, CYCLE_LOCAL_ID, null);
-        Map<String, Object> canonicalProps = NotionTaskMapper.map(snapshot, CYCLE_PAGE_ID, null);
+            page, LOCAL_ID, USER_ID, CYCLE_LOCAL_ID, null, null);
+        Map<String, Object> canonicalProps = NotionTaskMapper.map(snapshot, CYCLE_PAGE_ID, null, null);
         String storedChecksum = ChecksumSupport.compute(PAGE_ID, canonicalProps, objectMapper);
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
             .thenReturn(Optional.of(mapping(storedChecksum, EDITED_AT.minusMinutes(5))));
@@ -207,7 +207,7 @@ class NotionTaskSyncServiceTest {
         // When
         SyncOutcome outcome = service.apply(new NotionTaskPage(PAGE_ID, EDITED_AT, true,
             null, null, null, null, null, null, null, null, null, null, null, null,
-            null, null, null, null, null));
+            null, null, null, null, null, null));
 
         // Then
         assertThat(outcome).isEqualTo(SyncOutcome.DELETED);
@@ -229,7 +229,7 @@ class NotionTaskSyncServiceTest {
         // When
         SyncOutcome outcome = service.apply(new NotionTaskPage(PAGE_ID, EDITED_AT, true,
             null, null, null, null, null, null, null, null, null, null, null, null,
-            null, null, null, null, null));
+            null, null, null, null, null, null));
 
         // Then
         assertThat(outcome).isEqualTo(SyncOutcome.DELETED);
@@ -250,7 +250,7 @@ class NotionTaskSyncServiceTest {
         // When
         NotionTaskPage page = new NotionTaskPage(PAGE_ID, EDITED_AT, false,
             "Child task", null, null, false, null, null, null, null, null, null,
-            null, null, null, null, null, null, parentPageId);
+            null, null, null, null, null, null, parentPageId, null);
         SyncOutcome outcome = service.apply(page);
 
         // Then
@@ -265,7 +265,7 @@ class NotionTaskSyncServiceTest {
         return new NotionTaskPage(PAGE_ID, editedAt, false,
             name, "Detailed description", status, complete, "Task",
             null, null, 0.8, 0.6, 2.5, null, null, "High", "Intense", "Routine",
-            CYCLE_PAGE_ID, null);
+            CYCLE_PAGE_ID, null, null);
     }
 
     private static SyncMapping mapping(String checksum, OffsetDateTime lastSyncedAt) {

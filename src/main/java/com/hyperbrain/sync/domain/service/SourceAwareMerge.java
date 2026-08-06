@@ -76,7 +76,7 @@ public final class SourceAwareMerge {
             return new ExecutableSnapshot(id, userId, null, null,
                 p.title(), p.notes(), "TASK", p.completed() ? STATUS_DONE : STATUS_TODO,
                 null, null, null, false, null,
-                p.dueDate(), null, p.listName(), null, null, null, false);
+                p.dueDate(), null, p.listName(), null, null, null, false, null);
         }
         OffsetDateTime dueProjection = current.endTime() != null
             ? current.endTime()
@@ -90,7 +90,7 @@ public final class SourceAwareMerge {
             current.isImportant(), current.frequency(),
             newStartTime, null, p.listName(),
             current.energyDrain(), current.mentalLoad(), current.impact(),
-            current.systemGenerated());
+            current.systemGenerated(), current.containerBlockId());
     }
 
     /**
@@ -111,7 +111,7 @@ public final class SourceAwareMerge {
             return new ExecutableSnapshot(id, userId, null, null,
                 p.title(), p.notes(), "ACTIVITY", STATUS_TODO,
                 null, null, null, false, null,
-                p.startTime(), p.endTime(), p.calendarName(), null, null, null, false);
+                p.startTime(), p.endTime(), p.calendarName(), null, null, null, false, null);
         }
         return new ExecutableSnapshot(id, userId, current.parentId(), current.cycleId(),
             p.title(), p.notes(), current.type(), current.status(),
@@ -119,7 +119,7 @@ public final class SourceAwareMerge {
             current.isImportant(), current.frequency(),
             p.startTime(), p.endTime(), p.calendarName(),
             current.energyDrain(), current.mentalLoad(), current.impact(),
-            current.systemGenerated());
+            current.systemGenerated(), current.containerBlockId());
     }
 
     /**
@@ -148,14 +148,21 @@ public final class SourceAwareMerge {
      */
     public static ExecutableSnapshot mergeNotionTask(ExecutableSnapshot current, NotionTaskPage page,
                                                      UUID id, UUID userId,
-                                                     UUID resolvedCycleId, UUID resolvedParentId) {
+                                                     UUID resolvedCycleId, UUID resolvedParentId,
+                                                     UUID resolvedContainerId) {
         if (current == null) {
             return NotionTaskInboundMapper.toSnapshot(page, id, userId,
-                resolvedCycleId, resolvedParentId);
+                resolvedCycleId, resolvedParentId, resolvedContainerId);
         }
         UUID parentId = page.parentRelationId() == null
             ? null
             : (resolvedParentId != null ? resolvedParentId : current.parentId());
+        // ADR-039: containment (which block holds the task) is USER-editable from Notion. Mirror
+        // the parent-relation semantics: an absent relation clears it, a present-but-unmapped one
+        // keeps the current container (the next webhook/re-mirror repairs the mapping).
+        UUID containerBlockId = page.containerRelationId() == null
+            ? null
+            : (resolvedContainerId != null ? resolvedContainerId : current.containerBlockId());
         String name = mergeText(current.name(), page.name());
         return new ExecutableSnapshot(id, userId, parentId, resolvedCycleId,
             name != null ? name : "",
@@ -173,7 +180,7 @@ public final class SourceAwareMerge {
             mergeScale(current.energyDrain(), page.energyName(), NotionSchema.ENERGY_OPTIONS),
             mergeScale(current.mentalLoad(), page.mentalLoadName(), NotionSchema.MENTAL_LOAD_OPTIONS),
             mergeScale(current.impact(), page.impactName(), NotionSchema.IMPACT_OPTIONS),
-            current.systemGenerated());
+            current.systemGenerated(), containerBlockId);
     }
 
     /**

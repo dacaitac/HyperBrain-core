@@ -51,7 +51,7 @@ class SourceAwareMergeTest {
             // Due date unchanged (DUE == dueProjection) → startTime preserved; endTime always null (DR-01)
             assertThat(merged).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
                 ID, USER_ID, PARENT_ID, CYCLE_ID, "New name", null, "TASK", "IN_PROGRESS",
-                0.7, null, null, true, null, START, null, "HyperBrain", 3, null, null, false));
+                0.7, null, null, true, null, START, null, "HyperBrain", 3, null, null, false, null));
         }
 
         @Test
@@ -125,7 +125,7 @@ class SourceAwareMergeTest {
 
             assertThat(merged).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
                 ID, USER_ID, null, null, "Buy milk", "notes", "TASK", "DONE",
-                null, null, null, false, null, DUE, null, "Groceries", null, null, null, false));
+                null, null, null, false, null, DUE, null, "Groceries", null, null, null, false, null));
         }
     }
 
@@ -174,7 +174,7 @@ class SourceAwareMergeTest {
             NotionTaskPage page = pageBuilderDefaults("New name", "Not started", false);
 
             ExecutableSnapshot merged =
-                SourceAwareMerge.mergeNotionTask(current, page, ID, USER_ID, null, null);
+                SourceAwareMerge.mergeNotionTask(current, page, ID, USER_ID, null, null, null);
 
             assertThat(merged.name()).isEqualTo("New name");
             assertThat(merged.status()).isEqualTo("PLANNED");
@@ -187,7 +187,7 @@ class SourceAwareMergeTest {
             ExecutableSnapshot current = snapshot().id(ID).status("PLANNED").build();
 
             ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(current,
-                pageBuilderDefaults("t", "In progress", false), ID, USER_ID, null, null);
+                pageBuilderDefaults("t", "In progress", false), ID, USER_ID, null, null, null);
 
             assertThat(merged.status()).isEqualTo("IN_PROGRESS");
         }
@@ -278,7 +278,7 @@ class SourceAwareMergeTest {
                 .priorityScore(0.7).urgencyScore(4.0).effortScore(2.0).build();
 
             ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(current,
-                pageWithScores("t", 0.1, 1.0, 5.0), ID, USER_ID, null, null);
+                pageWithScores("t", 0.1, 1.0, 5.0), ID, USER_ID, null, null, null);
 
             // priority/urgency are pinned to the current domain value; effort takes the Notion value
             assertThat(merged.priorityScore()).isEqualTo(0.7);
@@ -293,7 +293,7 @@ class SourceAwareMergeTest {
                 .priorityScore(0.55).urgencyScore(3.0).build();
 
             ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(current,
-                pageBuilderDefaults("t", "Not started", false), ID, USER_ID, null, null);
+                pageBuilderDefaults("t", "Not started", false), ID, USER_ID, null, null, null);
 
             assertThat(merged.priorityScore()).isEqualTo(0.55);
             assertThat(merged.urgencyScore()).isEqualTo(3.0);
@@ -315,12 +315,35 @@ class SourceAwareMergeTest {
 
             ExecutableSnapshot keptLink = SourceAwareMerge.mergeNotionTask(current,
                 page("t", "Not started", false, "parent00000000000000000000000001"),
-                ID, USER_ID, null, null);
+                ID, USER_ID, null, null, null);
             ExecutableSnapshot clearedLink = SourceAwareMerge.mergeNotionTask(current,
-                page("t", "Not started", false, null), ID, USER_ID, null, null);
+                page("t", "Not started", false, null), ID, USER_ID, null, null, null);
 
             assertThat(keptLink.parentId()).isEqualTo(PARENT_ID);
             assertThat(clearedLink.parentId()).isNull();
+        }
+
+        @Test
+        @DisplayName("ADR-039: the Container Block relation is USER authority — a resolved block sets it, an absent one clears it, an unmapped one keeps it")
+        void container_relation_rules() {
+            UUID blockId = UUID.fromString("bbbbbbbb-0000-0000-0000-0000000000b1");
+            ExecutableSnapshot current = snapshot().id(ID).containerBlockId(blockId).build();
+
+            // A resolved Container Block moves the task into that block.
+            UUID newBlock = UUID.fromString("bbbbbbbb-0000-0000-0000-0000000000b2");
+            ExecutableSnapshot moved = SourceAwareMerge.mergeNotionTask(current,
+                pageWithContainer("blockpage00000000000000000000002"), ID, USER_ID, null, null, newBlock);
+            assertThat(moved.containerBlockId()).isEqualTo(newBlock);
+
+            // A present-but-unmapped relation keeps the current containment (repaired next webhook).
+            ExecutableSnapshot kept = SourceAwareMerge.mergeNotionTask(current,
+                pageWithContainer("blockpage00000000000000000000002"), ID, USER_ID, null, null, null);
+            assertThat(kept.containerBlockId()).isEqualTo(blockId);
+
+            // An absent relation detaches the task from its block.
+            ExecutableSnapshot detached = SourceAwareMerge.mergeNotionTask(current,
+                pageWithContainer(null), ID, USER_ID, null, null, null);
+            assertThat(detached.containerBlockId()).isNull();
         }
 
         @Test
@@ -329,7 +352,7 @@ class SourceAwareMergeTest {
             ExecutableSnapshot current = snapshot().id(ID).isImportant(true).build();
 
             ExecutableSnapshot kept = SourceAwareMerge.mergeNotionTask(current,
-                pageBuilderDefaults("t", "Not started", false), ID, USER_ID, null, null);
+                pageBuilderDefaults("t", "Not started", false), ID, USER_ID, null, null, null);
 
             assertThat(kept.isImportant()).isTrue();
         }
@@ -338,7 +361,7 @@ class SourceAwareMergeTest {
         @DisplayName("without a current row the page creates the executable with the CREATE rules")
         void creates_when_unmapped() {
             ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(null,
-                pageBuilderDefaults("New task", "In progress", false), ID, USER_ID, CYCLE_ID, null);
+                pageBuilderDefaults("New task", "In progress", false), ID, USER_ID, CYCLE_ID, null, null);
 
             assertThat(merged.name()).isEqualTo("New task");
             assertThat(merged.status()).isEqualTo("IN_PROGRESS");
@@ -369,7 +392,15 @@ class SourceAwareMergeTest {
             OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
             name, null, status, complete, null,
             null, null, null, null, null, null, null,
-            null, null, null, null, parentRelationId);
+            null, null, null, null, parentRelationId, null);
+    }
+
+    private static NotionTaskPage pageWithContainer(String containerRelationId) {
+        return new NotionTaskPage("page0000000000000000000000000001",
+            OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
+            "t", null, "Not started", false, null,
+            null, null, null, null, null, null, null,
+            null, null, null, null, null, containerRelationId);
     }
 
     private static NotionTaskPage pageWithScores(String name, Double priority, Double urgency,
@@ -378,6 +409,6 @@ class SourceAwareMergeTest {
             OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
             name, null, "Not started", false, null,
             null, null, priority, urgency, effort, null, null,
-            null, null, null, null, null);
+            null, null, null, null, null, null);
     }
 }

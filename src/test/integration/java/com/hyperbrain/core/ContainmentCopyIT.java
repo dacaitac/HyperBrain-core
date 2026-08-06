@@ -67,7 +67,7 @@ class ContainmentCopyIT {
         boolean changed = stateRepo.assignContainer(task, block, 30, 0);
 
         assertThat(changed).isTrue();
-        Optional<ContainerSchedule> schedule = stateRepo.findContainerSchedule(task, null);
+        Optional<ContainerSchedule> schedule = stateRepo.findContainerSchedule(task, null, null);
         assertThat(schedule).isPresent();
         assertThat(schedule.get().containerId()).isEqualTo(block);
         assertThat(schedule.get().startTime()).isEqualTo(BLOCK_START);
@@ -170,7 +170,7 @@ class ContainmentCopyIT {
     private ExecutableSnapshot blockSnapshot(UUID id, OffsetDateTime start, OffsetDateTime end) {
         return new ExecutableSnapshot(id, userId, null, cycleId, "Morning block", null,
             "TIME_BLOCK", "PLANNED", null, null, null, false, null, start, end, null,
-            null, null, null, false);
+            null, null, null, false, null);
     }
 
     private void assertRow(UUID id, OffsetDateTime start, OffsetDateTime end, UUID cycle) {

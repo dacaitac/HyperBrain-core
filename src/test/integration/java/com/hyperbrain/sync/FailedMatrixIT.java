@@ -14,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -28,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code DONE} closure extends it.
  */
 @IntegrationTest
-@DisplayName("FAILED matrix + Status-first merge (ADR-039)")
+@DisplayName("ADR-039 Notion inbound — FAILED matrix, Status-first, Container Block relation")
 class FailedMatrixIT {
 
     private static final String TASKS_DB = "1bf8bc9c5d91812b8c97e5e6450858aa";
@@ -130,6 +131,47 @@ class FailedMatrixIT {
         assertThat(row.get("best_streak")).isEqualTo(4);
     }
 
+    @Test
+    @DisplayName("the Container Block relation assigns container_block_id and hard-copies the block's date + cycle onto the task")
+    void container_relation_assigns_and_hard_copies() {
+        UUID userId = DataFixture.SYSTEM_USER_ID;
+        // A cycle and a live TIME_BLOCK executable already mirrored to a Notion page.
+        UUID cycleId = UUID.randomUUID();
+        jdbcTemplate.update(
+            "INSERT INTO core_cycle (id, user_id, name, type, status) VALUES (?, ?, 'C', 'PROJECT', 'ACTIVE')",
+            cycleId, userId);
+        UUID blockId = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, cycle_id, name, type, status, origin, start_time, end_time, system_generated)
+            VALUES (?, ?, ?, 'Morning block', 'TIME_BLOCK', 'PLANNED', 'PLANNER',
+                    '2026-08-06T09:00:00Z', '2026-08-06T10:00:00Z', false)
+            """, blockId, userId, cycleId);
+        String blockPage = newPageId();
+        jdbcTemplate.update("""
+            INSERT INTO sync_mappings (id, user_id, local_id, external_system, external_id, sync_status)
+            VALUES (?, ?, ?, 'NOTION', ?, 'SYNCED')
+            """, UUID.randomUUID(), userId, blockId, blockPage);
+
+        // A Task page dragged into that block in Notion (Container Block relation set).
+        String taskPage = newPageId();
+        deliver(taskPage, taskPageWithContainer(taskPage, "Write report", blockPage,
+            "2026-08-06T11:00:00.000Z"));
+
+        UUID taskId = localId(taskPage);
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+            "SELECT container_block_id, start_time, end_time, cycle_id FROM core_executable WHERE id = ?",
+            taskId);
+        assertThat(row.get("container_block_id")).isEqualTo(blockId);
+        // Hard copy: a reminder-type task takes the block's start + cycle, end cleared by DR-01.
+        assertThat(((OffsetDateTime) jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE id = ?", OffsetDateTime.class, taskId))
+            .toInstant())
+            .isEqualTo(OffsetDateTime.parse("2026-08-06T09:00:00Z").toInstant());
+        assertThat(row.get("end_time")).isNull();
+        assertThat(row.get("cycle_id")).isEqualTo(cycleId);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void deliver(String pageId, String pageJson) {
@@ -154,6 +196,20 @@ class FailedMatrixIT {
                "Complete":{"type":"checkbox","checkbox":%s},
                "Type":{"type":"select","select":{"name":"%s"}}%s}}
             """.formatted(pageId, lastEditedTime, TASKS_DB, name, status, complete, type, freqProp);
+    }
+
+    private String taskPageWithContainer(String pageId, String name, String containerPageId,
+                                         String lastEditedTime) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Status":{"type":"status","status":{"name":"Not started"}},
+               "Complete":{"type":"checkbox","checkbox":false},
+               "Type":{"type":"select","select":{"name":"Task"}},
+               "Container Block":{"type":"relation","relation":[{"id":"%s"}]}}}
+            """.formatted(pageId, lastEditedTime, TASKS_DB, name, containerPageId);
     }
 
     private UUID localId(String pageId) {

@@ -92,7 +92,7 @@ public class ContainmentCopyRule implements DomainRule {
                                                        ExecutableSnapshot merged,
                                                        ExternalSystem origin) {
         Optional<ContainerSchedule> authority =
-            stateRepo.findContainerSchedule(merged.id(), merged.parentId());
+            stateRepo.findContainerSchedule(merged.id(), merged.containerBlockId(), merged.parentId());
         if (authority.isEmpty() || !authority.get().imposesSchedule()) {
             return merged;
         }
@@ -162,7 +162,7 @@ public class ContainmentCopyRule implements DomainRule {
             s.isImportant(), s.frequency(),
             start, end, s.sourceCalendar(),
             s.energyDrain(), s.mentalLoad(), s.impact(),
-            s.systemGenerated());
+            s.systemGenerated(), s.containerBlockId());
     }
 
     private void stageChildUpdate(UUID childId) {

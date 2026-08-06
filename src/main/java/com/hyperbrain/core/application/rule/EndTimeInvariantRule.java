@@ -34,6 +34,6 @@ public class EndTimeInvariantRule implements DomainRule {
             merged.isImportant(), merged.frequency(),
             merged.startTime(), null, merged.sourceCalendar(),
             merged.energyDrain(), merged.mentalLoad(), merged.impact(),
-            merged.systemGenerated());
+            merged.systemGenerated(), merged.containerBlockId());
     }
 }

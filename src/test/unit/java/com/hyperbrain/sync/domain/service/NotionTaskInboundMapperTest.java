@@ -35,11 +35,11 @@ class NotionTaskInboundMapperTest {
             0.8, 0.6, 2.5,
             true, 3.0,
             "High", "Intense", "Routine",
-            "cycle000000000000000000000000001", "parent00000000000000000000000001");
+            "cycle000000000000000000000000001", "parent00000000000000000000000001", null);
 
         // When
         ExecutableSnapshot snapshot =
-            NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, CYCLE_ID, PARENT_ID);
+            NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, CYCLE_ID, PARENT_ID, null);
 
         // Then
         assertThat(snapshot).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
@@ -50,7 +50,7 @@ class NotionTaskInboundMapperTest {
             OffsetDateTime.parse("2026-07-07T10:00:00-05:00"),
             OffsetDateTime.parse("2026-07-07T11:30:00-05:00"),
             null,
-            5, 1, 4, false));
+            5, 1, 4, false, null));
     }
 
     @ParameterizedTest(name = "Status={0}, Complete={1} → {2}")
@@ -98,10 +98,10 @@ class NotionTaskInboundMapperTest {
             "Doctor appointment", null, "Done", false, "Agenda",
             null, null, null, null, null,
             null, null,
-            null, null, null, null, null);
+            null, null, null, null, null, null);
 
         // When
-        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null);
+        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null, null);
 
         // Then completion is authoritative regardless of type
         assertThat(snapshot.type()).isEqualTo("AGENDA");
@@ -153,7 +153,7 @@ class NotionTaskInboundMapperTest {
         NotionTaskPage page = minimalPage(5.0, 9.9);
 
         // When
-        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null);
+        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null, null);
 
         // Then priority ∈ [0,1] and effort ∈ [0,5]
         assertThat(snapshot.priorityScore()).isEqualTo(1.0);
@@ -167,12 +167,12 @@ class NotionTaskInboundMapperTest {
         NotionTaskPage page = minimalPage(null, null);
 
         // When
-        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null);
+        ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null, null);
 
         // Then
         assertThat(snapshot).usingRecursiveComparison().isEqualTo(new ExecutableSnapshot(
             ID, USER_ID, null, null, "", null, "TASK", "TODO",
-            null, null, null, false, null, null, null, null, null, null, null, false));
+            null, null, null, false, null, null, null, null, null, null, null, false, null));
     }
 
     private static NotionTaskPage minimalPage(Double priority, Double effort) {
@@ -181,6 +181,6 @@ class NotionTaskInboundMapperTest {
             null, "  ", null, null, null,
             null, null, priority, null, effort,
             null, null,
-            null, null, null, null, null);
+            null, null, null, null, null, null);
     }
 }

@@ -617,24 +617,24 @@ class NotionEventPropagatorTest {
 
     private static ExecutableSnapshot taskSnapshot(String status) {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", null,
-            "TASK", status, null, null, null, false, null, START, null, null, null, null, null, false);
+            "TASK", status, null, null, null, false, null, START, null, null, null, null, null, false, null);
     }
 
     private static ExecutableSnapshot taskSnapshotWithScores(String status, double priority,
                                                              double urgency) {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", null,
             "TASK", status, priority, urgency, null, false, null, START, null, null, null, null,
-            null, false);
+            null, false, null);
     }
 
     private static ExecutableSnapshot systemGeneratedSnapshot() {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, null, "Write tests", "[focus] ...",
-            "TASK", "DONE", null, null, null, false, null, START, START, null, null, null, null, true);
+            "TASK", "DONE", null, null, null, false, null, START, START, null, null, null, null, true, null);
     }
 
     private static ExecutableSnapshot taskSnapshotWithCycle() {
         return new ExecutableSnapshot(LOCAL_ID, USER_ID, null, CYCLE_ID, "Write tests", null,
-            "TASK", "TODO", null, null, null, false, null, null, null, null, null, null, null, false);
+            "TASK", "TODO", null, null, null, false, null, null, null, null, null, null, null, false, null);
     }
 
     private static CycleSnapshot cycleSnapshot(UUID id) {

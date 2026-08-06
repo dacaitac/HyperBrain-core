@@ -34,6 +34,6 @@ public class CompletionReactivationRule implements DomainRule {
             merged.isImportant(), merged.frequency(),
             merged.startTime(), merged.endTime(), merged.sourceCalendar(),
             merged.energyDrain(), merged.mentalLoad(), merged.impact(),
-            merged.systemGenerated());
+            merged.systemGenerated(), merged.containerBlockId());
     }
 }

@@ -314,8 +314,12 @@ public class NotionEventPropagator implements IEventPropagator {
         }
         String cycleExternalId = resolveCycleRelation(snapshot.get().cycleId());
         String parentExternalId = resolveMappedExternalId(snapshot.get().parentId());
+        // ADR-039: the containing TIME_BLOCK's Notion page id. A block with no page yet resolves to
+        // null and the relation travels empty this round; the ordered re-mirror (blocks before their
+        // members) repairs it — never a create-in-cascade of the block from here.
+        String containerExternalId = resolveMappedExternalId(snapshot.get().containerBlockId());
         Map<String, Object> props =
-            NotionTaskMapper.map(snapshot.get(), cycleExternalId, parentExternalId);
+            NotionTaskMapper.map(snapshot.get(), cycleExternalId, parentExternalId, containerExternalId);
         upsertPage(localId, snapshot.get().userId(), properties.getTasksDataSourceId(),
             props, reflectionScope);
     }

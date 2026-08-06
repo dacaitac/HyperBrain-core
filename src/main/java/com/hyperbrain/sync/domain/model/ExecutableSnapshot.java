@@ -33,6 +33,10 @@ import java.util.UUID;
  * @param impact          execution profile impact on the ordinal 1–5 scale
  * @param systemGenerated true for internal accounting rows (e.g. focus-switch snapshot subtasks,
  *                        ADR-013 DR-06); such rows are never written back to external systems
+ * @param containerBlockId the {@code TIME_BLOCK} executable that contains this one (ADR-039
+ *                        Option-B containment); null when the executable is not contained. The
+ *                        membership is USER-editable from Notion (the "Container Block" relation);
+ *                        the contained child's own date/cycle stay SYSTEM-owned (hard copy)
  */
 public record ExecutableSnapshot(
     UUID id,
@@ -54,6 +58,7 @@ public record ExecutableSnapshot(
     Integer energyDrain,
     Integer mentalLoad,
     Integer impact,
-    boolean systemGenerated
+    boolean systemGenerated,
+    UUID containerBlockId
 ) {
 }

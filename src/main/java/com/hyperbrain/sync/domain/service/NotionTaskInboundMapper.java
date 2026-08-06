@@ -74,15 +74,16 @@ public final class NotionTaskInboundMapper {
      * {@code parent} are always accepted from Notion, CA-6). {@code source_calendar} is
      * Apple authority and always null here.
      *
-     * @param page     the parsed page properties
-     * @param id       local {@code core_executable} id (existing mapping or a fresh UUID)
-     * @param userId   owning user (single-user MVP)
-     * @param cycleId  resolved local cycle id, or null
-     * @param parentId resolved local parent executable id, or null
+     * @param page        the parsed page properties
+     * @param id          local {@code core_executable} id (existing mapping or a fresh UUID)
+     * @param userId      owning user (single-user MVP)
+     * @param cycleId     resolved local cycle id, or null
+     * @param parentId    resolved local parent executable id, or null
+     * @param containerId resolved local container block id, or null (ADR-039 containment)
      * @return the snapshot to persist
      */
     public static ExecutableSnapshot toSnapshot(NotionTaskPage page, UUID id, UUID userId,
-                                                UUID cycleId, UUID parentId) {
+                                                UUID cycleId, UUID parentId, UUID containerId) {
         return new ExecutableSnapshot(
             id,
             userId,
@@ -103,7 +104,8 @@ public final class NotionTaskInboundMapper {
             scaleOf(page.energyName(), NotionSchema.ENERGY_OPTIONS),
             scaleOf(page.mentalLoadName(), NotionSchema.MENTAL_LOAD_OPTIONS),
             scaleOf(page.impactName(), NotionSchema.IMPACT_OPTIONS),
-            false);
+            false,
+            containerId);
     }
 
     /**

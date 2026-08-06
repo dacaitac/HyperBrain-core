@@ -86,7 +86,7 @@ class NotionScaleContractTest {
                                      Function<ExecutableSnapshotBuilder, ExecutableSnapshotBuilder> withScale,
                                      String property, List<String> options) {
             Map<String, Object> props =
-                NotionTaskMapper.map(withScale.apply(snapshot()).build(), null, null);
+                NotionTaskMapper.map(withScale.apply(snapshot()).build(), null, null, null);
 
             String optionName = selectName(props, property);
             assertThat(optionName).isEqualTo(options.get(value - 1));

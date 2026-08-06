@@ -117,8 +117,9 @@ public class NotionTaskSyncService {
             : null;
         UUID cycleId = cycleSyncService.resolveOrImport(page.cycleRelationId());
         UUID parentId = resolveParent(page.parentRelationId());
-        ExecutableSnapshot merged =
-            SourceAwareMerge.mergeNotionTask(current, page, localId, defaultUserId, cycleId, parentId);
+        UUID containerId = resolveContainer(page.containerRelationId());
+        ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(
+            current, page, localId, defaultUserId, cycleId, parentId, containerId);
 
         // CA-4 echo check runs on the pre-rules snapshot so that stateful domain rules
         // (specifically RecurrenceCloneRule / DR-04) never fire on Notion echoes.
@@ -133,7 +134,8 @@ public class NotionTaskSyncService {
         // (becameDone(null, DONE)=true) and creates a spurious clone. With the guard, the stored
         // DONE checksum matches and the event is correctly discarded.
         Map<String, Object> preRulesProps =
-            NotionTaskMapper.map(merged, page.cycleRelationId(), page.parentRelationId());
+            NotionTaskMapper.map(merged, page.cycleRelationId(), page.parentRelationId(),
+                page.containerRelationId());
         if (mapping.isPresent()
             && ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(),
                 preRulesProps, objectMapper)) {
@@ -144,7 +146,8 @@ public class NotionTaskSyncService {
         ExecutableSnapshot snapshot =
             domainChangeProcessor.process(current, merged, ExternalSystem.NOTION);
         Map<String, Object> canonicalProps =
-            NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId());
+            NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId(),
+                page.containerRelationId());
 
         executableRepo.upsert(snapshot);
         String checksum = ChecksumSupport.compute(page.pageId(), canonicalProps, objectMapper);
@@ -218,6 +221,24 @@ public class NotionTaskSyncService {
             syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, parentExternalId);
         if (mapping.isEmpty()) {
             log.warn("Parent task page {} is not mapped yet; relation omitted", parentExternalId);
+            return null;
+        }
+        return mapping.get().localId();
+    }
+
+    /**
+     * Resolves the {@code Container Block} relation (ADR-039) to the local TIME_BLOCK id. An
+     * unmapped block yields null: {@code SourceAwareMerge} then keeps the current containment
+     * (a present-but-unmapped relation never clears it), so the next webhook repairs the link.
+     */
+    private UUID resolveContainer(String containerExternalId) {
+        if (containerExternalId == null) {
+            return null;
+        }
+        Optional<SyncMapping> mapping =
+            syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, containerExternalId);
+        if (mapping.isEmpty()) {
+            log.warn("Container block page {} is not mapped yet; containment kept", containerExternalId);
             return null;
         }
         return mapping.get().localId();

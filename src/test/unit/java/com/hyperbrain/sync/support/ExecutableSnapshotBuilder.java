@@ -31,6 +31,7 @@ public final class ExecutableSnapshotBuilder {
     private Integer mentalLoad;
     private Integer impact;
     private boolean systemGenerated = false;
+    private UUID containerBlockId;
 
     public static ExecutableSnapshotBuilder snapshot() {
         return new ExecutableSnapshotBuilder();
@@ -136,9 +137,15 @@ public final class ExecutableSnapshotBuilder {
         return this;
     }
 
+    public ExecutableSnapshotBuilder containerBlockId(UUID value) {
+        this.containerBlockId = value;
+        return this;
+    }
+
     public ExecutableSnapshot build() {
         return new ExecutableSnapshot(id, userId, parentId, cycleId, name, description, type,
             status, priorityScore, urgencyScore, effortScore, isImportant, frequency,
-            startTime, endTime, sourceCalendar, energyDrain, mentalLoad, impact, systemGenerated);
+            startTime, endTime, sourceCalendar, energyDrain, mentalLoad, impact, systemGenerated,
+            containerBlockId);
     }
 }

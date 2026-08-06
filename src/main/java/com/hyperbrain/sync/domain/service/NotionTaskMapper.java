@@ -84,14 +84,17 @@ public final class NotionTaskMapper {
      * {@code date: null}, {@code number: null}, {@code select: null}, empty relation list),
      * so the page never keeps data the source of truth no longer has.
      *
-     * @param snapshot         the executable state to propagate
-     * @param cycleExternalId  Notion page id of the owning cycle, or null when unmapped
-     * @param parentExternalId Notion page id of the parent task, or null when unmapped
+     * @param snapshot            the executable state to propagate
+     * @param cycleExternalId     Notion page id of the owning cycle, or null when unmapped
+     * @param parentExternalId    Notion page id of the parent task, or null when unmapped
+     * @param containerExternalId Notion page id of the containing TIME_BLOCK, or null when the
+     *                            executable is not contained or the block has no page yet (ADR-039)
      * @return an insertion-ordered property map, guaranteed free of read-only properties
      */
     public static Map<String, Object> map(ExecutableSnapshot snapshot,
                                           String cycleExternalId,
-                                          String parentExternalId) {
+                                          String parentExternalId,
+                                          String containerExternalId) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(NotionSchema.PROP_NAME, title(snapshot.name()));
         props.put(NotionSchema.PROP_DESCRIPTION,
@@ -117,6 +120,11 @@ public final class NotionTaskMapper {
             cycleExternalId != null ? relation(cycleExternalId) : Map.of("relation", List.of()));
         props.put(NotionSchema.PROP_PARENT_TASK,
             parentExternalId != null ? relation(parentExternalId) : Map.of("relation", List.of()));
+        // ADR-039: the monovalent Container Block relation. An unmapped container (no Notion page
+        // yet) travels as an empty relation this round; the ordered re-mirror (blocks before their
+        // members) repairs it on the next propagation.
+        props.put(NotionSchema.PROP_CONTAINER_BLOCK,
+            containerExternalId != null ? relation(containerExternalId) : Map.of("relation", List.of()));
         NotionSchema.assertWritable(props);
         return props;
     }

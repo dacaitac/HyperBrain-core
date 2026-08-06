@@ -113,7 +113,10 @@ public class RecurrenceCloneRule implements DomainRule {
             source.energyDrain(),
             source.mentalLoad(),
             source.impact(),
-            false);
+            false,
+            // A recurrence clone is a fresh occurrence: it inherits the container so the next
+            // instance stays in the same block until re-planned (ADR-039 containment).
+            source.containerBlockId());
     }
 
     private void appendCreatedEvent(ExecutableSnapshot clone) {
