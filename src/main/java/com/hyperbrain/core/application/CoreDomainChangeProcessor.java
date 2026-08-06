@@ -3,6 +3,7 @@ package com.hyperbrain.core.application;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.ContainmentCopyRule;
+import com.hyperbrain.core.application.rule.ContainmentEligibilityRule;
 import com.hyperbrain.core.application.rule.DomainRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
@@ -44,6 +45,7 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
     public CoreDomainChangeProcessor(
         EndTimeInvariantRule endTimeInvariantRule,
         CompletionReactivationRule completionReactivationRule,
+        ContainmentEligibilityRule containmentEligibilityRule,
         ContainmentCopyRule containmentCopyRule,
         SingleFocusRule singleFocusRule,
         ReestimationConfirmationRule reestimationConfirmationRule,
@@ -51,13 +53,16 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         CompletionOutcomeRule completionOutcomeRule,
         RecurrenceCloneRule recurrenceCloneRule
     ) {
-        // ADR-039 order notes: the hard-copy rule runs right after DR-01 (so the child schedule
-        // it asserts is already end_time-normalized) and before the focus/progress rules; the
-        // completion-outcome rule (clock + streak) runs before DR-04 cloning so the clone copies
-        // the already-updated streak (never-miss-twice on any terminal).
+        // ADR-039 order notes: the containment-eligibility rule runs right before the hard-copy rule
+        // so an ineligible type (a calendar event / AGENDA) has its containment cleared before the
+        // copy could re-stamp a block window onto it. The hard-copy rule itself runs after DR-01 (so
+        // the child schedule it asserts is already end_time-normalized) and before the focus/progress
+        // rules; the completion-outcome rule (clock + streak) runs before DR-04 cloning so the clone
+        // copies the already-updated streak (never-miss-twice on any terminal).
         this.rules = List.of(
             endTimeInvariantRule,
             completionReactivationRule,
+            containmentEligibilityRule,
             containmentCopyRule,
             singleFocusRule,
             reestimationConfirmationRule,

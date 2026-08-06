@@ -172,6 +172,36 @@ class FailedMatrixIT {
         assertThat(row.get("cycle_id")).isEqualTo(cycleId);
     }
 
+    @Test
+    @DisplayName("an ACTIVITY whose Parent Task points at a TIME_BLOCK is NOT contained (it is a calendar event already) — container stays null")
+    void activity_pointed_at_block_is_not_contained() {
+        UUID userId = DataFixture.SYSTEM_USER_ID;
+        UUID blockId = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time, system_generated)
+            VALUES (?, ?, 'Morning block', 'TIME_BLOCK', 'PLANNED', 'PLANNER',
+                    '2026-08-06T09:00:00Z', '2026-08-06T10:00:00Z', false)
+            """, blockId, userId);
+        String blockPage = newPageId();
+        jdbcTemplate.update("""
+            INSERT INTO sync_mappings (id, user_id, local_id, external_system, external_id, sync_status)
+            VALUES (?, ?, ?, 'NOTION', ?, 'SYNCED')
+            """, UUID.randomUUID(), userId, blockId, blockPage);
+
+        // An ACTIVITY page whose Parent Task points at the block (the user dropped it in).
+        String activityPage = newPageId();
+        deliver(activityPage, activityPageWithParent(activityPage, "Doctor appointment", blockPage,
+            "2026-08-06T11:00:00.000Z"));
+
+        UUID activityId = localId(activityPage);
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+            "SELECT type, container_block_id FROM core_executable WHERE id = ?", activityId);
+        assertThat(row.get("type")).isEqualTo("ACTIVITY");
+        // The calendar-event type is never contained (ADR-039, core#61).
+        assertThat(row.get("container_block_id")).isNull();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void deliver(String pageId, String pageJson) {
@@ -208,6 +238,21 @@ class FailedMatrixIT {
                "Status":{"type":"status","status":{"name":"Not started"}},
                "Complete":{"type":"checkbox","checkbox":false},
                "Type":{"type":"select","select":{"name":"Task"}},
+               "Parent Task":{"type":"relation","relation":[{"id":"%s"}]}}}
+            """.formatted(pageId, lastEditedTime, TASKS_DB, name, parentPageId);
+    }
+
+    private String activityPageWithParent(String pageId, String name, String parentPageId,
+                                          String lastEditedTime) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Status":{"type":"status","status":{"name":"Not started"}},
+               "Complete":{"type":"checkbox","checkbox":false},
+               "Type":{"type":"select","select":{"name":"Activity"}},
+               "Date":{"type":"date","date":{"start":"2026-08-07T14:00:00.000-05:00","end":"2026-08-07T15:00:00.000-05:00"}},
                "Parent Task":{"type":"relation","relation":[{"id":"%s"}]}}}
             """.formatted(pageId, lastEditedTime, TASKS_DB, name, parentPageId);
     }

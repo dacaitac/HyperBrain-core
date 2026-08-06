@@ -3,6 +3,7 @@ package com.hyperbrain.core.application;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.ContainmentCopyRule;
+import com.hyperbrain.core.application.rule.ContainmentEligibilityRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
@@ -29,6 +30,7 @@ class CoreDomainChangeProcessorTest {
 
     private EndTimeInvariantRule endTimeRule;
     private CompletionReactivationRule completionReactivationRule;
+    private ContainmentEligibilityRule containmentEligibilityRule;
     private ContainmentCopyRule containmentCopyRule;
     private SingleFocusRule focusRule;
     private ReestimationConfirmationRule reestimationRule;
@@ -41,6 +43,7 @@ class CoreDomainChangeProcessorTest {
     void setUp() {
         endTimeRule = mock(EndTimeInvariantRule.class);
         completionReactivationRule = mock(CompletionReactivationRule.class);
+        containmentEligibilityRule = mock(ContainmentEligibilityRule.class);
         containmentCopyRule = mock(ContainmentCopyRule.class);
         focusRule = mock(SingleFocusRule.class);
         reestimationRule = mock(ReestimationConfirmationRule.class);
@@ -48,17 +51,18 @@ class CoreDomainChangeProcessorTest {
         completionOutcomeRule = mock(CompletionOutcomeRule.class);
         habitRule = mock(RecurrenceCloneRule.class);
         processor = new CoreDomainChangeProcessor(
-            endTimeRule, completionReactivationRule, containmentCopyRule, focusRule,
-            reestimationRule, progressRule, completionOutcomeRule, habitRule);
+            endTimeRule, completionReactivationRule, containmentEligibilityRule, containmentCopyRule,
+            focusRule, reestimationRule, progressRule, completionOutcomeRule, habitRule);
     }
 
     @Test
-    @DisplayName("applies the DR chain in order (DR-01→DR-02→copy→DR-05/06→DR-07→outcome→DR-04), threading each rule's output into the next")
+    @DisplayName("applies the DR chain in order (DR-01→DR-02→eligibility→copy→DR-05/06→DR-07→outcome→DR-04), threading each rule's output into the next")
     void applies_chain_in_order() {
         ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot().status("TODO").build();
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot().status("IN_PROGRESS").build();
         ExecutableSnapshot afterEndTime = ExecutableSnapshotBuilder.snapshot().name("a").build();
         ExecutableSnapshot afterReactivation = ExecutableSnapshotBuilder.snapshot().name("b").build();
+        ExecutableSnapshot afterEligibility = ExecutableSnapshotBuilder.snapshot().name("be").build();
         ExecutableSnapshot afterCopy = ExecutableSnapshotBuilder.snapshot().name("bc").build();
         ExecutableSnapshot afterFocus = ExecutableSnapshotBuilder.snapshot().name("c").build();
         ExecutableSnapshot afterReestimation = ExecutableSnapshotBuilder.snapshot().name("d").build();
@@ -69,7 +73,9 @@ class CoreDomainChangeProcessorTest {
             .thenReturn(afterEndTime);
         when(completionReactivationRule.apply(same(previous), same(afterEndTime), eq(ExternalSystem.NOTION)))
             .thenReturn(afterReactivation);
-        when(containmentCopyRule.apply(same(previous), same(afterReactivation), eq(ExternalSystem.NOTION)))
+        when(containmentEligibilityRule.apply(same(previous), same(afterReactivation), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterEligibility);
+        when(containmentCopyRule.apply(same(previous), same(afterEligibility), eq(ExternalSystem.NOTION)))
             .thenReturn(afterCopy);
         when(focusRule.apply(same(previous), same(afterCopy), eq(ExternalSystem.NOTION)))
             .thenReturn(afterFocus);
@@ -85,10 +91,12 @@ class CoreDomainChangeProcessorTest {
         ExecutableSnapshot result = processor.process(previous, merged, ExternalSystem.NOTION);
 
         assertThat(result).isSameAs(afterHabit);
-        InOrder order = inOrder(endTimeRule, completionReactivationRule, containmentCopyRule,
-            focusRule, reestimationRule, progressRule, completionOutcomeRule, habitRule);
+        InOrder order = inOrder(endTimeRule, completionReactivationRule, containmentEligibilityRule,
+            containmentCopyRule, focusRule, reestimationRule, progressRule, completionOutcomeRule,
+            habitRule);
         order.verify(endTimeRule).apply(any(), any(), any());
         order.verify(completionReactivationRule).apply(any(), any(), any());
+        order.verify(containmentEligibilityRule).apply(any(), any(), any());
         order.verify(containmentCopyRule).apply(any(), any(), any());
         order.verify(focusRule).apply(any(), any(), any());
         order.verify(reestimationRule).apply(any(), any(), any());
