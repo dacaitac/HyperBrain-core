@@ -48,7 +48,7 @@ class NotionTaskMapperTest {
     }
 
     private static Map<String, Object> map(ExecutableSnapshot snapshot) {
-        return NotionTaskMapper.map(snapshot, null, null, null);
+        return NotionTaskMapper.map(snapshot, null, null);
     }
 
     @SuppressWarnings("unchecked")
@@ -405,7 +405,7 @@ class NotionTaskMapperTest {
         @DisplayName("writes the Cycle relation with the resolved page id (CA-6)")
         void maps_cycle_relation() {
             Map<String, Object> props =
-                NotionTaskMapper.map(fullSnapshot(), "cyclepage123", null, null);
+                NotionTaskMapper.map(fullSnapshot(), "cyclepage123", null);
 
             assertThat(props.get("Cycle")).isEqualTo(
                 Map.of("relation", List.of(Map.of("id", "cyclepage123"))));
@@ -415,19 +415,21 @@ class NotionTaskMapperTest {
         @DisplayName("writes the Parent Task relation with the resolved page id")
         void maps_parent_relation() {
             Map<String, Object> props =
-                NotionTaskMapper.map(fullSnapshot(), null, "parentpage456", null);
+                NotionTaskMapper.map(fullSnapshot(), null, "parentpage456");
 
             assertThat(props.get("Parent Task")).isEqualTo(
                 Map.of("relation", List.of(Map.of("id", "parentpage456"))));
         }
 
         @Test
-        @DisplayName("writes the Container Block relation with the resolved block page id (ADR-039)")
-        void maps_container_relation() {
+        @DisplayName("ADR-039: a contained task writes its block page into the overloaded Parent Task relation")
+        void maps_container_via_parent_task() {
+            // The caller (NotionEventPropagator) resolves the block's page and passes it as the
+            // Parent Task value when parent_id is null; the mapper just writes what it is given.
             Map<String, Object> props =
-                NotionTaskMapper.map(fullSnapshot(), null, null, "blockpage789");
+                NotionTaskMapper.map(fullSnapshot(), null, "blockpage789");
 
-            assertThat(props.get("Container Block")).isEqualTo(
+            assertThat(props.get("Parent Task")).isEqualTo(
                 Map.of("relation", List.of(Map.of("id", "blockpage789"))));
         }
 
@@ -438,7 +440,6 @@ class NotionTaskMapperTest {
 
             assertThat(props.get("Cycle")).isEqualTo(Map.of("relation", List.of()));
             assertThat(props.get("Parent Task")).isEqualTo(Map.of("relation", List.of()));
-            assertThat(props.get("Container Block")).isEqualTo(Map.of("relation", List.of()));
         }
     }
 
@@ -450,13 +451,13 @@ class NotionTaskMapperTest {
         @DisplayName("the mapper never produces formula/rollup properties and always emits the full mirror")
         void never_emits_read_only_properties() {
             Map<String, Object> props =
-                NotionTaskMapper.map(fullSnapshot(), "cycle1", "parent1", null);
+                NotionTaskMapper.map(fullSnapshot(), "cycle1", "parent1");
 
             assertThat(props.keySet())
                 .doesNotContainAnyElementsOf(NotionSchema.READ_ONLY_PROPERTIES)
                 .containsOnly("Name", "Description", "Status", "Complete", "Type", "Date",
                     "Priority Score", "Urgence", "Effort", "Important", "Frequency",
-                    "Impact", "Energy", "Mental Load", "Cycle", "Parent Task", "Container Block");
+                    "Impact", "Energy", "Mental Load", "Cycle", "Parent Task");
         }
 
         @Test
@@ -464,7 +465,7 @@ class NotionTaskMapperTest {
         void minimal_snapshot_emits_same_property_set() {
             assertThat(map(minimalSnapshot()).keySet())
                 .containsExactlyInAnyOrderElementsOf(
-                    NotionTaskMapper.map(fullSnapshot(), "c", "p", null).keySet());
+                    NotionTaskMapper.map(fullSnapshot(), "c", "p").keySet());
         }
     }
 }

@@ -35,8 +35,9 @@ import java.util.UUID;
  *                        ADR-013 DR-06); such rows are never written back to external systems
  * @param containerBlockId the {@code TIME_BLOCK} executable that contains this one (ADR-039
  *                        Option-B containment); null when the executable is not contained. The
- *                        membership is USER-editable from Notion (the "Container Block" relation);
- *                        the contained child's own date/cycle stay SYSTEM-owned (hard copy)
+ *                        membership is USER-editable from Notion via the overloaded "Parent Task"
+ *                        relation (a task dropped into a block, Daniel 2026-08-06); the contained
+ *                        child's own date/cycle stay SYSTEM-owned (hard copy)
  */
 public record ExecutableSnapshot(
     UUID id,

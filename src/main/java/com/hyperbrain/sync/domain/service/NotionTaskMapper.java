@@ -84,17 +84,18 @@ public final class NotionTaskMapper {
      * {@code date: null}, {@code number: null}, {@code select: null}, empty relation list),
      * so the page never keeps data the source of truth no longer has.
      *
-     * @param snapshot            the executable state to propagate
-     * @param cycleExternalId     Notion page id of the owning cycle, or null when unmapped
-     * @param parentExternalId    Notion page id of the parent task, or null when unmapped
-     * @param containerExternalId Notion page id of the containing TIME_BLOCK, or null when the
-     *                            executable is not contained or the block has no page yet (ADR-039)
+     * @param snapshot         the executable state to propagate
+     * @param cycleExternalId  Notion page id of the owning cycle, or null when unmapped
+     * @param parentExternalId Notion page id to write into the {@code Parent Task} relation, or
+     *                         null when unmapped. Since ADR-039 this relation is overloaded: the
+     *                         caller passes the parent task's page when {@code parent_id} is set,
+     *                         otherwise the containing {@code TIME_BLOCK}'s page (containment reuses
+     *                         "Parent Task" ↔ "Subtasks", Daniel 2026-08-06)
      * @return an insertion-ordered property map, guaranteed free of read-only properties
      */
     public static Map<String, Object> map(ExecutableSnapshot snapshot,
                                           String cycleExternalId,
-                                          String parentExternalId,
-                                          String containerExternalId) {
+                                          String parentExternalId) {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(NotionSchema.PROP_NAME, title(snapshot.name()));
         props.put(NotionSchema.PROP_DESCRIPTION,
@@ -118,13 +119,10 @@ public final class NotionTaskMapper {
         putScale(props, NotionSchema.PROP_MENTAL_LOAD, snapshot.mentalLoad(), NotionSchema.MENTAL_LOAD_OPTIONS);
         props.put(NotionSchema.PROP_CYCLE,
             cycleExternalId != null ? relation(cycleExternalId) : Map.of("relation", List.of()));
+        // ADR-039: the Parent Task relation is overloaded — it carries the parent task, or (for a
+        // contained task with no parent) the containing TIME_BLOCK. The caller resolved which.
         props.put(NotionSchema.PROP_PARENT_TASK,
             parentExternalId != null ? relation(parentExternalId) : Map.of("relation", List.of()));
-        // ADR-039: the monovalent Container Block relation. An unmapped container (no Notion page
-        // yet) travels as an empty relation this round; the ordered re-mirror (blocks before their
-        // members) repairs it on the next propagation.
-        props.put(NotionSchema.PROP_CONTAINER_BLOCK,
-            containerExternalId != null ? relation(containerExternalId) : Map.of("relation", List.of()));
         NotionSchema.assertWritable(props);
         return props;
     }

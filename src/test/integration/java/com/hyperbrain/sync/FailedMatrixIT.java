@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code DONE} closure extends it.
  */
 @IntegrationTest
-@DisplayName("ADR-039 Notion inbound — FAILED matrix, Status-first, Container Block relation")
+@DisplayName("ADR-039 Notion inbound — FAILED matrix, Status-first, containment via Parent Task")
 class FailedMatrixIT {
 
     private static final String TASKS_DB = "1bf8bc9c5d91812b8c97e5e6450858aa";
@@ -132,8 +132,8 @@ class FailedMatrixIT {
     }
 
     @Test
-    @DisplayName("the Container Block relation assigns container_block_id and hard-copies the block's date + cycle onto the task")
-    void container_relation_assigns_and_hard_copies() {
+    @DisplayName("a task whose Parent Task points at a TIME_BLOCK gets container_block_id set and the block's date + cycle hard-copied")
+    void parent_task_to_block_assigns_container_and_hard_copies() {
         UUID userId = DataFixture.SYSTEM_USER_ID;
         // A cycle and a live TIME_BLOCK executable already mirrored to a Notion page.
         UUID cycleId = UUID.randomUUID();
@@ -153,9 +153,9 @@ class FailedMatrixIT {
             VALUES (?, ?, ?, 'NOTION', ?, 'SYNCED')
             """, UUID.randomUUID(), userId, blockId, blockPage);
 
-        // A Task page dragged into that block in Notion (Container Block relation set).
+        // A Task page dragged into that block in Notion: its Parent Task points at the block page.
         String taskPage = newPageId();
-        deliver(taskPage, taskPageWithContainer(taskPage, "Write report", blockPage,
+        deliver(taskPage, taskPageWithParent(taskPage, "Write report", blockPage,
             "2026-08-06T11:00:00.000Z"));
 
         UUID taskId = localId(taskPage);
@@ -198,8 +198,8 @@ class FailedMatrixIT {
             """.formatted(pageId, lastEditedTime, TASKS_DB, name, status, complete, type, freqProp);
     }
 
-    private String taskPageWithContainer(String pageId, String name, String containerPageId,
-                                         String lastEditedTime) {
+    private String taskPageWithParent(String pageId, String name, String parentPageId,
+                                      String lastEditedTime) {
         return """
             {"object":"page","id":"%s","last_edited_time":"%s","archived":false,"in_trash":false,
              "parent":{"type":"database_id","database_id":"%s"},
@@ -208,8 +208,8 @@ class FailedMatrixIT {
                "Status":{"type":"status","status":{"name":"Not started"}},
                "Complete":{"type":"checkbox","checkbox":false},
                "Type":{"type":"select","select":{"name":"Task"}},
-               "Container Block":{"type":"relation","relation":[{"id":"%s"}]}}}
-            """.formatted(pageId, lastEditedTime, TASKS_DB, name, containerPageId);
+               "Parent Task":{"type":"relation","relation":[{"id":"%s"}]}}}
+            """.formatted(pageId, lastEditedTime, TASKS_DB, name, parentPageId);
     }
 
     private UUID localId(String pageId) {

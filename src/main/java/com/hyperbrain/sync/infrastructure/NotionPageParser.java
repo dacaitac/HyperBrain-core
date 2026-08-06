@@ -48,8 +48,7 @@ public class NotionPageParser {
             optionName(props.path(NotionSchema.PROP_ENERGY), "select"),
             optionName(props.path(NotionSchema.PROP_MENTAL_LOAD), "select"),
             firstRelationId(props.path(NotionSchema.PROP_CYCLE)),
-            firstRelationId(props.path(NotionSchema.PROP_PARENT_TASK)),
-            firstRelationId(props.path(NotionSchema.PROP_CONTAINER_BLOCK)));
+            firstRelationId(props.path(NotionSchema.PROP_PARENT_TASK)));
     }
 
     /**

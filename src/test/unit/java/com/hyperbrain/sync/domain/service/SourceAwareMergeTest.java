@@ -324,26 +324,39 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("ADR-039: the Container Block relation is USER authority — a resolved block sets it, an absent one clears it, an unmapped one keeps it")
-        void container_relation_rules() {
+        @DisplayName("ADR-039: the overloaded Parent Task relation dispatches by resolved type — a TIME_BLOCK target sets container_block_id (clearing parent), a task sets parent, absent detaches, unmapped keeps both")
+        void parent_task_relation_dispatches_container_vs_parent() {
             UUID blockId = UUID.fromString("bbbbbbbb-0000-0000-0000-0000000000b1");
-            ExecutableSnapshot current = snapshot().id(ID).containerBlockId(blockId).build();
+            UUID parentTaskId = UUID.fromString("cccccccc-0000-0000-0000-0000000000c1");
+            ExecutableSnapshot current =
+                snapshot().id(ID).containerBlockId(blockId).parentId(null).build();
 
-            // A resolved Container Block moves the task into that block.
+            // The caller resolved the Parent Task target as a TIME_BLOCK → containment (parent cleared).
             UUID newBlock = UUID.fromString("bbbbbbbb-0000-0000-0000-0000000000b2");
             ExecutableSnapshot moved = SourceAwareMerge.mergeNotionTask(current,
-                pageWithContainer("blockpage00000000000000000000002"), ID, USER_ID, null, null, newBlock);
+                page("t", "Not started", false, "block00000000000000000000000002"),
+                ID, USER_ID, null, null, newBlock);
             assertThat(moved.containerBlockId()).isEqualTo(newBlock);
+            assertThat(moved.parentId()).isNull();
 
-            // A present-but-unmapped relation keeps the current containment (repaired next webhook).
+            // The caller resolved the same relation as a normal task → parent (container cleared).
+            ExecutableSnapshot reparented = SourceAwareMerge.mergeNotionTask(current,
+                page("t", "Not started", false, "task000000000000000000000000003"),
+                ID, USER_ID, null, parentTaskId, null);
+            assertThat(reparented.parentId()).isEqualTo(parentTaskId);
+            assertThat(reparented.containerBlockId()).isNull();
+
+            // A present-but-unmapped relation keeps BOTH current links (repaired next webhook).
             ExecutableSnapshot kept = SourceAwareMerge.mergeNotionTask(current,
-                pageWithContainer("blockpage00000000000000000000002"), ID, USER_ID, null, null, null);
+                page("t", "Not started", false, "unmapped0000000000000000000004"),
+                ID, USER_ID, null, null, null);
             assertThat(kept.containerBlockId()).isEqualTo(blockId);
 
-            // An absent relation detaches the task from its block.
+            // An absent relation detaches from both.
             ExecutableSnapshot detached = SourceAwareMerge.mergeNotionTask(current,
-                pageWithContainer(null), ID, USER_ID, null, null, null);
+                page("t", "Not started", false, null), ID, USER_ID, null, null, null);
             assertThat(detached.containerBlockId()).isNull();
+            assertThat(detached.parentId()).isNull();
         }
 
         @Test
@@ -392,15 +405,7 @@ class SourceAwareMergeTest {
             OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
             name, null, status, complete, null,
             null, null, null, null, null, null, null,
-            null, null, null, null, parentRelationId, null);
-    }
-
-    private static NotionTaskPage pageWithContainer(String containerRelationId) {
-        return new NotionTaskPage("page0000000000000000000000000001",
-            OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
-            "t", null, "Not started", false, null,
-            null, null, null, null, null, null, null,
-            null, null, null, null, null, containerRelationId);
+            null, null, null, null, parentRelationId);
     }
 
     private static NotionTaskPage pageWithScores(String name, Double priority, Double urgency,
@@ -409,6 +414,6 @@ class SourceAwareMergeTest {
             OffsetDateTime.parse("2026-07-07T15:00:00Z"), false,
             name, null, "Not started", false, null,
             null, null, priority, urgency, effort, null, null,
-            null, null, null, null, null, null);
+            null, null, null, null, null);
     }
 }

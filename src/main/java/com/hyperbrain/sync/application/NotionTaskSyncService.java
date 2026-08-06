@@ -60,6 +60,7 @@ public class NotionTaskSyncService {
     private static final String EXTERNAL_SYSTEM = "NOTION";
     private static final String STATUS_SYNCED = "SYNCED";
     private static final String AGGREGATE_TYPE = "CORE_EXECUTABLE";
+    private static final String TIME_BLOCK_TYPE = "TIME_BLOCK";
 
     private final CoreExecutableRepository executableRepo;
     private final SyncSnapshotRepository snapshotRepo;
@@ -116,10 +117,9 @@ public class NotionTaskSyncService {
             ? snapshotRepo.findExecutable(localId).orElse(null)
             : null;
         UUID cycleId = cycleSyncService.resolveOrImport(page.cycleRelationId());
-        UUID parentId = resolveParent(page.parentRelationId());
-        UUID containerId = resolveContainer(page.containerRelationId());
-        ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(
-            current, page, localId, defaultUserId, cycleId, parentId, containerId);
+        ResolvedRelation relation = resolveParentOrContainer(page.parentRelationId());
+        ExecutableSnapshot merged = SourceAwareMerge.mergeNotionTask(current, page, localId,
+            defaultUserId, cycleId, relation.parentId(), relation.containerId());
 
         // CA-4 echo check runs on the pre-rules snapshot so that stateful domain rules
         // (specifically RecurrenceCloneRule / DR-04) never fire on Notion echoes.
@@ -134,8 +134,7 @@ public class NotionTaskSyncService {
         // (becameDone(null, DONE)=true) and creates a spurious clone. With the guard, the stored
         // DONE checksum matches and the event is correctly discarded.
         Map<String, Object> preRulesProps =
-            NotionTaskMapper.map(merged, page.cycleRelationId(), page.parentRelationId(),
-                page.containerRelationId());
+            NotionTaskMapper.map(merged, page.cycleRelationId(), page.parentRelationId());
         if (mapping.isPresent()
             && ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(),
                 preRulesProps, objectMapper)) {
@@ -146,8 +145,7 @@ public class NotionTaskSyncService {
         ExecutableSnapshot snapshot =
             domainChangeProcessor.process(current, merged, ExternalSystem.NOTION);
         Map<String, Object> canonicalProps =
-            NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId(),
-                page.containerRelationId());
+            NotionTaskMapper.map(snapshot, page.cycleRelationId(), page.parentRelationId());
 
         executableRepo.upsert(snapshot);
         String checksum = ChecksumSupport.compute(page.pageId(), canonicalProps, objectMapper);
@@ -213,35 +211,42 @@ public class NotionTaskSyncService {
         return SyncOutcome.DELETED;
     }
 
-    private UUID resolveParent(String parentExternalId) {
-        if (parentExternalId == null) {
-            return null;
+    /**
+     * Resolves the overloaded {@code Parent Task} relation (ADR-039, Daniel 2026-08-06) into either
+     * a parent-task link or a containment link, dispatching by the resolved executable's type:
+     * a {@code TIME_BLOCK} target means the task was dropped into that block ({@code container_block_id});
+     * any other type is a normal subtask ({@code parent_id}). An absent or unmapped relation yields
+     * {@link ResolvedRelation#NONE} — the merge then detaches (absent) or keeps the current links
+     * (present-but-unmapped, repaired by the next webhook).
+     *
+     * @param externalId the {@code Parent Task} relation page id, or null
+     * @return which local link the relation resolves to
+     */
+    private ResolvedRelation resolveParentOrContainer(String externalId) {
+        if (externalId == null) {
+            return ResolvedRelation.NONE;
         }
         Optional<SyncMapping> mapping =
-            syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, parentExternalId);
+            syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, externalId);
         if (mapping.isEmpty()) {
-            log.warn("Parent task page {} is not mapped yet; relation omitted", parentExternalId);
-            return null;
+            log.warn("Parent Task relation page {} is not mapped yet; links kept", externalId);
+            return ResolvedRelation.NONE;
         }
-        return mapping.get().localId();
+        UUID targetLocalId = mapping.get().localId();
+        String targetType = executableRepo.findById(targetLocalId)
+            .map(CoreExecutable::type)
+            .orElse(null);
+        return TIME_BLOCK_TYPE.equals(targetType)
+            ? new ResolvedRelation(null, targetLocalId)
+            : new ResolvedRelation(targetLocalId, null);
     }
 
     /**
-     * Resolves the {@code Container Block} relation (ADR-039) to the local TIME_BLOCK id. An
-     * unmapped block yields null: {@code SourceAwareMerge} then keeps the current containment
-     * (a present-but-unmapped relation never clears it), so the next webhook repairs the link.
+     * The local link a {@code Parent Task} relation resolves to: at most one of the two is non-null
+     * (a normal parent, or a TIME_BLOCK container); both null means detach or keep (ADR-039).
      */
-    private UUID resolveContainer(String containerExternalId) {
-        if (containerExternalId == null) {
-            return null;
-        }
-        Optional<SyncMapping> mapping =
-            syncMappingRepo.findByExternalSystemAndId(EXTERNAL_SYSTEM, containerExternalId);
-        if (mapping.isEmpty()) {
-            log.warn("Container block page {} is not mapped yet; containment kept", containerExternalId);
-            return null;
-        }
-        return mapping.get().localId();
+    private record ResolvedRelation(UUID parentId, UUID containerId) {
+        static final ResolvedRelation NONE = new ResolvedRelation(null, null);
     }
 
     private void appendOutbox(UUID localId, String pageId, String executableType,

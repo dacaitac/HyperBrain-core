@@ -64,7 +64,7 @@ class NotionPageParserTest {
             0.8, 0.6, 2.5,
             true, 3.0,
             "High", "Intense", "Routine",
-            "1bf8bc9c5d9181d882cfe1f4aa38f295", null, null));
+            "1bf8bc9c5d9181d882cfe1f4aa38f295", null));
     }
 
     @Test

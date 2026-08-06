@@ -154,15 +154,28 @@ public final class SourceAwareMerge {
             return NotionTaskInboundMapper.toSnapshot(page, id, userId,
                 resolvedCycleId, resolvedParentId, resolvedContainerId);
         }
-        UUID parentId = page.parentRelationId() == null
-            ? null
-            : (resolvedParentId != null ? resolvedParentId : current.parentId());
-        // ADR-039: containment (which block holds the task) is USER-editable from Notion. Mirror
-        // the parent-relation semantics: an absent relation clears it, a present-but-unmapped one
-        // keeps the current container (the next webhook/re-mirror repairs the mapping).
-        UUID containerBlockId = page.containerRelationId() == null
-            ? null
-            : (resolvedContainerId != null ? resolvedContainerId : current.containerBlockId());
+        // ADR-039: the Parent Task relation is overloaded (Daniel, 2026-08-06). Its target is
+        // resolved and typed by the caller into at most one of {resolvedParentId, resolvedContainerId}:
+        //   absent relation                 → detach from both (parent + container cleared);
+        //   target is a normal executable    → set parent_id, clear container_block_id;
+        //   target is a TIME_BLOCK           → set container_block_id, clear parent_id;
+        //   present but unmapped/typeless    → keep BOTH current links (next webhook repairs it).
+        boolean relationPresent = page.parentRelationId() != null;
+        UUID parentId;
+        UUID containerBlockId;
+        if (!relationPresent) {
+            parentId = null;
+            containerBlockId = null;
+        } else if (resolvedParentId != null) {
+            parentId = resolvedParentId;
+            containerBlockId = null;
+        } else if (resolvedContainerId != null) {
+            parentId = null;
+            containerBlockId = resolvedContainerId;
+        } else {
+            parentId = current.parentId();
+            containerBlockId = current.containerBlockId();
+        }
         String name = mergeText(current.name(), page.name());
         return new ExecutableSnapshot(id, userId, parentId, resolvedCycleId,
             name != null ? name : "",

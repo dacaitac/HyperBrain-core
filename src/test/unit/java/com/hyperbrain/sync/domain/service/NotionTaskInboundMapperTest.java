@@ -35,7 +35,7 @@ class NotionTaskInboundMapperTest {
             0.8, 0.6, 2.5,
             true, 3.0,
             "High", "Intense", "Routine",
-            "cycle000000000000000000000000001", "parent00000000000000000000000001", null);
+            "cycle000000000000000000000000001", "parent00000000000000000000000001");
 
         // When
         ExecutableSnapshot snapshot =
@@ -98,7 +98,7 @@ class NotionTaskInboundMapperTest {
             "Doctor appointment", null, "Done", false, "Agenda",
             null, null, null, null, null,
             null, null,
-            null, null, null, null, null, null);
+            null, null, null, null, null);
 
         // When
         ExecutableSnapshot snapshot = NotionTaskInboundMapper.toSnapshot(page, ID, USER_ID, null, null, null);
@@ -181,6 +181,6 @@ class NotionTaskInboundMapperTest {
             null, "  ", null, null, null,
             null, null, priority, null, effort,
             null, null,
-            null, null, null, null, null, null);
+            null, null, null, null, null);
     }
 }

@@ -30,10 +30,11 @@ import java.time.OffsetDateTime;
  * @param impactName       {@code Impact} select option name, or null
  * @param energyName       {@code Energy} select option name, or null
  * @param mentalLoadName   {@code Mental Load} select option name, or null
- * @param cycleRelationId     first {@code Cycle} relation page id, normalized, or null
- * @param parentRelationId    first {@code Parent Task} relation page id, normalized, or null
- * @param containerRelationId first {@code Container Block} relation page id, normalized, or null
- *                            (ADR-039: the TIME_BLOCK that contains this task, USER-editable)
+ * @param cycleRelationId  first {@code Cycle} relation page id, normalized, or null
+ * @param parentRelationId first {@code Parent Task} relation page id, normalized, or null. Since
+ *                         ADR-039 (Daniel, 2026-08-06) this relation is overloaded: its target is
+ *                         either the parent task OR the containing {@code TIME_BLOCK} — the inbound
+ *                         sync disambiguates by the resolved executable's type
  */
 public record NotionTaskPage(
     String pageId,
@@ -55,7 +56,6 @@ public record NotionTaskPage(
     String energyName,
     String mentalLoadName,
     String cycleRelationId,
-    String parentRelationId,
-    String containerRelationId
+    String parentRelationId
 ) {
 }

@@ -39,9 +39,9 @@ public final class NotionSchema {
     public static final String PROP_PARENT_CYCLE = "Cycle Parent (Objective)";
 
     // ── Time Blocks (ADR-039: a Type value inside the Tasks DB, no longer a separate DB) ──
-    // Self-relation of the Tasks DB (Option B 1:N containment): a contained executable points at
-    // the Time Block executable that holds it. Its synced twin is "Contained Tasks".
-    public static final String PROP_CONTAINER_BLOCK = "Container Block";
+    // Containment reuses the existing "Parent Task" ↔ "Subtasks" self-relation (Daniel,
+    // 2026-08-06): a contained task points at its TIME_BLOCK via "Parent Task"; the block lists
+    // its contained tasks under "Subtasks". No dedicated containment property exists.
 
     // ── Canonical select options (1-based domain scale ↔ option index) ────────
     // Shared by the outbound (HU-10) and inbound (HU-14) mappers so both directions
@@ -61,10 +61,7 @@ public final class NotionSchema {
      */
     public static final Set<String> READ_ONLY_PROPERTIES = Set.of(
         "Costo", "Theme Priority",          // Tasks
-        "Presupuestado", "Ejecutado",       // Cycles
-        // ADR-039 containment self-relation twin: the block side ("Container Block") is the only
-        // writer; the members-side synced property is read-only.
-        "Contained Tasks");
+        "Presupuestado", "Ejecutado");      // Cycles
 
     /**
      * Asserts that a property map produced by a mapper contains no read-only property.
