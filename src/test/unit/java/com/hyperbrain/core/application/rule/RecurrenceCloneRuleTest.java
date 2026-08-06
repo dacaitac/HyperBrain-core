@@ -74,6 +74,27 @@ class RecurrenceCloneRuleTest {
     }
 
     @Test
+    @DisplayName("a contained source clones DETACHED (container_block_id = null) keeping its +frequency slot — no self-reasserting date corruption (core#59)")
+    void contained_source_clones_detached_keeping_shifted_slot() {
+        java.util.UUID todaysBlock = java.util.UUID.fromString("bbbbbbbb-0000-0000-0000-0000000000b1");
+        ExecutableSnapshot previous = habit("TODO");
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .id(previous.id()).type("HABIT").status("DONE").frequency(10.0)
+            .startTime(DUE).endTime(END).containerBlockId(todaysBlock).build();
+
+        rule.apply(previous, merged, ExternalSystem.NOTION);
+
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(stateRepo).upsertExecutable(captor.capture());
+        ExecutableSnapshot clone = captor.getValue();
+        // Detached: no container survives to re-stamp today's window over the clone.
+        assertThat(clone.containerBlockId()).isNull();
+        // The shifted occurrence slot is preserved intact.
+        assertThat(clone.startTime()).isEqualTo(DUE.plusDays(10));
+        assertThat(clone.endTime()).isEqualTo(END.plusDays(10));
+    }
+
+    @Test
     @DisplayName("null end_time: clone has null end_time (no crash)")
     void null_end_time_produces_null_next_end() {
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()

@@ -114,9 +114,13 @@ public class RecurrenceCloneRule implements DomainRule {
             source.mentalLoad(),
             source.impact(),
             false,
-            // A recurrence clone is a fresh occurrence: it inherits the container so the next
-            // instance stays in the same block until re-planned (ADR-039 containment).
-            source.containerBlockId());
+            // The clone is born un-contained (container_block_id = null): TIME_BLOCK blocks are
+            // ephemeral per-day containers that settle, they never persist across occurrences, and
+            // block (re)assignment is a plan-time concern. Inheriting the source's block would let
+            // ContainmentCopyRule re-assert today's block window over the clone's +frequency slot on
+            // the next ingestion — a self-reasserting date corruption. Detached, it keeps its shifted
+            // slot until the planner places it (core#59).
+            null);
     }
 
     private void appendCreatedEvent(ExecutableSnapshot clone) {
