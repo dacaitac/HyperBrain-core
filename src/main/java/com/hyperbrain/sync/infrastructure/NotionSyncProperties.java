@@ -43,6 +43,29 @@ public class NotionSyncProperties {
     /** Database id of the Cycles database (HU-14). */
     private String cyclesDatabaseId = "";
 
+    /** Data source id of the Time Blocks database (ADR-038). */
+    private String timeblocksDataSourceId = "";
+
+    /** Database id of the Time Blocks database (ADR-038). */
+    private String timeblocksDatabaseId = "";
+
+    /**
+     * Kill-switch of the Notion → Core Time Blocks inbound (ADR-038 condition 8). Deploy-safe
+     * default OFF: the outbound mirror runs alone until the inbound is proven E2E in prod. When
+     * off, Time Blocks webhook deliveries are discarded at the normalizer with an INFO log.
+     */
+    private boolean timeblocksInboundEnabled = false;
+
+    /**
+     * Days a terminal (SETTLED/EXPIRED) block stays mirrored before the retention sweep clears
+     * its Tasks relation, archives the page and drops the mapping (ADR-038 condition 5).
+     * Floor: {@value #TIMEBLOCKS_RETENTION_FLOOR_DAYS} — lower configured values are clamped.
+     */
+    private int timeblocksRetentionDays = 30;
+
+    /** Minimum retention the sweep will ever honor (ADR-038: piso 14). */
+    public static final int TIMEBLOCKS_RETENTION_FLOOR_DAYS = 14;
+
     /** Attempts per request before the failure escalates (429/5xx/IO, CA-8/CA-13). */
     private int maxAttempts = 3;
 
@@ -128,6 +151,45 @@ public class NotionSyncProperties {
 
     public void setCyclesDatabaseId(String cyclesDatabaseId) {
         this.cyclesDatabaseId = cyclesDatabaseId;
+    }
+
+    public String getTimeblocksDataSourceId() {
+        return timeblocksDataSourceId;
+    }
+
+    public void setTimeblocksDataSourceId(String timeblocksDataSourceId) {
+        this.timeblocksDataSourceId = timeblocksDataSourceId;
+    }
+
+    public String getTimeblocksDatabaseId() {
+        return timeblocksDatabaseId;
+    }
+
+    public void setTimeblocksDatabaseId(String timeblocksDatabaseId) {
+        this.timeblocksDatabaseId = timeblocksDatabaseId;
+    }
+
+    public boolean isTimeblocksInboundEnabled() {
+        return timeblocksInboundEnabled;
+    }
+
+    public void setTimeblocksInboundEnabled(boolean timeblocksInboundEnabled) {
+        this.timeblocksInboundEnabled = timeblocksInboundEnabled;
+    }
+
+    /**
+     * Returns the effective retention window, clamped to the
+     * {@value #TIMEBLOCKS_RETENTION_FLOOR_DAYS}-day floor so a misconfiguration can never sweep
+     * blocks the user still expects to see.
+     *
+     * @return the retention days, never below the floor
+     */
+    public int getTimeblocksRetentionDays() {
+        return Math.max(timeblocksRetentionDays, TIMEBLOCKS_RETENTION_FLOOR_DAYS);
+    }
+
+    public void setTimeblocksRetentionDays(int timeblocksRetentionDays) {
+        this.timeblocksRetentionDays = timeblocksRetentionDays;
     }
 
     public int getMaxAttempts() {

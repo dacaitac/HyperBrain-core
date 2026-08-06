@@ -143,7 +143,7 @@ class CalendarEventHandlerTest {
     }
 
     @Test
-    @DisplayName("DELETED of a planner block (stale mapping): deletes the block and its mapping, no outbox")
+    @DisplayName("DELETED of a planner block (stale mapping): deletes the block and stages the Notion echo (ADR-038)")
     void deleted_planner_block_removes_block() {
         UUID blockId = UUID.randomUUID();
         OffsetDateTime mappedLongAgo = OffsetDateTime.now().minusHours(1);
@@ -157,7 +157,14 @@ class CalendarEventHandlerTest {
         verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
         verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-7");
         verify(executableRepo, never()).deleteById(any());
-        verifyNoInteractions(outboxRepo);
+        // ADR-038: the deletion is echoed as a TimeBlockChangedEvent (APPLE origin) so the
+        // Notion mirror archives the block's page while the Apple loop stays protected.
+        org.mockito.ArgumentCaptor<OutboxEvent> staged =
+            org.mockito.ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxRepo).append(staged.capture());
+        assertThat(staged.getValue().eventType()).isEqualTo("TimeBlockChangedEvent");
+        assertThat(staged.getValue().sourceSystem()).isEqualTo("APPLE");
+        assertThat(staged.getValue().payload()).contains("\"operation\":\"DELETED\"");
     }
 
     @Test

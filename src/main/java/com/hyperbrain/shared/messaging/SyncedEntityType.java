@@ -11,6 +11,8 @@ public enum SyncedEntityType {
     CYCLE,
     /** A planned agenda block delivered to Apple as a reminder (HU-01b morning write-back). */
     AGENDA_BLOCK,
+    /** A single {@code core_time_block} change (settlement or ADR-038 non-planner edit). */
+    TIME_BLOCK,
     OTHER;
 
     /**
@@ -27,6 +29,7 @@ public enum SyncedEntityType {
             case "CORE_EXECUTABLE", "TASK", "SYNC_APPLE" -> EXECUTABLE;
             case "CORE_CYCLE" -> CYCLE;
             case "AGENDA_BLOCK" -> AGENDA_BLOCK;
+            case "CORE_TIME_BLOCK" -> TIME_BLOCK;
             default -> OTHER;
         };
     }

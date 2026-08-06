@@ -14,5 +14,10 @@ public enum SyncOutcome {
     /** The page state was identical to the last synced state; discarded (CA-4/CA-20). */
     SKIPPED_ECHO,
     /** The page is archived or trashed; entity and mapping were removed (CA-7). */
-    DELETED
+    DELETED,
+    /**
+     * The page drifted only on SYSTEM-owned fields, or the edit was rejected as a permanent
+     * semantic conflict (ADR-038): nothing was applied and a canonical re-assertion was staged.
+     */
+    REASSERTED
 }

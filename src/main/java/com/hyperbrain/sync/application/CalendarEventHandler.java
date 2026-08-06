@@ -170,6 +170,16 @@ public class CalendarEventHandler implements IEventHandler {
     private void deletePlannerBlock(SentinelEvent event, UUID blockId) {
         if (plannerBlockDeletionPort.deletePlannedBlock(blockId)) {
             syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
+            // ADR-038: the block's Notion mirror page must go too — the APPLE origin keeps the
+            // Apple write-back out of the loop while the Notion propagator archives the page.
+            outboxRepo.append(new OutboxEvent(
+                UUID.randomUUID(), "CORE_TIME_BLOCK", blockId.toString(),
+                "TimeBlockChangedEvent",
+                String.format(
+                    "{\"block_id\":\"%s\",\"user_id\":\"%s\",\"operation\":\"DELETED\","
+                        + "\"source_system\":\"APPLE\",\"occurred_at\":\"%s\"}",
+                    blockId, defaultUserId, OffsetDateTime.now()),
+                EXTERNAL_SYSTEM, OffsetDateTime.now()));
             log.info("CALENDAR_EVENT {} deleted (planner block {})", event.entityId(), blockId);
         } else {
             log.warn("CALENDAR_EVENT {} DELETE mapped to local {}, which is neither an executable nor "

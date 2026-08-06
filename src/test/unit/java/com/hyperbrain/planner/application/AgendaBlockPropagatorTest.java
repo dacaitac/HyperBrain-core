@@ -12,6 +12,7 @@ import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.model.WriteCommand;
+import com.hyperbrain.sync.domain.port.out.PlannerTimeBlockPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
@@ -53,6 +54,7 @@ class AgendaBlockPropagatorTest {
     private static final OffsetDateTime END = START.plusHours(1);
 
     private PlannerStateRepository plannerStateRepository;
+    private PlannerTimeBlockPort timeBlockPort;
     private SyncMappingRepository syncMappingRepo;
     private WriteCommandLogRepository commandLogRepo;
     private WriteCommandPublisher commandPublisher;
@@ -61,14 +63,15 @@ class AgendaBlockPropagatorTest {
     @BeforeEach
     void setUp() {
         plannerStateRepository = mock(PlannerStateRepository.class);
+        timeBlockPort = mock(PlannerTimeBlockPort.class);
         syncMappingRepo = mock(SyncMappingRepository.class);
         commandLogRepo = mock(WriteCommandLogRepository.class);
         commandPublisher = mock(WriteCommandPublisher.class);
         EmptyAgendaNotifier emptyAgendaNotifier = mock(EmptyAgendaNotifier.class);
         ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
         WriteCommandWireMapper wireMapper = new WriteCommandWireMapper(objectMapper);
-        propagator = new AgendaBlockPropagator(plannerStateRepository, syncMappingRepo, commandLogRepo,
-            commandPublisher, wireMapper, emptyAgendaNotifier, objectMapper);
+        propagator = new AgendaBlockPropagator(plannerStateRepository, timeBlockPort, syncMappingRepo,
+            commandLogRepo, commandPublisher, wireMapper, emptyAgendaNotifier, objectMapper);
     }
 
     @Test
@@ -153,6 +156,61 @@ class AgendaBlockPropagatorTest {
         WriteCommand command = captor.getValue();
         assertThat(command.operation()).isEqualTo(Operation.DELETED);
         assertThat(command.payload()).isNull();
+    }
+
+    @Test
+    @DisplayName("TimeBlockChangedEvent UPDATED (Notion edit): re-reads the block and updates its EKEvent (ADR-038)")
+    void time_block_change_updates_calendar_event() {
+        // Given a live USER-origin block re-read through the planner port
+        when(timeBlockPort.findBlock(BLOCK_ID_1)).thenReturn(Optional.of(
+            new com.hyperbrain.sync.domain.model.TimeBlockSnapshot(BLOCK_ID_1, USER_ID, START, END,
+                "PLANNED", "USER", "Deep work", "reason",
+                60, null, null,
+                List.of(new com.hyperbrain.sync.domain.model.TimeBlockMemberSnapshot(
+                    EXECUTABLE_ID, "Deep work", 60, 0)))));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", BLOCK_ID_1))
+            .thenReturn(Optional.of(mapping(BLOCK_ID_1, "EK-1")));
+
+        // When
+        propagator.propagate(timeBlockChangedEvent("UPDATED"));
+
+        // Then
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), anyString());
+        WriteCommand command = captor.getValue();
+        assertThat(command.commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(command.operation()).isEqualTo(Operation.UPDATED);
+        assertThat(command.entityId()).isEqualTo("EK-1");
+        CalendarEventPayload payload = (CalendarEventPayload) command.payload();
+        assertThat(payload.title()).isEqualTo("Deep work");
+        assertThat(payload.calendarName()).isEqualTo("HyperBrain");
+    }
+
+    @Test
+    @DisplayName("TimeBlockChangedEvent DELETED: deletes the mapped EKEvent (ADR-038)")
+    void time_block_change_deletes_calendar_event() {
+        // Given
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", BLOCK_ID_1))
+            .thenReturn(Optional.of(mapping(BLOCK_ID_1, "EK-1")));
+
+        // When
+        propagator.propagate(timeBlockChangedEvent("DELETED"));
+
+        // Then
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), anyString());
+        WriteCommand command = captor.getValue();
+        assertThat(command.operation()).isEqualTo(Operation.DELETED);
+        assertThat(command.entityId()).isEqualTo("EK-1");
+        assertThat(command.payload()).isNull();
+    }
+
+    private static OutboxEvent timeBlockChangedEvent(String operation) {
+        String payload = """
+            {"block_id":"%s","user_id":"%s","operation":"%s","source_system":"NOTION"}
+            """.formatted(BLOCK_ID_1, USER_ID, operation);
+        return new OutboxEvent(UUID.randomUUID(), "CORE_TIME_BLOCK", BLOCK_ID_1.toString(),
+            "TimeBlockChangedEvent", payload, "NOTION", OffsetDateTime.now());
     }
 
     private static PlannedBlockRecord block(UUID blockId) {

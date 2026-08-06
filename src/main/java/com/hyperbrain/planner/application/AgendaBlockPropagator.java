@@ -16,7 +16,10 @@ import com.hyperbrain.sync.domain.model.CommandType;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.PendingWriteCommand;
 import com.hyperbrain.sync.domain.model.SyncMapping;
+import com.hyperbrain.sync.domain.model.TimeBlockChangedEvent;
+import com.hyperbrain.sync.domain.model.TimeBlockSnapshot;
 import com.hyperbrain.sync.domain.model.WriteCommand;
+import com.hyperbrain.sync.domain.port.out.PlannerTimeBlockPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
@@ -83,6 +86,7 @@ public class AgendaBlockPropagator implements IEventPropagator {
     private static final String MEMBERS_NOTE_HEADING = "In this block:";
 
     private final PlannerStateRepository plannerStateRepository;
+    private final PlannerTimeBlockPort timeBlockPort;
     private final SyncMappingRepository syncMappingRepo;
     private final WriteCommandLogRepository commandLogRepo;
     private final WriteCommandPublisher commandPublisher;
@@ -92,6 +96,7 @@ public class AgendaBlockPropagator implements IEventPropagator {
 
     public AgendaBlockPropagator(
         PlannerStateRepository plannerStateRepository,
+        PlannerTimeBlockPort timeBlockPort,
         SyncMappingRepository syncMappingRepo,
         WriteCommandLogRepository commandLogRepo,
         WriteCommandPublisher commandPublisher,
@@ -100,6 +105,7 @@ public class AgendaBlockPropagator implements IEventPropagator {
         ObjectMapper objectMapper
     ) {
         this.plannerStateRepository = plannerStateRepository;
+        this.timeBlockPort = timeBlockPort;
         this.syncMappingRepo = syncMappingRepo;
         this.commandLogRepo = commandLogRepo;
         this.commandPublisher = commandPublisher;
@@ -115,11 +121,19 @@ public class AgendaBlockPropagator implements IEventPropagator {
 
     @Override
     public boolean shouldPropagate(ExternalSystem origin, SyncedEntityType entityType) {
-        return origin != ExternalSystem.UNKNOWN && entityType == SyncedEntityType.AGENDA_BLOCK;
+        return origin != ExternalSystem.UNKNOWN
+            && (entityType == SyncedEntityType.AGENDA_BLOCK
+                || entityType == SyncedEntityType.TIME_BLOCK);
     }
 
     @Override
     public void propagate(OutboxEvent event) {
+        if (TimeBlockChangedEvent.AGGREGATE_TYPE.equals(event.aggregateType())) {
+            if (TimeBlockChangedEvent.EVENT_TYPE.equals(event.eventType())) {
+                propagateTimeBlockChange(event);
+            }
+            return;
+        }
         if (!AgendaBlockPlannedEvent.AGGREGATE_TYPE.equals(event.aggregateType())) {
             return;
         }
@@ -158,6 +172,60 @@ public class AgendaBlockPropagator implements IEventPropagator {
         }
         log.info("Delivered {} agenda block(s) and {} removal(s) as calendar events for user {} on {} (event {})",
             blocks.size(), removedBlockIds.size(), userId, targetDay, event.id());
+    }
+
+    /**
+     * Reconciles the Apple calendar event of one block after a non-planner change (ADR-038): a
+     * Notion retime/retheme/membership edit or a SYSTEM re-assertion updates the EKEvent, a
+     * removal deletes it. Re-reads the block through the planner-owned port so the write always
+     * mirrors current state; a vanished or FOCUS block converges to a delete/skip. Settlements
+     * are ignored here — the calendar event already carries the frozen window.
+     */
+    private void propagateTimeBlockChange(OutboxEvent event) {
+        JsonNode payload = parsePayload(event.payload());
+        if (payload == null) {
+            log.warn("TimeBlockChangedEvent {} has unparseable payload; Apple write-back skipped",
+                event.id());
+            return;
+        }
+        UUID blockId = parseUuid(payload.path("block_id").asText(null));
+        UUID userId = parseUuid(payload.path("user_id").asText(null));
+        String operation = payload.path("operation").asText(null);
+        if (blockId == null || userId == null || operation == null) {
+            log.warn("TimeBlockChangedEvent {} has incomplete coordinates; Apple write-back skipped",
+                event.id());
+            return;
+        }
+        if (Operation.DELETED.name().equals(operation)) {
+            emitRemoval(event, userId, blockId);
+            return;
+        }
+        Optional<TimeBlockSnapshot> snapshot = timeBlockPort.findBlock(blockId);
+        if (snapshot.isEmpty()) {
+            emitRemoval(event, userId, blockId); // row gone: converge by deleting the EKEvent
+            return;
+        }
+        TimeBlockSnapshot block = snapshot.get();
+        if (!"PLANNER".equals(block.origin()) && !"USER".equals(block.origin())) {
+            return; // FOCUS accounting never reaches the calendar
+        }
+        if (!block.live()) {
+            return; // settled work keeps its event as-is
+        }
+        emitBlock(event, userId, toRecord(block), "");
+    }
+
+    /** Adapts the port's snapshot to the write-back record (title/notes derivation shared). */
+    private static PlannedBlockRecord toRecord(TimeBlockSnapshot block) {
+        List<PlannedBlockMember> members = block.members().stream()
+            .map(member -> new PlannedBlockMember(member.executableId(), member.name(),
+                Math.max(member.plannedMinutes(), 0), Math.max(member.ord(), 0)))
+            .toList();
+        OffsetDateTime end = block.dateEnd() != null && block.dateEnd().isAfter(block.dateStart())
+            ? block.dateEnd()
+            : block.dateStart().plusMinutes(1);
+        return new PlannedBlockRecord(block.id(), block.theme(), members, block.dateStart(), end,
+            block.reason());
     }
 
     /**

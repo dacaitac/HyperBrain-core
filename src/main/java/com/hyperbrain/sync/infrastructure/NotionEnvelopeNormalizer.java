@@ -108,6 +108,19 @@ public class NotionEnvelopeNormalizer {
         if (candidates.contains(cyclesDataSource) || candidates.contains(cyclesDatabase)) {
             return EntityType.CYCLE;
         }
+        String blocksDataSource =
+            NotionPageParser.normalizeId(properties.getTimeblocksDataSourceId());
+        String blocksDatabase = NotionPageParser.normalizeId(properties.getTimeblocksDatabaseId());
+        if (candidates.contains(blocksDataSource) || candidates.contains(blocksDatabase)) {
+            if (!properties.isTimeblocksInboundEnabled()) {
+                // ADR-038 condition 8: the Time Blocks inbound stays behind its kill-switch —
+                // deliveries are acknowledged and dropped at the door, never DLQ'd.
+                log.info("Time Blocks delivery discarded: inbound is disabled "
+                    + "(NOTION_TIMEBLOCKS_INBOUND_ENABLED)");
+                return null;
+            }
+            return EntityType.TIME_BLOCK;
+        }
         return null;
     }
 

@@ -12,5 +12,7 @@ public enum EntityType {
     REMINDER_LIST,
     CALENDAR,
     TASK,
-    CYCLE
+    CYCLE,
+    /** A Notion Time Blocks database page (ADR-038 bidirectional block mirror). */
+    TIME_BLOCK
 }

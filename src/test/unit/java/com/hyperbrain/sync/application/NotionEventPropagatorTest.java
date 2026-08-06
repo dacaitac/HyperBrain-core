@@ -75,7 +75,8 @@ class NotionEventPropagatorTest {
         properties.setTasksDataSourceId(TASKS_DS);
         properties.setCyclesDataSourceId(CYCLES_DS);
         service = new NotionEventPropagator(snapshotRepo, syncMappingRepo, notion,
-            new NotionPageParser(), properties, new ObjectMapper(), meterRegistry);
+            new NotionHumanEditGuard(notion, new NotionPageParser(), properties, new ObjectMapper()),
+            properties, new ObjectMapper(), meterRegistry);
     }
 
     // ── Routing (CA-2, RF-17) ─────────────────────────────────────────────────

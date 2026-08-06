@@ -10,7 +10,6 @@ import com.hyperbrain.sync.domain.NotionApiException;
 import com.hyperbrain.sync.domain.NotionPageNotFoundException;
 import com.hyperbrain.sync.domain.model.CycleSnapshot;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
-import com.hyperbrain.sync.domain.model.NotionPageEditState;
 import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.NotionPort;
@@ -19,7 +18,6 @@ import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.domain.service.NotionCycleMapper;
 import com.hyperbrain.sync.domain.service.NotionSchema;
 import com.hyperbrain.sync.domain.service.NotionTaskMapper;
-import com.hyperbrain.sync.infrastructure.NotionPageParser;
 import com.hyperbrain.sync.infrastructure.NotionSyncProperties;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -177,7 +175,7 @@ public class NotionEventPropagator implements IEventPropagator {
     private final SyncSnapshotRepository snapshotRepo;
     private final SyncMappingRepository syncMappingRepo;
     private final NotionPort notion;
-    private final NotionPageParser pageParser;
+    private final NotionHumanEditGuard humanEditGuard;
     private final NotionSyncProperties properties;
     private final ObjectMapper objectMapper;
     private final MeterRegistry meterRegistry;
@@ -186,7 +184,7 @@ public class NotionEventPropagator implements IEventPropagator {
         SyncSnapshotRepository snapshotRepo,
         SyncMappingRepository syncMappingRepo,
         NotionPort notion,
-        NotionPageParser pageParser,
+        NotionHumanEditGuard humanEditGuard,
         NotionSyncProperties properties,
         ObjectMapper objectMapper,
         MeterRegistry meterRegistry
@@ -194,7 +192,7 @@ public class NotionEventPropagator implements IEventPropagator {
         this.snapshotRepo = snapshotRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.notion = notion;
-        this.pageParser = pageParser;
+        this.humanEditGuard = humanEditGuard;
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.meterRegistry = meterRegistry;
@@ -368,7 +366,7 @@ public class NotionEventPropagator implements IEventPropagator {
             return;
         }
         String externalId = mapping.get().externalId();
-        if (patchScope == null && hasHumanEditInFlight(externalId, mapping.get())) {
+        if (patchScope == null && humanEditGuard.hasHumanEditInFlight(externalId, mapping.get())) {
             log.info("Notion page {} has a human edit in flight; write-back for entity {} discarded "
                 + "(SKIPPED_HUMAN_EDIT), inbound webhook reconciles", externalId, localId);
             recordSkip();
@@ -391,50 +389,6 @@ public class NotionEventPropagator implements IEventPropagator {
         recordWrite(Operation.UPDATED);
         log.info("Notion page {} updated for entity {}{}", externalId, localId,
             patchScope != null ? " (reflection, field-scoped)" : "");
-    }
-
-    /**
-     * Outbound counterpart of the CA-29 monotonicity guard: decides whether a full-mirror write-back
-     * would clobber a human edit still in flight. Re-reads the page and yields to a <em>person</em>'s
-     * edit — the reliable signal being {@code last_edited_by} (Notion truncates {@code
-     * last_edited_time} to the minute, exactly the width of an edit burst, so the timestamp alone
-     * gives false negatives). It only re-reads for genuine domain changes; score reflections skip
-     * this path, saving a Notion read.
-     *
-     * <p>Bias, opposite to CA-29 (which uses strictly-older to keep same-minute human edits inbound):
-     * this discards on <em>equal-or-newer</em>, so a same-minute human edit wins over the write-back
-     * rather than being overwritten. The actor gate is what makes the equal-minute case decidable —
-     * the Core's own just-written page also carries the current minute, but as {@code last_edited_by}
-     * = the integration bot, so it never blocks the Core's own follow-up writes.
-     *
-     * <p>Inert when the integration bot id is not configured (the actor cannot be identified): the
-     * guard returns false and the write-back proceeds as before.
-     */
-    private boolean hasHumanEditInFlight(String externalId, SyncMapping mapping) {
-        String botUserId = NotionPageParser.normalizeId(properties.getBotUserId());
-        if (botUserId == null || botUserId.isBlank()) {
-            return false;
-        }
-        NotionPageEditState edit;
-        try {
-            edit = pageParser.parseEditState(objectMapper.readTree(notion.retrievePage(externalId)));
-        } catch (NotionPageNotFoundException ex) {
-            return false; // gone: let the update path 404 and repair the mapping (CA-15)
-        } catch (JsonProcessingException ex) {
-            log.warn("Unparseable Notion page {} on the outbound guard; proceeding with write-back",
-                externalId);
-            return false;
-        }
-        boolean editedByBot = edit.lastEditedById() == null
-            || edit.lastEditedById().equals(botUserId);
-        if (editedByBot) {
-            return false; // the last touch was the Core's own write — no human edit in flight
-        }
-        OffsetDateTime lastSyncedAt = mapping.lastSyncedAt();
-        OffsetDateTime lastEdited = edit.lastEditedTime();
-        // Person edited: discard unless their edit is strictly older than our last sync (already
-        // reconciled). Missing timestamps fall back to the actor signal alone (discard, to be safe).
-        return lastSyncedAt == null || lastEdited == null || !lastEdited.isBefore(lastSyncedAt);
     }
 
     private static Map<String, Object> scopedProps(Map<String, Object> fullProps, Set<String> scope) {
