@@ -170,6 +170,63 @@ class AppleEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("ADR-039: a mapped TIME_BLOCK edited in Notion emits a CALENDAR_EVENT UPDATED (the block's EKEvent follows)")
+    void mapped_time_block_emits_calendar_update() {
+        // Given a live block already mirrored to Apple as a calendar event
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("TIME_BLOCK", "PLANNED")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-block-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.CALENDAR_EVENT));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then a CALENDAR_EVENT UPDATE against the block's EventKit id
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-block-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(captor.getValue().entityId()).isEqualTo("EK-block-1");
+    }
+
+    @Test
+    @DisplayName("ADR-039: an unmapped TIME_BLOCK emits a CALENDAR_EVENT CREATE")
+    void unmapped_time_block_emits_calendar_create() {
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("TIME_BLOCK", "PLANNED")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID)).thenReturn(Optional.empty());
+        when(commandLogRepo.findPendingCreateByLocalId(LOCAL_ID)).thenReturn(Optional.empty());
+
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableCreatedEvent", "SYSTEM"));
+
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq(LOCAL_ID.toString()));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.CREATED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(captor.getValue().entityId()).isNull();
+    }
+
+    @Test
+    @DisplayName("ADR-039: a settled TIME_BLOCK (DONE) keeps its EKEvent — UPDATE, never DELETE")
+    void settled_time_block_keeps_its_event() {
+        // Given a settled block (DONE) still mapped to its calendar event
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("TIME_BLOCK", "DONE")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-block-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.CALENDAR_EVENT));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
+
+        // Then the block's EKEvent is UPDATED (frozen window), never deleted on completion
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-block-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+    }
+
+    @Test
     @DisplayName("TaskCompletedEvent on a mapped DONE HABIT emits DELETE (habit clone scenario)")
     void task_completed_event_emits_delete() {
         // Given — DONE via TaskCompletedEvent (e.g. HABIT marked done in Notion)

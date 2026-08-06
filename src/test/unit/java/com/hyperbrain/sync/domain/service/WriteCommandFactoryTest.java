@@ -132,6 +132,27 @@ class WriteCommandFactoryTest {
     }
 
     @Test
+    @DisplayName("TIME_BLOCK maps to a CALENDAR_EVENT command on the HyperBrain calendar (ADR-039)")
+    void time_block_maps_to_calendar_event_command() {
+        // Given a settled block (start_time is always present on a block)
+        CoreExecutable block = executable("TIME_BLOCK", "PLANNED", START, END, null);
+
+        // When
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, block, Operation.UPDATED, "EK-block-1");
+
+        // Then it is a time-boxed calendar event (empty source_calendar → HyperBrain default)
+        assertThat(command).isPresent();
+        assertThat(command.get().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(command.get()).usingRecursiveComparison().isEqualTo(new WriteCommand(
+            COMMAND_ID, CommandType.CALENDAR_EVENT, Operation.UPDATED, "EK-block-1",
+            new CalendarEventPayload("Buy groceries", START, END, false, "2L milk", "", "", null)));
+        assertThat(WriteCommandFactory.isWritable("TIME_BLOCK")).isTrue();
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("TIME_BLOCK"))
+            .contains(CommandType.CALENDAR_EVENT);
+    }
+
+    @Test
     @DisplayName("AGENDA never produces a command (read-only per ADR-009)")
     void agenda_is_rejected() {
         // Given

@@ -46,9 +46,16 @@ public final class WriteCommandFactory {
         "LEAD_MEASURE", CommandType.REMINDER,
         "BUYING", CommandType.REMINDER,
         "ACTIVITY", CommandType.CALENDAR_EVENT,
-        "LEARNING_SESSION", CommandType.CALENDAR_EVENT);
+        "LEARNING_SESSION", CommandType.CALENDAR_EVENT,
+        // ADR-039: after the TimeBlock collapse a block IS an executable; it write-backs as a
+        // time-boxed EKEvent on HyperBrain's calendar, exactly like ACTIVITY (start_time is always
+        // present on a block; source_calendar empty falls back to the HyperBrain calendar).
+        "TIME_BLOCK", CommandType.CALENDAR_EVENT);
 
     private static final String STATUS_DONE = "DONE";
+
+    /** The type of a settled time-block record whose EKEvent must survive completion (ADR-039). */
+    private static final String TIME_BLOCK_TYPE = "TIME_BLOCK";
 
     /** Executable type whose reminders are gathered in the dedicated shopping list. */
     private static final String BUYING_TYPE = "BUYING";

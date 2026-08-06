@@ -71,6 +71,17 @@ import java.util.UUID;
  * and the block id, so a retried drain re-emits the same commands (SQS FIFO + SentinelAPI dedup
  * absorb the duplicate) rather than creating duplicate events. Runs on a virtual thread outside the
  * drain transaction; any failure leaves the outbox row unprocessed for retry (at-least-once).
+ *
+ * <p><b>ADR-039 double-write caveat (core#60).</b> Since the TimeBlock collapse a block is a
+ * {@code TIME_BLOCK} executable, and its Notion-edit / settlement changes now ride
+ * {@code CORE_EXECUTABLE} events that {@code AppleEventPropagator} write-backs as CALENDAR_EVENTs
+ * (blocks are writable and settled blocks keep their EKEvent). This propagator is <b>currently
+ * dormant</b>: {@code AgendaBlockPlannedEvent} is no longer emitted (the planner materialization is
+ * not yet re-targeted). When core#60 re-targets the planner to emit {@code AgendaBlockPlannedEvent}
+ * again, this propagator and the executable path would both write the same block's EKEvent under
+ * two different {@code sync_mappings} ({@code core_time_block.id} here vs. the block executable id
+ * there) — a duplicate. The full pruning of this propagator (and the legacy per-block mapping) is
+ * therefore part of the core#60 re-target, not this fix.
  */
 @Service
 public class AgendaBlockPropagator implements IEventPropagator {
