@@ -3,10 +3,9 @@ package com.hyperbrain.core.application;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.application.event.TimeBlockSettledPayload;
-import com.hyperbrain.core.domain.model.TimeBlock;
-import com.hyperbrain.core.domain.model.TimeBlockStatus;
+import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockRepository;
+import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.slf4j.Logger;
@@ -20,11 +19,12 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Settles time blocks (DR-08, ADR-013): freezes {@code actual_duration_minutes} and
- * {@code settled_at}, imputes the user subtasks completed inside the block window and emits a
+ * Settles {@code TIME_BLOCK} executables (DR-08, ADR-013 as amended by ADR-039): freezes
+ * {@code actual_duration_minutes} and {@code last_completed_at}, imputes the user subtasks
+ * completed inside the block window via {@code imputed_block_id} and emits a
  * {@code TimeBlockSettledEvent} through the Transactional Outbox. Shared by the focus-switch
- * rule (SETTLED, inside the ingestion transaction) and the expiry scheduler (EXPIRED, own
- * transaction). Settlement is race-safe: the conditional UPDATE plus
+ * rule ({@code DONE}, inside the ingestion transaction) and the expiry scheduler
+ * ({@code FAILED}, own transaction). Settlement is race-safe: the conditional UPDATE plus
  * {@code FOR UPDATE SKIP LOCKED} on the expiry path guarantee a block settles exactly once.
  */
 @Service
@@ -36,13 +36,13 @@ public class TimeBlockSettlementService {
     private static final String EVENT_TYPE = "TimeBlockSettledEvent";
     private static final String SOURCE_SYSTEM = "SYSTEM";
 
-    private final TimeBlockRepository timeBlockRepo;
+    private final TimeBlockExecutableRepository timeBlockRepo;
     private final ExecutableStateRepository stateRepo;
     private final OutboxRepository outboxRepo;
     private final ObjectMapper objectMapper;
 
     public TimeBlockSettlementService(
-        TimeBlockRepository timeBlockRepo,
+        TimeBlockExecutableRepository timeBlockRepo,
         ExecutableStateRepository stateRepo,
         OutboxRepository outboxRepo,
         ObjectMapper objectMapper
@@ -54,25 +54,27 @@ public class TimeBlockSettlementService {
     }
 
     /**
-     * Settles the executing block of a task cut by a focus switch (DR-05 → DR-08). Joins the
-     * caller's ingestion transaction. Gross minutes only: the AGENDA clock suspension is
-     * deferred to HU-02.
+     * Settles the executing block of a task cut by a focus switch (DR-05 → DR-08) as
+     * {@code DONE}. Joins the caller's ingestion transaction. Gross minutes only: the AGENDA
+     * clock suspension is deferred to HU-02.
      *
-     * @param block the ACTIVE block of the cut task
+     * @param block the executing block of the cut task
      * @param now   the cut instant (window end)
      * @return the settled block id, or empty if a concurrent settlement won the race
      */
-    public Optional<UUID> settleOnFocusSwitch(TimeBlock block, OffsetDateTime now) {
-        int actual = grossMinutes(block.dateStart(), now);
-        return settleInternal(block, TimeBlockStatus.SETTLED, now, actual)
+    public Optional<UUID> settleOnFocusSwitch(TimeBlockExecutable block, OffsetDateTime now) {
+        int actual = grossMinutes(block.startTime(), now);
+        return settleInternal(block, TimeBlockExecutable.STATUS_DONE, now, actual)
             ? Optional.of(block.id())
             : Optional.empty();
     }
 
     /**
-     * Expires every open block whose {@code date_end} passed (DR-08 cron path). Blocks that
-     * were never executed (still PLANNED) settle with a null actual duration: the honest datum
-     * is "nothing observed". No overrun event is emitted here — that is HU-02.
+     * Expires every open block whose {@code end_time} passed (DR-08 cron path) as
+     * {@code FAILED}. Blocks that were never executed (still {@code PLANNED}) settle with a
+     * null actual duration: the honest datum is "nothing observed". {@code last_completed_at}
+     * is stamped on FAILED too (ADR-039 matrix: the intraday-replan guard needs the clock even
+     * on a sanctioned miss). No overrun event is emitted here — that is HU-02.
      *
      * @param now the expiry boundary
      * @return how many blocks were settled by this run
@@ -80,18 +82,18 @@ public class TimeBlockSettlementService {
     @Transactional
     public int expireDueBlocks(OffsetDateTime now) {
         int settled = 0;
-        for (TimeBlock block : timeBlockRepo.lockOpenExpired(now)) {
-            Integer actual = block.status() == TimeBlockStatus.ACTIVE
-                ? grossMinutes(block.dateStart(), block.dateEnd())
+        for (TimeBlockExecutable block : timeBlockRepo.lockOpenExpired(now)) {
+            Integer actual = TimeBlockExecutable.STATUS_IN_PROGRESS.equals(block.status())
+                ? grossMinutes(block.startTime(), block.endTime())
                 : null;
-            if (settleInternal(block, TimeBlockStatus.EXPIRED, block.dateEnd(), actual)) {
+            if (settleInternal(block, TimeBlockExecutable.STATUS_FAILED, block.endTime(), actual)) {
                 settled++;
             }
         }
         return settled;
     }
 
-    private boolean settleInternal(TimeBlock block, TimeBlockStatus finalStatus,
+    private boolean settleInternal(TimeBlockExecutable block, String finalStatus,
                                    OffsetDateTime windowEnd, Integer actualDurationMinutes) {
         OffsetDateTime settledAt = OffsetDateTime.now();
         if (!timeBlockRepo.settle(block.id(), finalStatus, actualDurationMinutes, settledAt)) {
@@ -99,16 +101,16 @@ public class TimeBlockSettlementService {
             return false;
         }
         int imputed = stateRepo.imputeCompletedSubtasks(
-            block.id(), block.executableId(), block.dateStart(), windowEnd);
+            block.id(), block.startTime(), windowEnd);
         outboxRepo.append(new OutboxEvent(
             UUID.randomUUID(), AGGREGATE_TYPE, block.id().toString(), EVENT_TYPE,
             toJson(new TimeBlockSettledPayload(
-                block.id(), block.executableId(), finalStatus.name(),
-                block.dateStart(), block.dateEnd(), block.plannedMinutes(),
+                block.id(), block.anchorTaskId(), finalStatus,
+                block.startTime(), block.endTime(), block.plannedMinutes(),
                 actualDurationMinutes, imputed)),
             SOURCE_SYSTEM, settledAt));
-        log.info("Block {} of executable {} settled as {} (actual {} min, {} subtasks imputed)",
-            block.id(), block.executableId(), finalStatus, actualDurationMinutes, imputed);
+        log.info("Block {} settled as {} (actual {} min, {} subtasks imputed)",
+            block.id(), finalStatus, actualDurationMinutes, imputed);
         return true;
     }
 

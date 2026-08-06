@@ -195,8 +195,9 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND e.status IN ('TODO', 'IN_PROGRESS')
           -- AGENDA is the read-only wall (ADR-009); BUYING is a dateless shopping-list reminder
           -- that never enters the daily floor and is outside the ExecutableType planner mirror,
-          -- so it must be filtered here before the row reaches ExecutableType.valueOf.
-          AND e.type NOT IN ('AGENDA', 'BUYING')
+          -- so it must be filtered here before the row reaches ExecutableType.valueOf. TIME_BLOCK
+          -- (ADR-039) is a scheduling container, never schedulable work — it is a wall, not a task.
+          AND e.type NOT IN ('AGENDA', 'BUYING', 'TIME_BLOCK')
           AND e.system_generated = false
           AND (e.last_completed_at IS NULL
                OR e.last_completed_at <  ?
@@ -261,6 +262,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 JOIN core_execution_profile p ON p.executable_id = ex.id
                 WHERE ex.parent_id IS NULL
                   AND ex.system_generated = false
+                  AND ex.type <> 'TIME_BLOCK'
                   AND p.estimated_minutes IS NOT NULL
                   AND p.estimated_minutes > 0
             ) e ON e.cycle_id = s.cycle_id

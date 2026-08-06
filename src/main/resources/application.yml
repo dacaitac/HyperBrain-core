@@ -125,13 +125,8 @@ app:
       # database_id (automations) or a data_source_id (subscription); both are matched.
       tasks-database-id: ${NOTION_TASKS_DATABASE_ID:1bf8bc9c5d91812b8c97e5e6450858aa}
       cycles-database-id: ${NOTION_CYCLES_DATABASE_ID:1bf8bc9c5d9181d882cfe1f4aa38f295}
-      # Time Blocks bidirectional mirror (ADR-038). The inbound stays behind its own
-      # kill-switch until ITs + E2E in prod are green; the retention sweep clamps to a
-      # 14-day floor.
-      timeblocks-data-source-id: ${NOTION_TIMEBLOCKS_DATA_SOURCE_ID:af6834d49fe242d5a04dcf4b5f146b5c}
-      timeblocks-database-id: ${NOTION_TIMEBLOCKS_DATABASE_ID:0b48d06e677344c0a615a6502bddea54}
-      timeblocks-inbound-enabled: ${NOTION_TIMEBLOCKS_INBOUND_ENABLED:false}
-      timeblocks-retention-days: ${NOTION_TIMEBLOCKS_RETENTION_DAYS:30}
+      # ADR-039: TIME_BLOCK lives in the Tasks DB as a Type option; the dedicated Time Blocks
+      # database, its inbound kill-switch and its retention sweep are retired.
   user-commands:
     consumer:
       # Listener of user-commands.fifo (HU-01b slice 2: «calcular» button + Sleep Score input).

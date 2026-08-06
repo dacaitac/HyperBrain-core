@@ -75,10 +75,12 @@ CREATE TABLE core_executable (
     description        TEXT,
     -- Mirrors HyperBrain-Infra: BUYING gathers shopping items in a dedicated Reminders list
     -- (Core → Apple write-back); it is a dateless reminder type, never agenda-scheduled.
+    -- ADR-039: TIME_BLOCK — the executable IS the block (Executable absorbs TimeBlock); the
+    -- legacy core_time_block table below is frozen history.
     type               TEXT NOT NULL
                            CHECK (type IN ('TASK', 'HABIT', 'LEAD_MEASURE',
                                            'ACTIVITY', 'AGENDA', 'LEARNING_SESSION',
-                                           'BUYING')),
+                                           'BUYING', 'TIME_BLOCK')),
     status             TEXT NOT NULL DEFAULT 'TODO'
                            CHECK (status IN ('TODO', 'IN_PROGRESS', 'DONE',
                                              'FAILED', 'PLANNED', 'WAITING')),
@@ -242,6 +244,32 @@ ALTER TABLE core_executable
 
 CREATE INDEX idx_core_executable_imputed_block
     ON core_executable (imputed_time_block_id);
+
+-- Mirrors HyperBrain-Infra migration for ADR-039 (Infra#25): Executable absorbs TimeBlock.
+--   * origin: who opened a TIME_BLOCK row (nullable for non-block executables).
+--   * actual_duration_minutes: gross executed minutes frozen on block settlement (DR-08).
+--   * container_block_id (Option B): monovalent containment — a member points at the TIME_BLOCK
+--     that holds it; ON DELETE SET NULL de-contains, never deletes the member.
+--   * container_planned_minutes / container_ord: the member's quota and order inside the
+--     container; NEVER merged with core_execution_profile.estimated_minutes.
+--   * imputed_block_id: additive successor of imputed_time_block_id (frozen for history) — the
+--     TIME_BLOCK executable a completed subtask was imputed to.
+ALTER TABLE core_executable
+    ADD COLUMN origin TEXT
+        CHECK (origin IS NULL OR origin IN ('PLANNER', 'FOCUS', 'USER')),
+    ADD COLUMN actual_duration_minutes INTEGER,
+    ADD COLUMN container_block_id UUID REFERENCES core_executable (id) ON DELETE SET NULL,
+    ADD COLUMN container_planned_minutes INTEGER,
+    ADD COLUMN container_ord INTEGER,
+    ADD COLUMN imputed_block_id UUID REFERENCES core_executable (id) ON DELETE SET NULL;
+
+CREATE INDEX idx_core_executable_container ON core_executable (container_block_id);
+CREATE INDEX idx_core_executable_imputed_exec ON core_executable (imputed_block_id);
+
+-- Expiry sweep support (DR-08 over the executable model): open TIME_BLOCK rows by end_time.
+CREATE INDEX idx_core_executable_open_blocks
+    ON core_executable (end_time)
+    WHERE type = 'TIME_BLOCK' AND status IN ('PLANNED', 'IN_PROGRESS');
 
 -- ─── Finance ─────────────────────────────────────────────────────────────────
 

@@ -55,13 +55,14 @@ class NotionTaskInboundMapperTest {
 
     @ParameterizedTest(name = "Status={0}, Complete={1} → {2}")
     @CsvSource(nullValues = "NULL", value = {
-        // DONE when either signal completes (Option B); checkbox checked always wins
+        // Option B unchanged for non-Failed rows; a checked box completes to DONE.
         "Done, true, DONE",
         "Done, false, DONE",
         "Done, NULL, DONE",
         "In progress, true, DONE",
+        // ADR-039: Failed is first-class and is NOT overridden by a checked box.
+        "Failed, true, FAILED",
         "Not started, true, DONE",
-        "Failed, true, DONE",
         "Someday, true, DONE",
         "NULL, true, DONE",
         // Neither signal completed: Status maps directly
@@ -75,8 +76,8 @@ class NotionTaskInboundMapperTest {
         "Someday, false, TODO",
         "NULL, false, TODO",
         "NULL, NULL, TODO"})
-    @DisplayName("resolves the domain status under the either-signal-completes policy (Option B)")
-    void resolves_status_option_b(String statusName, Boolean complete, String expected) {
+    @DisplayName("resolves the domain status under the ADR-039 Status-first policy (E1)")
+    void resolves_status_first(String statusName, Boolean complete, String expected) {
         assertThat(NotionTaskInboundMapper.resolveStatus(statusName, complete)).isEqualTo(expected);
     }
 

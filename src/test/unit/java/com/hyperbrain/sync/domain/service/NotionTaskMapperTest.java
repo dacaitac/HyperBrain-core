@@ -134,17 +134,18 @@ class NotionTaskMapperTest {
                 .isEqualTo(Map.of("status", Map.of("name", notionStatus)));
         }
 
-        @Test
-        @DisplayName("DONE sets Complete=true (closure scenario, CA on cierre)")
-        void done_marks_complete() {
-            assertThat(map(snapshot().status("DONE").build()).get("Complete"))
+        @ParameterizedTest(name = "{0} → Complete=true")
+        @CsvSource({"DONE", "FAILED"})
+        @DisplayName("a closed status (DONE or FAILED) sets Complete=true (ADR-039 derived checkbox = isClosed)")
+        void closed_marks_complete(String domainStatus) {
+            assertThat(map(snapshot().status(domainStatus).build()).get("Complete"))
                 .isEqualTo(Map.of("checkbox", true));
         }
 
         @ParameterizedTest(name = "{0} → Complete=false")
-        @CsvSource({"TODO", "IN_PROGRESS", "FAILED", "PLANNED", "WAITING"})
-        @DisplayName("any non-DONE status sets Complete=false")
-        void non_done_not_complete(String domainStatus) {
+        @CsvSource({"TODO", "IN_PROGRESS", "PLANNED", "WAITING"})
+        @DisplayName("an open status sets Complete=false")
+        void open_not_complete(String domainStatus) {
             assertThat(map(snapshot().status(domainStatus).build()).get("Complete"))
                 .isEqualTo(Map.of("checkbox", false));
         }

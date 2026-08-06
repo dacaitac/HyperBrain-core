@@ -1,5 +1,6 @@
 package com.hyperbrain.core.application.rule;
 
+import com.hyperbrain.core.domain.model.CompletionState;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
@@ -22,12 +23,15 @@ import java.util.UUID;
 /**
  * DR-04 — Recurrence cloning for any executable with {@code frequency > 0}.
  *
- * <p>When an executable with {@code frequency > 0} transitions to {@code DONE}, a clone is
- * persisted immediately with {@code start_time = original.start_time + frequency days} and
+ * <p>When an executable with {@code frequency > 0} transitions to a <b>closed</b> status —
+ * {@code DONE} or {@code FAILED} alike (ADR-039 never-miss-twice: a sanctioned miss still
+ * schedules the next occurrence) — a clone is persisted immediately with
+ * {@code start_time = original.start_time + frequency days} and
  * {@code end_time = original.end_time + frequency days} (null if the original had no end time),
  * and {@code status = TODO}. The clone carries the same user, parent, cycle, type, effort,
- * profile scales, and recurrence metadata — priority and urgency scores are left null for the
- * Prioritizer tick to recompute (ADR-020 D2).
+ * profile scales, recurrence metadata and the streak pair (copied after the closure outcome
+ * updated it, so the chain survives cloning) — priority and urgency scores are left null for
+ * the Prioritizer tick to recompute (ADR-020 D2).
  *
  * <p>An {@code ExecutableCreatedEvent} with {@code source_system = SYSTEM} is appended to the
  * Transactional Outbox so that both {@code NotionEventPropagator} and {@code AppleEventPropagator}
@@ -36,8 +40,8 @@ import java.util.UUID;
  * original task change arrived from Notion (or Apple), but the clone is a SYSTEM derivation.
  *
  * <p>Guards: skipped when the executable is system-generated ({@code systemGenerated = true}),
- * when {@code frequency} is null or non-positive, or when the status did not transition to
- * {@code DONE} in this ingestion (idempotency — re-ingesting an already-DONE row never
+ * when {@code frequency} is null or non-positive, or when the status did not transition to a
+ * closed one in this ingestion (idempotency — re-ingesting an already-closed row never
  * double-clones).
  */
 @Component
@@ -45,7 +49,6 @@ public class RecurrenceCloneRule implements DomainRule {
 
     private static final Logger log = LoggerFactory.getLogger(RecurrenceCloneRule.class);
 
-    private static final String DONE = "DONE";
     private static final String TODO = "TODO";
     private static final String EXECUTABLE_AGGREGATE = "CORE_EXECUTABLE";
     private static final String SOURCE_SYSTEM = "SYSTEM";
@@ -61,14 +64,16 @@ public class RecurrenceCloneRule implements DomainRule {
     @Override
     public ExecutableSnapshot apply(ExecutableSnapshot previous, ExecutableSnapshot merged,
                                     ExternalSystem origin) {
-        if (merged.systemGenerated() || !hasFrequency(merged) || !becameDone(previous, merged)) {
+        if (merged.systemGenerated() || !hasFrequency(merged) || !becameClosed(previous, merged)) {
             return merged;
         }
         ExecutableSnapshot clone = buildClone(merged);
         stateRepo.upsertExecutable(clone);
+        stateRepo.copyStreaks(merged.id(), clone.id());
         appendCreatedEvent(clone);
-        log.info("Executable {} cloned as {} (frequency {} days, next due {})",
-            merged.id(), clone.id(), merged.frequency().longValue(), clone.startTime());
+        log.info("Executable {} closed as {}; cloned as {} (frequency {} days, next due {})",
+            merged.id(), merged.status(), clone.id(), merged.frequency().longValue(),
+            clone.startTime());
         return merged;
     }
 
@@ -76,9 +81,9 @@ public class RecurrenceCloneRule implements DomainRule {
         return s.frequency() != null && s.frequency() > 0;
     }
 
-    private static boolean becameDone(ExecutableSnapshot previous, ExecutableSnapshot merged) {
-        return DONE.equals(merged.status())
-            && (previous == null || !DONE.equals(previous.status()));
+    private static boolean becameClosed(ExecutableSnapshot previous, ExecutableSnapshot merged) {
+        return CompletionState.isClosed(merged.status())
+            && (previous == null || !CompletionState.isClosed(previous.status()));
     }
 
     private static ExecutableSnapshot buildClone(ExecutableSnapshot source) {

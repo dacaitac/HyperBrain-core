@@ -1,6 +1,8 @@
 package com.hyperbrain.core.application;
 
+import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
+import com.hyperbrain.core.application.rule.ContainmentCopyRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
@@ -27,9 +29,11 @@ class CoreDomainChangeProcessorTest {
 
     private EndTimeInvariantRule endTimeRule;
     private CompletionReactivationRule completionReactivationRule;
+    private ContainmentCopyRule containmentCopyRule;
     private SingleFocusRule focusRule;
     private ReestimationConfirmationRule reestimationRule;
     private ProgressRecalculationRule progressRule;
+    private CompletionOutcomeRule completionOutcomeRule;
     private RecurrenceCloneRule habitRule;
     private CoreDomainChangeProcessor processor;
 
@@ -37,47 +41,59 @@ class CoreDomainChangeProcessorTest {
     void setUp() {
         endTimeRule = mock(EndTimeInvariantRule.class);
         completionReactivationRule = mock(CompletionReactivationRule.class);
+        containmentCopyRule = mock(ContainmentCopyRule.class);
         focusRule = mock(SingleFocusRule.class);
         reestimationRule = mock(ReestimationConfirmationRule.class);
         progressRule = mock(ProgressRecalculationRule.class);
+        completionOutcomeRule = mock(CompletionOutcomeRule.class);
         habitRule = mock(RecurrenceCloneRule.class);
         processor = new CoreDomainChangeProcessor(
-            endTimeRule, completionReactivationRule, focusRule, reestimationRule, progressRule, habitRule);
+            endTimeRule, completionReactivationRule, containmentCopyRule, focusRule,
+            reestimationRule, progressRule, completionOutcomeRule, habitRule);
     }
 
     @Test
-    @DisplayName("applies the DR chain in order (DR-01→DR-02→DR-05/06→DR-07→DR-04), threading each rule's output into the next")
+    @DisplayName("applies the DR chain in order (DR-01→DR-02→copy→DR-05/06→DR-07→outcome→DR-04), threading each rule's output into the next")
     void applies_chain_in_order() {
         ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot().status("TODO").build();
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot().status("IN_PROGRESS").build();
         ExecutableSnapshot afterEndTime = ExecutableSnapshotBuilder.snapshot().name("a").build();
         ExecutableSnapshot afterReactivation = ExecutableSnapshotBuilder.snapshot().name("b").build();
+        ExecutableSnapshot afterCopy = ExecutableSnapshotBuilder.snapshot().name("bc").build();
         ExecutableSnapshot afterFocus = ExecutableSnapshotBuilder.snapshot().name("c").build();
         ExecutableSnapshot afterReestimation = ExecutableSnapshotBuilder.snapshot().name("d").build();
         ExecutableSnapshot afterProgress = ExecutableSnapshotBuilder.snapshot().name("e").build();
+        ExecutableSnapshot afterOutcome = ExecutableSnapshotBuilder.snapshot().name("eo").build();
         ExecutableSnapshot afterHabit = ExecutableSnapshotBuilder.snapshot().name("f").build();
         when(endTimeRule.apply(same(previous), same(merged), eq(ExternalSystem.NOTION)))
             .thenReturn(afterEndTime);
         when(completionReactivationRule.apply(same(previous), same(afterEndTime), eq(ExternalSystem.NOTION)))
             .thenReturn(afterReactivation);
-        when(focusRule.apply(same(previous), same(afterReactivation), eq(ExternalSystem.NOTION)))
+        when(containmentCopyRule.apply(same(previous), same(afterReactivation), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterCopy);
+        when(focusRule.apply(same(previous), same(afterCopy), eq(ExternalSystem.NOTION)))
             .thenReturn(afterFocus);
         when(reestimationRule.apply(same(previous), same(afterFocus), eq(ExternalSystem.NOTION)))
             .thenReturn(afterReestimation);
         when(progressRule.apply(same(previous), same(afterReestimation), eq(ExternalSystem.NOTION)))
             .thenReturn(afterProgress);
-        when(habitRule.apply(same(previous), same(afterProgress), eq(ExternalSystem.NOTION)))
+        when(completionOutcomeRule.apply(same(previous), same(afterProgress), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterOutcome);
+        when(habitRule.apply(same(previous), same(afterOutcome), eq(ExternalSystem.NOTION)))
             .thenReturn(afterHabit);
 
         ExecutableSnapshot result = processor.process(previous, merged, ExternalSystem.NOTION);
 
         assertThat(result).isSameAs(afterHabit);
-        InOrder order = inOrder(endTimeRule, completionReactivationRule, focusRule, reestimationRule, progressRule, habitRule);
+        InOrder order = inOrder(endTimeRule, completionReactivationRule, containmentCopyRule,
+            focusRule, reestimationRule, progressRule, completionOutcomeRule, habitRule);
         order.verify(endTimeRule).apply(any(), any(), any());
         order.verify(completionReactivationRule).apply(any(), any(), any());
+        order.verify(containmentCopyRule).apply(any(), any(), any());
         order.verify(focusRule).apply(any(), any(), any());
         order.verify(reestimationRule).apply(any(), any(), any());
         order.verify(progressRule).apply(any(), any(), any());
+        order.verify(completionOutcomeRule).apply(any(), any(), any());
         order.verify(habitRule).apply(any(), any(), any());
     }
 }

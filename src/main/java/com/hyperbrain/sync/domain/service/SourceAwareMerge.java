@@ -43,9 +43,15 @@ import java.util.UUID;
 public final class SourceAwareMerge {
 
     private static final String STATUS_DONE = "DONE";
+    private static final String STATUS_FAILED = "FAILED";
     private static final String STATUS_TODO = "TODO";
 
     private SourceAwareMerge() {
+    }
+
+    /** @return true when a status is closed (DONE or FAILED) — the derived Complete checkbox (ADR-039). */
+    private static boolean isClosed(String status) {
+        return STATUS_DONE.equals(status) || STATUS_FAILED.equals(status);
     }
 
     /**
@@ -198,13 +204,16 @@ public final class SourceAwareMerge {
      * {@link NotionTaskInboundMapper#resolveStatus} is unchanged.
      */
     static String mergeStatus(String currentStatus, String statusName, Boolean complete) {
+        // Reopen is Complete-authoritative (core#51, extended to FAILED by ADR-039): once an item
+        // is closed the canonical reflection leaves Status=Done/Failed on its page, so clearing the
+        // Complete checkbox is the reliable reopen signal even though Status still reads closed. It
+        // drops to TODO here and DR-02 lifts a former DONE to IN_PROGRESS.
         if (Boolean.FALSE.equals(complete)
-            && STATUS_DONE.equals(currentStatus)
-            && (statusName == null
-                || STATUS_DONE.equals(NotionTaskInboundMapper.STATUS_FROM_NOTION.get(statusName)))) {
+            && isClosed(currentStatus)
+            && (statusName == null || isClosedNotionStatus(statusName))) {
             return STATUS_TODO;
         }
-        boolean completeProjection = STATUS_DONE.equals(currentStatus);
+        boolean completeProjection = isClosed(currentStatus);
         boolean completeMatches = complete == null || complete == completeProjection;
         boolean statusMatches = statusName == null
             || statusName.equals(NotionTaskMapper.mapStatus(currentStatus));
@@ -212,6 +221,12 @@ public final class SourceAwareMerge {
             return currentStatus;
         }
         return NotionTaskInboundMapper.resolveStatus(statusName, complete);
+    }
+
+    /** @return true when a Notion Status option maps to a closed domain status (Done or Failed). */
+    private static boolean isClosedNotionStatus(String statusName) {
+        String mapped = NotionTaskInboundMapper.STATUS_FROM_NOTION.get(statusName);
+        return STATUS_DONE.equals(mapped) || STATUS_FAILED.equals(mapped);
     }
 
     /** Applies a Notion type option; null or unknown options carry no information (never guessed). */

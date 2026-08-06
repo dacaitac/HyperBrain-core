@@ -5,11 +5,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.hyperbrain.core.application.TimeBlockSettlementService;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
-import com.hyperbrain.core.domain.model.TimeBlock;
-import com.hyperbrain.core.domain.model.TimeBlockOrigin;
-import com.hyperbrain.core.domain.model.TimeBlockStatus;
+import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockRepository;
+import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -34,7 +32,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verifyNoInteractions;
 
-@DisplayName("SingleFocusRule (DR-05 + DR-06)")
+@DisplayName("SingleFocusRule (DR-05 + DR-06, ADR-039 executable blocks)")
 class SingleFocusRuleTest {
 
     private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
@@ -43,7 +41,7 @@ class SingleFocusRuleTest {
     private static final UUID BLOCK_ID = UUID.fromString("cccccccc-0000-0000-0000-000000000003");
 
     private ExecutableStateRepository stateRepo;
-    private TimeBlockRepository timeBlockRepo;
+    private TimeBlockExecutableRepository timeBlockRepo;
     private TimeBlockSettlementService settlementService;
     private OutboxRepository outboxRepo;
     private SingleFocusRule rule;
@@ -51,7 +49,7 @@ class SingleFocusRuleTest {
     @BeforeEach
     void setUp() {
         stateRepo = mock(ExecutableStateRepository.class);
-        timeBlockRepo = mock(TimeBlockRepository.class);
+        timeBlockRepo = mock(TimeBlockExecutableRepository.class);
         settlementService = mock(TimeBlockSettlementService.class);
         outboxRepo = mock(OutboxRepository.class);
         rule = new SingleFocusRule(stateRepo, timeBlockRepo, settlementService, outboxRepo,
@@ -64,13 +62,13 @@ class SingleFocusRuleTest {
         ExecutableSnapshot merged = inProgress("TASK");
         FocusCandidate candidate = new FocusCandidate(
             CUT_ID, USER_ID, "Deep work", 3.5, true, 4, 3, 5, 120);
-        TimeBlock activeBlock = new TimeBlock(BLOCK_ID, CUT_ID,
+        TimeBlockExecutable activeBlock = new TimeBlockExecutable(BLOCK_ID, USER_ID, CUT_ID,
             OffsetDateTime.now().minusMinutes(45), null,
-            TimeBlockStatus.ACTIVE, TimeBlockOrigin.FOCUS, null, null, null, null);
+            TimeBlockExecutable.STATUS_IN_PROGRESS, TimeBlockExecutable.ORIGIN_FOCUS, null, null);
         when(stateRepo.isSystemGenerated(NEW_FOCUS_ID)).thenReturn(false);
         when(stateRepo.findActiveFocus(USER_ID, NEW_FOCUS_ID)).thenReturn(List.of(candidate));
-        when(timeBlockRepo.findActiveBlock(CUT_ID)).thenReturn(Optional.of(activeBlock));
-        when(timeBlockRepo.findActiveBlock(NEW_FOCUS_ID)).thenReturn(Optional.empty());
+        when(timeBlockRepo.findActiveBlockFor(CUT_ID)).thenReturn(Optional.of(activeBlock));
+        when(timeBlockRepo.findActiveBlockFor(NEW_FOCUS_ID)).thenReturn(Optional.empty());
         when(settlementService.settleOnFocusSwitch(eq(activeBlock), any()))
             .thenReturn(Optional.of(BLOCK_ID));
 
@@ -88,7 +86,7 @@ class SingleFocusRuleTest {
         assertThat(snapshot.mentalLoad()).isEqualTo(3);
         assertThat(snapshot.impact()).isEqualTo(5);
         assertThat(snapshot.estimatedMinutes()).isEqualTo(120);
-        assertThat(snapshot.windowStart()).isEqualTo(activeBlock.dateStart());
+        assertThat(snapshot.windowStart()).isEqualTo(activeBlock.startTime());
         assertThat(snapshot.description()).startsWith("[focus] ");
         verify(stateRepo).flagPendingReestimation(CUT_ID);
 
@@ -108,26 +106,28 @@ class SingleFocusRuleTest {
             .contains("\"new_executable_id\":\"" + NEW_FOCUS_ID + "\"")
             .contains("\"settled_block_id\":\"" + BLOCK_ID + "\"");
 
-        verify(timeBlockRepo).insert(any(TimeBlock.class));
+        verify(timeBlockRepo).insert(any(TimeBlockExecutable.class), eq("focus"));
     }
 
     @Test
-    @DisplayName("opens an ACTIVE/FOCUS block for the new focus when it has none")
+    @DisplayName("opens an IN_PROGRESS/FOCUS block executable for the new focus when it has none")
     void opens_focus_block_for_new_focus() {
         when(stateRepo.isSystemGenerated(NEW_FOCUS_ID)).thenReturn(false);
         when(stateRepo.findActiveFocus(USER_ID, NEW_FOCUS_ID)).thenReturn(List.of());
         when(stateRepo.findLegacyInProgress(USER_ID, NEW_FOCUS_ID)).thenReturn(List.of());
-        when(timeBlockRepo.findActiveBlock(NEW_FOCUS_ID)).thenReturn(Optional.empty());
+        when(timeBlockRepo.findActiveBlockFor(NEW_FOCUS_ID)).thenReturn(Optional.empty());
 
         rule.apply(todo("TASK"), inProgress("TASK"), ExternalSystem.NOTION);
 
-        ArgumentCaptor<TimeBlock> blockCaptor = ArgumentCaptor.forClass(TimeBlock.class);
-        verify(timeBlockRepo).insert(blockCaptor.capture());
-        TimeBlock block = blockCaptor.getValue();
-        assertThat(block.executableId()).isEqualTo(NEW_FOCUS_ID);
-        assertThat(block.status()).isEqualTo(TimeBlockStatus.ACTIVE);
-        assertThat(block.origin()).isEqualTo(TimeBlockOrigin.FOCUS);
-        assertThat(block.dateEnd()).isNull();
+        ArgumentCaptor<TimeBlockExecutable> blockCaptor =
+            ArgumentCaptor.forClass(TimeBlockExecutable.class);
+        verify(timeBlockRepo).insert(blockCaptor.capture(), eq("focus"));
+        TimeBlockExecutable block = blockCaptor.getValue();
+        assertThat(block.anchorTaskId()).isEqualTo(NEW_FOCUS_ID);
+        assertThat(block.userId()).isEqualTo(USER_ID);
+        assertThat(block.status()).isEqualTo(TimeBlockExecutable.STATUS_IN_PROGRESS);
+        assertThat(block.origin()).isEqualTo(TimeBlockExecutable.ORIGIN_FOCUS);
+        assertThat(block.endTime()).isNull();
     }
 
     @Test
@@ -139,7 +139,7 @@ class SingleFocusRuleTest {
 
         rule.apply(null, inProgress("TASK"), ExternalSystem.NOTION);
 
-        verify(timeBlockRepo, never()).insert(any());
+        verify(timeBlockRepo, never()).insert(any(), any());
     }
 
     @Test
@@ -150,8 +150,8 @@ class SingleFocusRuleTest {
         when(stateRepo.isSystemGenerated(NEW_FOCUS_ID)).thenReturn(false);
         when(stateRepo.findActiveFocus(USER_ID, NEW_FOCUS_ID)).thenReturn(List.of());
         when(stateRepo.findLegacyInProgress(USER_ID, NEW_FOCUS_ID)).thenReturn(List.of(legacy));
-        when(timeBlockRepo.findActiveBlock(CUT_ID)).thenReturn(Optional.empty());
-        when(timeBlockRepo.findActiveBlock(NEW_FOCUS_ID)).thenReturn(Optional.empty());
+        when(timeBlockRepo.findActiveBlockFor(CUT_ID)).thenReturn(Optional.empty());
+        when(timeBlockRepo.findActiveBlockFor(NEW_FOCUS_ID)).thenReturn(Optional.empty());
 
         rule.apply(todo("TASK"), inProgress("TASK"), ExternalSystem.NOTION);
 
@@ -177,6 +177,15 @@ class SingleFocusRuleTest {
     }
 
     @Test
+    @DisplayName("a TIME_BLOCK going IN_PROGRESS is focus accounting, never a focus that cuts")
+    void time_block_does_not_cut() {
+        ExecutableSnapshot result = rule.apply(null, inProgress("TIME_BLOCK"), ExternalSystem.NOTION);
+
+        assertThat(result.type()).isEqualTo("TIME_BLOCK");
+        verifyNoInteractions(stateRepo, timeBlockRepo, settlementService, outboxRepo);
+    }
+
+    @Test
     @DisplayName("no transition (already IN_PROGRESS) is a no-op")
     void already_in_progress_is_noop() {
         rule.apply(inProgress("TASK"), inProgress("TASK"), ExternalSystem.NOTION);
@@ -197,13 +206,13 @@ class SingleFocusRuleTest {
 
     private static ExecutableSnapshot inProgress(String type) {
         return ExecutableSnapshotBuilder.snapshot()
-            .id(NEW_FOCUS_ID).userId(USER_ID).type(type).status("IN_PROGRESS")
+            .id(NEW_FOCUS_ID).userId(USER_ID).name("focus").type(type).status("IN_PROGRESS")
             .build();
     }
 
     private static ExecutableSnapshot todo(String type) {
         return ExecutableSnapshotBuilder.snapshot()
-            .id(NEW_FOCUS_ID).userId(USER_ID).type(type).status("TODO")
+            .id(NEW_FOCUS_ID).userId(USER_ID).name("focus").type(type).status("TODO")
             .build();
     }
 }

@@ -96,17 +96,18 @@ class FocusAccountingIT {
     }
 
     @Test
-    @DisplayName("DR-05: activating a task auto-opens its ACTIVE/FOCUS block")
+    @DisplayName("DR-05 (ADR-039): activating a task auto-opens its IN_PROGRESS/FOCUS block executable")
     void activation_opens_focus_block() {
         String pageA = newPageId();
         activate(pageA, "Deep work", 3.5, "2026-07-08T10:00:00.000Z");
 
         UUID taskA = localId(pageA);
         Map<String, Object> block = jdbcTemplate.queryForMap(
-            "SELECT status, origin, date_end FROM core_time_block WHERE executable_id = ?", taskA);
-        assertThat(block.get("status")).isEqualTo("ACTIVE");
+            "SELECT status, origin, end_time FROM core_executable "
+                + "WHERE type = 'TIME_BLOCK' AND parent_id = ?", taskA);
+        assertThat(block.get("status")).isEqualTo("IN_PROGRESS");
         assertThat(block.get("origin")).isEqualTo("FOCUS");
-        assertThat(block.get("date_end")).isNull();
+        assertThat(block.get("end_time")).isNull();
     }
 
     @Test
@@ -131,12 +132,12 @@ class FocusAccountingIT {
         deliverAutomation(pageB, taskPage(pageB, "Urgent fix", "In progress", 1.0, null,
             "2026-07-08T11:00:00.000Z"));
 
-        // A's block settled by the cut
+        // A's block settled by the cut (ADR-039: DONE + last_completed_at, on the executable)
         Map<String, Object> blockA = jdbcTemplate.queryForMap(
-            "SELECT status, settled_at, actual_duration_minutes FROM core_time_block WHERE executable_id = ?",
-            taskA);
-        assertThat(blockA.get("status")).isEqualTo("SETTLED");
-        assertThat(blockA.get("settled_at")).isNotNull();
+            "SELECT status, last_completed_at, actual_duration_minutes FROM core_executable "
+                + "WHERE type = 'TIME_BLOCK' AND parent_id = ?", taskA);
+        assertThat(blockA.get("status")).isEqualTo("DONE");
+        assertThat(blockA.get("last_completed_at")).isNotNull();
         assertThat(blockA.get("actual_duration_minutes")).isNotNull();
 
         // Snapshot subtask frozen under A with the original labels
@@ -166,10 +167,11 @@ class FocusAccountingIT {
         assertThat(profileA.get("mental_load")).isEqualTo(3);
         assertThat(profileA.get("impact")).isEqualTo(5);
 
-        // B took the focus with its own ACTIVE/FOCUS block
+        // B took the focus with its own IN_PROGRESS/FOCUS block executable
         String blockBStatus = jdbcTemplate.queryForObject(
-            "SELECT status FROM core_time_block WHERE executable_id = ?", String.class, taskB);
-        assertThat(blockBStatus).isEqualTo("ACTIVE");
+            "SELECT status FROM core_executable WHERE type = 'TIME_BLOCK' AND parent_id = ?",
+            String.class, taskB);
+        assertThat(blockBStatus).isEqualTo("IN_PROGRESS");
 
         // Outbox: SYSTEM-originated snapshot mirror, preserved-state mirror, focus event, settlement,
         // and the canonical write-back reflection for B's ingestion (always staged for NOTION origin
@@ -275,10 +277,10 @@ class FocusAccountingIT {
             "SELECT progress FROM core_executable WHERE id = ?", parent);
         assertThat(parentRow.get("progress")).isEqualTo(1.0);
         Map<String, Object> subtaskRow = jdbcTemplate.queryForMap(
-            "SELECT last_completed_at, imputed_time_block_id FROM core_executable WHERE id = ?", subtask);
+            "SELECT last_completed_at, imputed_block_id FROM core_executable WHERE id = ?", subtask);
         assertThat(subtaskRow.get("last_completed_at")).isNotNull();
         // The parent was never the focus: unplanned work, no imputation
-        assertThat(subtaskRow.get("imputed_time_block_id")).isNull();
+        assertThat(subtaskRow.get("imputed_block_id")).isNull();
         Integer events = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events WHERE event_type = 'SubtaskCompletedEvent'",
             Integer.class);
@@ -286,7 +288,7 @@ class FocusAccountingIT {
     }
 
     @Test
-    @DisplayName("DR-08: the expiry sweep settles due blocks as EXPIRED and imputes the window")
+    @DisplayName("DR-08 (ADR-039): the expiry sweep settles due TIME_BLOCK executables as FAILED and imputes the window")
     void expiry_settles_due_blocks_and_imputes() {
         String parentPage = newPageId();
         String subtaskPage = newPageId();
@@ -297,32 +299,38 @@ class FocusAccountingIT {
             "2026-07-08T10:01:00.000Z"));
         UUID subtask = localId(subtaskPage);
 
-        // A planned block whose window already passed, covering the subtask completion
+        // A TIME_BLOCK executable whose window already passed, containing the parent task, so the
+        // completed subtask of that parent falls inside the settlement window.
+        UUID userId = jdbcTemplate.queryForObject(
+            "SELECT user_id FROM core_executable WHERE id = ?", UUID.class, parent);
         UUID blockId = UUID.randomUUID();
         OffsetDateTime start = OffsetDateTime.now().minusHours(2);
         OffsetDateTime end = OffsetDateTime.now().minusHours(1);
         jdbcTemplate.update("""
-            INSERT INTO core_time_block (id, executable_id, date_start, date_end, status, origin, planned_minutes)
-            VALUES (?, ?, ?, ?, 'ACTIVE', 'PLANNER', 60)
-            """, blockId, parent, start, end);
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time, system_generated)
+            VALUES (?, ?, 'Morning block', 'TIME_BLOCK', 'IN_PROGRESS', 'PLANNER', ?, ?, false)
+            """, blockId, userId, start, end);
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ? WHERE id = ?", blockId, parent);
         deliverAutomation(subtaskPage, completedTaskPage(subtaskPage, "Step 1", parentPage,
             "2026-07-08T10:30:00.000Z"));
         // Force the completion clock inside the block window (the rule stamped "now")
         jdbcTemplate.update(
-            "UPDATE core_executable SET last_completed_at = ?, imputed_time_block_id = NULL WHERE id = ?",
+            "UPDATE core_executable SET last_completed_at = ?, imputed_block_id = NULL WHERE id = ?",
             start.plusMinutes(30), subtask);
 
         int settled = settlementService.expireDueBlocks(OffsetDateTime.now());
 
         assertThat(settled).isEqualTo(1);
         Map<String, Object> block = jdbcTemplate.queryForMap(
-            "SELECT status, actual_duration_minutes, settled_at FROM core_time_block WHERE id = ?",
+            "SELECT status, actual_duration_minutes, last_completed_at FROM core_executable WHERE id = ?",
             blockId);
-        assertThat(block.get("status")).isEqualTo("EXPIRED");
+        assertThat(block.get("status")).isEqualTo("FAILED");
         assertThat(block.get("actual_duration_minutes")).isEqualTo(60);
-        assertThat(block.get("settled_at")).isNotNull();
+        assertThat(block.get("last_completed_at")).isNotNull();
         UUID imputed = jdbcTemplate.queryForObject(
-            "SELECT imputed_time_block_id FROM core_executable WHERE id = ?", UUID.class, subtask);
+            "SELECT imputed_block_id FROM core_executable WHERE id = ?", UUID.class, subtask);
         assertThat(imputed).isEqualTo(blockId);
         Integer events = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events WHERE event_type = 'TimeBlockSettledEvent'",

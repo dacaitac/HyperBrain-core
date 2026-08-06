@@ -1,6 +1,8 @@
 package com.hyperbrain.core.application;
 
+import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
+import com.hyperbrain.core.application.rule.ContainmentCopyRule;
 import com.hyperbrain.core.application.rule.DomainRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
@@ -42,17 +44,25 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
     public CoreDomainChangeProcessor(
         EndTimeInvariantRule endTimeInvariantRule,
         CompletionReactivationRule completionReactivationRule,
+        ContainmentCopyRule containmentCopyRule,
         SingleFocusRule singleFocusRule,
         ReestimationConfirmationRule reestimationConfirmationRule,
         ProgressRecalculationRule progressRecalculationRule,
+        CompletionOutcomeRule completionOutcomeRule,
         RecurrenceCloneRule recurrenceCloneRule
     ) {
+        // ADR-039 order notes: the hard-copy rule runs right after DR-01 (so the child schedule
+        // it asserts is already end_time-normalized) and before the focus/progress rules; the
+        // completion-outcome rule (clock + streak) runs before DR-04 cloning so the clone copies
+        // the already-updated streak (never-miss-twice on any terminal).
         this.rules = List.of(
             endTimeInvariantRule,
             completionReactivationRule,
+            containmentCopyRule,
             singleFocusRule,
             reestimationConfirmationRule,
             progressRecalculationRule,
+            completionOutcomeRule,
             recurrenceCloneRule);
     }
 

@@ -193,16 +193,30 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("either signal completes: checkbox or Status=Done moves any status to DONE (Option B)")
-        void complete_checkbox_or_status_rules() {
-            // Checking the Complete checkbox always completes
-            assertThat(SourceAwareMerge.mergeStatus("IN_PROGRESS", "In progress", true)).isEqualTo("DONE");
-            // Setting Status=Done completes even with the checkbox still off (bug #2 fix)
+        @DisplayName("ADR-039: Status=Failed is first-class; Option B otherwise (the box completes to DONE)")
+        void status_first_completion_rules() {
+            // A checked box still completes a non-Failed row (Option B unchanged)
+            assertThat(SourceAwareMerge.mergeStatus("TODO", "In progress", true)).isEqualTo("DONE");
+            // Status=Failed is first-class and reached from any open status, never collapsed to DONE
+            assertThat(SourceAwareMerge.mergeStatus("IN_PROGRESS", "Failed", true)).isEqualTo("FAILED");
+            assertThat(SourceAwareMerge.mergeStatus("IN_PROGRESS", "Failed", false)).isEqualTo("FAILED");
+            // Setting Status=Done completes even with the checkbox still off
             assertThat(SourceAwareMerge.mergeStatus("IN_PROGRESS", "Done", false)).isEqualTo("DONE");
             assertThat(SourceAwareMerge.mergeStatus("TODO", "Done", false)).isEqualTo("DONE");
+            // The checkbox alone completes a Not-started row (Option B tie-break)
+            assertThat(SourceAwareMerge.mergeStatus("TODO", "Not started", true)).isEqualTo("DONE");
             // A null option carries no information and never regresses on its own
             assertThat(SourceAwareMerge.mergeStatus("WAITING", "Not started", false)).isEqualTo("WAITING");
             assertThat(SourceAwareMerge.mergeStatus("PLANNED", null, null)).isEqualTo("PLANNED");
+        }
+
+        @Test
+        @DisplayName("ADR-039: unchecking the box re-opens a FAILED row (extends the Complete-authoritative reopen)")
+        void uncompletion_reopens_failed() {
+            // A FAILED row projects Complete=true; clearing the box re-opens it to TODO.
+            assertThat(SourceAwareMerge.mergeStatus("FAILED", "Failed", false)).isEqualTo("TODO");
+            // An echo of a failed row (Status=Failed + checked) is a no-op that keeps FAILED
+            assertThat(SourceAwareMerge.mergeStatus("FAILED", "Failed", true)).isEqualTo("FAILED");
         }
 
         @Test

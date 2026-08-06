@@ -6,11 +6,9 @@ import com.hyperbrain.core.application.TimeBlockSettlementService;
 import com.hyperbrain.core.application.event.FocusSwitchedPayload;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
-import com.hyperbrain.core.domain.model.TimeBlock;
-import com.hyperbrain.core.domain.model.TimeBlockOrigin;
-import com.hyperbrain.core.domain.model.TimeBlockStatus;
+import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockRepository;
+import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -56,18 +54,19 @@ public class SingleFocusRule implements DomainRule {
 
     private static final String IN_PROGRESS = "IN_PROGRESS";
     private static final String AGENDA = "AGENDA";
+    private static final String TIME_BLOCK = "TIME_BLOCK";
     private static final String EXECUTABLE_AGGREGATE = "CORE_EXECUTABLE";
     private static final String SOURCE_SYSTEM = "SYSTEM";
 
     private final ExecutableStateRepository stateRepo;
-    private final TimeBlockRepository timeBlockRepo;
+    private final TimeBlockExecutableRepository timeBlockRepo;
     private final TimeBlockSettlementService settlementService;
     private final OutboxRepository outboxRepo;
     private final ObjectMapper objectMapper;
 
     public SingleFocusRule(
         ExecutableStateRepository stateRepo,
-        TimeBlockRepository timeBlockRepo,
+        TimeBlockExecutableRepository timeBlockRepo,
         TimeBlockSettlementService settlementService,
         OutboxRepository outboxRepo,
         ObjectMapper objectMapper
@@ -95,20 +94,22 @@ public class SingleFocusRule implements DomainRule {
         // exist yet, so its FOCUS block would violate the FK. A task born IN_PROGRESS opens
         // its block on its next activation; the cut of the previous focus still applies.
         if (previous != null) {
-            openFocusBlock(merged.id(), now);
+            openFocusBlock(merged, now);
         }
         return merged;
     }
 
     private static boolean becomesFocus(ExecutableSnapshot previous, ExecutableSnapshot merged) {
+        // A TIME_BLOCK going IN_PROGRESS is focus *accounting*, never a focus that cuts (ADR-039).
         return IN_PROGRESS.equals(merged.status())
             && !AGENDA.equals(merged.type())
+            && !TIME_BLOCK.equals(merged.type())
             && (previous == null || !IN_PROGRESS.equals(previous.status()));
     }
 
     private void cut(FocusCandidate candidate, UUID newFocusId, OffsetDateTime now) {
-        Optional<TimeBlock> activeBlock = timeBlockRepo.findActiveBlock(candidate.id());
-        OffsetDateTime windowStart = activeBlock.map(TimeBlock::dateStart).orElse(now);
+        Optional<TimeBlockExecutable> activeBlock = timeBlockRepo.findActiveBlockFor(candidate.id());
+        OffsetDateTime windowStart = activeBlock.map(TimeBlockExecutable::startTime).orElse(now);
         UUID settledBlockId = activeBlock
             .flatMap(block -> settlementService.settleOnFocusSwitch(block, now))
             .orElse(null);
@@ -130,14 +131,21 @@ public class SingleFocusRule implements DomainRule {
             candidate.id(), newFocusId, snapshot.id(), settledBlockId);
     }
 
-    private void openFocusBlock(UUID executableId, OffsetDateTime now) {
-        if (timeBlockRepo.findActiveBlock(executableId).isPresent()) {
+    /**
+     * Auto-opens the {@code IN_PROGRESS}/{@code FOCUS} accounting block for the new focus
+     * (ADR-039): a {@code TIME_BLOCK} executable riding under the task via {@code parent_id},
+     * open-ended ({@code end_time = null}, settled by the next focus switch, never by expiry)
+     * and excluded from every mirror by its origin. No outbox event is staged: FOCUS blocks
+     * are internal accounting.
+     */
+    private void openFocusBlock(ExecutableSnapshot focus, OffsetDateTime now) {
+        if (timeBlockRepo.findActiveBlockFor(focus.id()).isPresent()) {
             return;
         }
-        timeBlockRepo.insert(new TimeBlock(
-            UUID.randomUUID(), executableId, now, null,
-            TimeBlockStatus.ACTIVE, TimeBlockOrigin.FOCUS,
-            null, null, null, now));
+        timeBlockRepo.insert(new TimeBlockExecutable(
+            UUID.randomUUID(), focus.userId(), focus.id(), now, null,
+            TimeBlockExecutable.STATUS_IN_PROGRESS, TimeBlockExecutable.ORIGIN_FOCUS,
+            null, null), focus.name());
     }
 
     private static SnapshotSubtask buildSnapshot(FocusCandidate candidate,

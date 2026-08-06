@@ -3,11 +3,9 @@ package com.hyperbrain.core.application.rule;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
-import com.hyperbrain.core.domain.model.TimeBlock;
-import com.hyperbrain.core.domain.model.TimeBlockOrigin;
-import com.hyperbrain.core.domain.model.TimeBlockStatus;
+import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockRepository;
+import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -24,47 +22,46 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-@DisplayName("ProgressRecalculationRule (DR-07)")
+@DisplayName("ProgressRecalculationRule (DR-07, ADR-039 executable blocks)")
 class ProgressRecalculationRuleTest {
 
     private static final UUID PARENT_ID = UUID.fromString("aaaaaaaa-0000-0000-0000-000000000010");
     private static final UUID SUBTASK_ID = UUID.fromString("bbbbbbbb-0000-0000-0000-000000000020");
     private static final UUID BLOCK_ID = UUID.fromString("cccccccc-0000-0000-0000-000000000030");
+    private static final UUID USER_ID = UUID.fromString("dddddddd-0000-0000-0000-000000000040");
 
     private ExecutableStateRepository stateRepo;
-    private TimeBlockRepository timeBlockRepo;
+    private TimeBlockExecutableRepository timeBlockRepo;
     private OutboxRepository outboxRepo;
     private ProgressRecalculationRule rule;
 
     @BeforeEach
     void setUp() {
         stateRepo = mock(ExecutableStateRepository.class);
-        timeBlockRepo = mock(TimeBlockRepository.class);
+        timeBlockRepo = mock(TimeBlockExecutableRepository.class);
         outboxRepo = mock(OutboxRepository.class);
         rule = new ProgressRecalculationRule(stateRepo, timeBlockRepo, outboxRepo,
             new ObjectMapper().registerModule(new JavaTimeModule()));
     }
 
     @Test
-    @DisplayName("subtask completed: recomputes parent progress, stamps completion, imputes to the covering block and emits the event")
+    @DisplayName("subtask completed: recomputes parent progress, imputes to the covering block and emits the event")
     void completion_recalculates_and_imputes() {
         ExecutableSnapshot merged = subtask("DONE");
         when(stateRepo.isSystemGenerated(SUBTASK_ID)).thenReturn(false);
         when(stateRepo.countUserSubtasks(PARENT_ID, SUBTASK_ID))
             .thenReturn(new SubtaskCounts(3, 2));
-        when(timeBlockRepo.findActiveBlock(PARENT_ID)).thenReturn(Optional.of(activeBlock()));
+        when(timeBlockRepo.findActiveBlockFor(PARENT_ID)).thenReturn(Optional.of(activeBlock()));
 
         rule.apply(subtask("TODO"), merged, ExternalSystem.NOTION);
 
         verify(stateRepo).updateProgress(PARENT_ID, 0.75);
-        verify(stateRepo).markCompleted(eq(SUBTASK_ID), any(OffsetDateTime.class));
         verify(stateRepo).imputeToBlock(SUBTASK_ID, BLOCK_ID);
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo).append(captor.capture());
@@ -85,7 +82,7 @@ class ProgressRecalculationRuleTest {
         when(stateRepo.isSystemGenerated(SUBTASK_ID)).thenReturn(false);
         when(stateRepo.countUserSubtasks(PARENT_ID, SUBTASK_ID))
             .thenReturn(new SubtaskCounts(0, 0));
-        when(timeBlockRepo.findActiveBlock(PARENT_ID)).thenReturn(Optional.empty());
+        when(timeBlockRepo.findActiveBlockFor(PARENT_ID)).thenReturn(Optional.empty());
 
         rule.apply(subtask("TODO"), merged, ExternalSystem.NOTION);
 
@@ -108,7 +105,6 @@ class ProgressRecalculationRuleTest {
 
         verify(stateRepo).updateProgress(PARENT_ID, 1.0 / 3);
         verify(stateRepo).clearImputation(SUBTASK_ID);
-        verify(stateRepo, never()).markCompleted(any(), any());
         verifyNoInteractions(outboxRepo);
     }
 
@@ -147,8 +143,9 @@ class ProgressRecalculationRuleTest {
             .build();
     }
 
-    private static TimeBlock activeBlock() {
-        return new TimeBlock(BLOCK_ID, PARENT_ID, OffsetDateTime.now().minusMinutes(30), null,
-            TimeBlockStatus.ACTIVE, TimeBlockOrigin.FOCUS, null, null, null, null);
+    private static TimeBlockExecutable activeBlock() {
+        return new TimeBlockExecutable(BLOCK_ID, USER_ID, PARENT_ID,
+            OffsetDateTime.now().minusMinutes(30), null,
+            TimeBlockExecutable.STATUS_IN_PROGRESS, TimeBlockExecutable.ORIGIN_FOCUS, null, null);
     }
 }

@@ -60,9 +60,6 @@ public class NotionTaskSyncService {
     private static final String EXTERNAL_SYSTEM = "NOTION";
     private static final String STATUS_SYNCED = "SYNCED";
     private static final String AGGREGATE_TYPE = "CORE_EXECUTABLE";
-    private static final String STATUS_DONE = "DONE";
-    // Notion "status" option that represents completion — mirrors NotionTaskMapper.STATUS_TO_NOTION.
-    private static final String NOTION_STATUS_DONE = "Done";
 
     private final CoreExecutableRepository executableRepo;
     private final SyncSnapshotRepository snapshotRepo;
@@ -169,9 +166,14 @@ public class NotionTaskSyncService {
         // row — i.e. the user toggled the Complete checkbox (or Status) and the derived DONE-ness no
         // longer matches what the page shows. Restricting it to that case keeps a burst of free-text
         // edits from ever re-writing the human-owned Complete checkbox; otherwise it is score-only.
-        boolean canonicalDone = STATUS_DONE.equals(snapshot.status());
-        boolean completionOutOfSync = canonicalDone != NOTION_STATUS_DONE.equals(page.statusName())
-            || canonicalDone != Boolean.TRUE.equals(page.complete());
+        // ADR-039: the derived Complete checkbox mirrors isClosed (DONE or FAILED), and the
+        // Status option must match the exact canonical projection (Done/Failed distinct). Either
+        // drift re-asserts Status + Complete onto the page (CANONICAL_STATE reflection).
+        boolean canonicalClosed = NotionTaskMapper.isClosed(snapshot.status());
+        String canonicalStatusName = NotionTaskMapper.mapStatus(snapshot.status());
+        boolean completionOutOfSync =
+            !canonicalStatusName.equals(page.statusName())
+            || canonicalClosed != Boolean.TRUE.equals(page.complete());
         priorityReflector.reflect(localId, ExternalSystem.NOTION, completionOutOfSync);
         log.info("TASK page {} ({}) persisted as executable {}", page.pageId(), operation, localId);
         return operation == Operation.CREATED ? SyncOutcome.CREATED : SyncOutcome.UPDATED;

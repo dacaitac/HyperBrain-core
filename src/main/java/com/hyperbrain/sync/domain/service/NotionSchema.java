@@ -38,17 +38,10 @@ public final class NotionSchema {
     // Self-relation of the Cycles DB (ADR-015 horizon ladder): points to the parent cycle.
     public static final String PROP_PARENT_CYCLE = "Cycle Parent (Objective)";
 
-    // ── Time Blocks DB (ADR-038) ──────────────────────────────────────────────
-    public static final String PROP_ORIGIN = "Origin";
-    public static final String PROP_PLANNED_MINUTES = "Planned Minutes";
-    public static final String PROP_ACTUAL_MINUTES = "Actual Minutes";
-    public static final String PROP_AGENDA = "Agenda";
-    public static final String PROP_REASON = "Reason";
-    public static final String PROP_SYNC_NOTE = "Sync Note";
-    // Dual relation Time Blocks → Tasks; its synced twin on the Tasks DB is "Time Blocks".
-    public static final String PROP_TASKS = "Tasks";
-    // The Tasks-side synced property of the dual relation: block-side is the only writer.
-    public static final String PROP_TIME_BLOCKS = "Time Blocks";
+    // ── Time Blocks (ADR-039: a Type value inside the Tasks DB, no longer a separate DB) ──
+    // Self-relation of the Tasks DB (Option B 1:N containment): a contained executable points at
+    // the Time Block executable that holds it. Its synced twin is "Contained Tasks".
+    public static final String PROP_CONTAINER_BLOCK = "Container Block";
 
     // ── Canonical select options (1-based domain scale ↔ option index) ────────
     // Shared by the outbound (HU-10) and inbound (HU-14) mappers so both directions
@@ -69,9 +62,9 @@ public final class NotionSchema {
     public static final Set<String> READ_ONLY_PROPERTIES = Set.of(
         "Costo", "Theme Priority",          // Tasks
         "Presupuestado", "Ejecutado",       // Cycles
-        // Time Blocks (ADR-038): Cycles is a rollup via Tasks → Cycle; Time Blocks is the
-        // Tasks-side synced twin of the dual relation — only the block side is ever written.
-        "Cycles", PROP_TIME_BLOCKS);
+        // ADR-039 containment self-relation twin: the block side ("Container Block") is the only
+        // writer; the members-side synced property is read-only.
+        "Contained Tasks");
 
     /**
      * Asserts that a property map produced by a mapper contains no read-only property.

@@ -2,11 +2,9 @@ package com.hyperbrain.core.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.hyperbrain.core.domain.model.TimeBlock;
-import com.hyperbrain.core.domain.model.TimeBlockOrigin;
-import com.hyperbrain.core.domain.model.TimeBlockStatus;
+import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockRepository;
+import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,22 +26,23 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@DisplayName("TimeBlockSettlementService (DR-08)")
+@DisplayName("TimeBlockSettlementService (DR-08, ADR-039 executable model)")
 class TimeBlockSettlementServiceTest {
 
     private static final UUID BLOCK_ID = UUID.fromString("cccccccc-0000-0000-0000-000000000001");
-    private static final UUID EXECUTABLE_ID = UUID.fromString("dddddddd-0000-0000-0000-000000000002");
+    private static final UUID TASK_ID = UUID.fromString("dddddddd-0000-0000-0000-000000000002");
+    private static final UUID USER_ID = UUID.fromString("eeeeeeee-0000-0000-0000-000000000003");
     private static final OffsetDateTime START =
         OffsetDateTime.of(2026, 7, 8, 14, 0, 0, 0, ZoneOffset.UTC);
 
-    private TimeBlockRepository timeBlockRepo;
+    private TimeBlockExecutableRepository timeBlockRepo;
     private ExecutableStateRepository stateRepo;
     private OutboxRepository outboxRepo;
     private TimeBlockSettlementService service;
 
     @BeforeEach
     void setUp() {
-        timeBlockRepo = mock(TimeBlockRepository.class);
+        timeBlockRepo = mock(TimeBlockExecutableRepository.class);
         stateRepo = mock(ExecutableStateRepository.class);
         outboxRepo = mock(OutboxRepository.class);
         service = new TimeBlockSettlementService(timeBlockRepo, stateRepo, outboxRepo,
@@ -51,14 +50,13 @@ class TimeBlockSettlementServiceTest {
     }
 
     @Test
-    @DisplayName("focus switch settles the block as SETTLED with gross minutes, imputes the window and emits the event")
+    @DisplayName("focus switch settles the block as DONE with gross minutes, imputes the window and emits the event")
     void focus_switch_settles_block() {
-        TimeBlock block = block(TimeBlockStatus.ACTIVE, null);
+        TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_IN_PROGRESS, null);
         OffsetDateTime cutAt = START.plusMinutes(45);
-        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockStatus.SETTLED), eq(45), any()))
+        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_DONE), eq(45), any()))
             .thenReturn(true);
-        when(stateRepo.imputeCompletedSubtasks(BLOCK_ID, EXECUTABLE_ID, START, cutAt))
-            .thenReturn(2);
+        when(stateRepo.imputeCompletedSubtasks(BLOCK_ID, START, cutAt)).thenReturn(2);
 
         Optional<UUID> settled = service.settleOnFocusSwitch(block, cutAt);
 
@@ -70,7 +68,7 @@ class TimeBlockSettlementServiceTest {
         assertThat(event.aggregateType()).isEqualTo("CORE_TIME_BLOCK");
         assertThat(event.sourceSystem()).isEqualTo("SYSTEM");
         assertThat(event.payload())
-            .contains("\"final_status\":\"SETTLED\"")
+            .contains("\"final_status\":\"DONE\"")
             .contains("\"actual_duration_minutes\":45")
             .contains("\"imputed_subtask_count\":2");
     }
@@ -78,53 +76,54 @@ class TimeBlockSettlementServiceTest {
     @Test
     @DisplayName("a lost settlement race neither imputes nor emits")
     void lost_race_is_a_noop() {
-        TimeBlock block = block(TimeBlockStatus.ACTIVE, null);
+        TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_IN_PROGRESS, null);
         when(timeBlockRepo.settle(any(), any(), any(), any())).thenReturn(false);
 
         Optional<UUID> settled = service.settleOnFocusSwitch(block, START.plusMinutes(10));
 
         assertThat(settled).isEmpty();
-        verify(stateRepo, never()).imputeCompletedSubtasks(any(), any(), any(), any());
+        verify(stateRepo, never()).imputeCompletedSubtasks(any(), any(), any());
         verify(outboxRepo, never()).append(any());
     }
 
     @Test
-    @DisplayName("expiry settles ACTIVE blocks as EXPIRED with the planned window as actual")
+    @DisplayName("expiry settles IN_PROGRESS blocks as FAILED with the planned window as actual")
     void expiry_settles_active_block() {
         OffsetDateTime end = START.plusMinutes(60);
-        TimeBlock block = block(TimeBlockStatus.ACTIVE, end);
+        TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_IN_PROGRESS, end);
         when(timeBlockRepo.lockOpenExpired(any())).thenReturn(List.of(block));
-        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockStatus.EXPIRED), eq(60), any()))
+        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_FAILED), eq(60), any()))
             .thenReturn(true);
-        when(stateRepo.imputeCompletedSubtasks(BLOCK_ID, EXECUTABLE_ID, START, end))
-            .thenReturn(0);
+        when(stateRepo.imputeCompletedSubtasks(BLOCK_ID, START, end)).thenReturn(0);
 
         int settled = service.expireDueBlocks(end.plusMinutes(5));
 
         assertThat(settled).isEqualTo(1);
-        verify(stateRepo).imputeCompletedSubtasks(BLOCK_ID, EXECUTABLE_ID, START, end);
+        verify(stateRepo).imputeCompletedSubtasks(BLOCK_ID, START, end);
     }
 
     @Test
-    @DisplayName("expiry settles never-executed PLANNED blocks with a null actual duration")
+    @DisplayName("expiry settles never-executed PLANNED blocks as FAILED with a null actual duration")
     void expiry_settles_planned_block_with_null_actual() {
         OffsetDateTime end = START.plusMinutes(30);
-        TimeBlock block = block(TimeBlockStatus.PLANNED, end);
+        TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_PLANNED, end);
         when(timeBlockRepo.lockOpenExpired(any())).thenReturn(List.of(block));
-        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockStatus.EXPIRED), eq((Integer) null), any()))
-            .thenReturn(true);
-        when(stateRepo.imputeCompletedSubtasks(any(), any(), any(), any())).thenReturn(0);
+        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_FAILED),
+            eq((Integer) null), any())).thenReturn(true);
+        when(stateRepo.imputeCompletedSubtasks(any(), any(), any())).thenReturn(0);
 
         int settled = service.expireDueBlocks(end.plusHours(1));
 
         assertThat(settled).isEqualTo(1);
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo).append(captor.capture());
-        assertThat(captor.getValue().payload()).contains("\"actual_duration_minutes\":null");
+        assertThat(captor.getValue().payload())
+            .contains("\"actual_duration_minutes\":null")
+            .contains("\"final_status\":\"FAILED\"");
     }
 
-    private static TimeBlock block(TimeBlockStatus status, OffsetDateTime dateEnd) {
-        return new TimeBlock(BLOCK_ID, EXECUTABLE_ID, START, dateEnd,
-            status, TimeBlockOrigin.FOCUS, null, null, null, START);
+    private static TimeBlockExecutable block(String status, OffsetDateTime endTime) {
+        return new TimeBlockExecutable(BLOCK_ID, USER_ID, TASK_ID, START, endTime,
+            status, TimeBlockExecutable.ORIGIN_FOCUS, null, null);
     }
 }

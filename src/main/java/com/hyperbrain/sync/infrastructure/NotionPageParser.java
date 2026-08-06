@@ -4,14 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.hyperbrain.sync.domain.model.NotionCyclePage;
 import com.hyperbrain.sync.domain.model.NotionPageEditState;
 import com.hyperbrain.sync.domain.model.NotionTaskPage;
-import com.hyperbrain.sync.domain.model.NotionTimeBlockPage;
 import com.hyperbrain.sync.domain.service.NotionSchema;
 import org.springframework.stereotype.Component;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 
 /**
@@ -72,33 +69,6 @@ public class NotionPageParser {
             dateBound(props.path(NotionSchema.PROP_DATE), "end"),
             checkbox(props.path(NotionSchema.PROP_INACTIVE)),
             firstRelationId(props.path(NotionSchema.PROP_PARENT_CYCLE)));
-    }
-
-    /**
-     * Parses a Time Blocks database page (ADR-038). The {@code Tasks} relation keeps every id
-     * plus Notion's {@code has_more} flag: a truncated relation (Notion caps embedded relation
-     * arrays at 25) must never be interpreted as the full membership.
-     *
-     * @param page the raw page object ({@code object=page})
-     * @return the property-level view
-     */
-    public NotionTimeBlockPage parseTimeBlock(JsonNode page) {
-        JsonNode props = page.path("properties");
-        JsonNode tasks = props.path(NotionSchema.PROP_TASKS);
-        return new NotionTimeBlockPage(
-            normalizeId(page.path("id").asText(null)),
-            parseTimestamp(page.path("last_edited_time").asText(null)),
-            isArchived(page),
-            text(props.path(NotionSchema.PROP_NAME)),
-            dateBound(props.path(NotionSchema.PROP_DATE), "start"),
-            dateBound(props.path(NotionSchema.PROP_DATE), "end"),
-            optionName(props.path(NotionSchema.PROP_STATUS), "select"),
-            optionName(props.path(NotionSchema.PROP_ORIGIN), "select"),
-            number(props.path(NotionSchema.PROP_PLANNED_MINUTES)),
-            number(props.path(NotionSchema.PROP_ACTUAL_MINUTES)),
-            allRelationIds(tasks),
-            tasks.path("has_more").asBoolean(false),
-            text(props.path(NotionSchema.PROP_SYNC_NOTE)));
     }
 
     /**
@@ -167,21 +137,6 @@ public class NotionPageParser {
             return null;
         }
         return normalizeId(relations.get(0).path("id").asText(null));
-    }
-
-    private static List<String> allRelationIds(JsonNode property) {
-        JsonNode relations = property.path("relation");
-        if (!relations.isArray()) {
-            return List.of();
-        }
-        List<String> ids = new ArrayList<>(relations.size());
-        for (JsonNode relation : relations) {
-            String id = normalizeId(relation.path("id").asText(null));
-            if (id != null && !id.isBlank()) {
-                ids.add(id);
-            }
-        }
-        return ids;
     }
 
     private static OffsetDateTime parseTimestamp(String value) {

@@ -52,14 +52,16 @@ public final class NotionTaskInboundMapper {
         "Done", "DONE",
         "Failed", "FAILED");
 
-    static final Map<String, String> TYPE_FROM_NOTION = Map.of(
-        "Task", "TASK",
-        "Habit", "HABIT",
-        "Lead Measure", "LEAD_MEASURE",
-        "Activity", "ACTIVITY",
-        "Agenda", "AGENDA",
-        "Learning Session", "LEARNING_SESSION",
-        "Buying", "BUYING");
+    static final Map<String, String> TYPE_FROM_NOTION = Map.ofEntries(
+        Map.entry("Task", "TASK"),
+        Map.entry("Habit", "HABIT"),
+        Map.entry("Lead Measure", "LEAD_MEASURE"),
+        Map.entry("Activity", "ACTIVITY"),
+        Map.entry("Agenda", "AGENDA"),
+        Map.entry("Learning Session", "LEARNING_SESSION"),
+        Map.entry("Buying", "BUYING"),
+        // ADR-039: TIME_BLOCK lives in the Tasks DB as a Type option.
+        Map.entry("Time Block", "TIME_BLOCK"));
 
     private NotionTaskInboundMapper() {
     }
@@ -105,20 +107,25 @@ public final class NotionTaskInboundMapper {
     }
 
     /**
-     * Resolves the domain status under the "either signal completes" policy (Option B): the
-     * Tasks database carries two independent completion signals — the {@code Complete} checkbox
-     * and the {@code Status} status property (complete group). The executable is {@code DONE}
-     * when {@code Complete} is checked <b>or</b> {@code Status} is {@code Done}; otherwise the
+     * Resolves the domain status under the ADR-039 <b>Status-first for FAILED</b> policy (E1):
+     * an explicit {@code Status = Failed} is <b>first-class</b> and is never collapsed to
+     * {@code DONE} — the sanctioned-miss terminal wins over the {@code Complete} checkbox. For
+     * every other case the Option-B "either signal completes" rule is unchanged: a checked
+     * {@code Complete} box (or {@code Status = Done}) completes to {@code DONE}, otherwise the
      * {@code Status} option maps directly ({@code In progress} → {@code IN_PROGRESS},
-     * {@code Failed} → {@code FAILED}, {@code Not started}/unknown/null → {@code TODO}).
-     * Uncompleting therefore requires <b>both</b> signals to be non-completed — completing or
-     * re-opening the task from either side converges on the same domain status.
+     * {@code Not started}/unknown/null → {@code TODO}). Uncompleting is handled upstream by
+     * {@link SourceAwareMerge#mergeStatus} (Complete-authoritative reopen, extended to FAILED).
      */
     static String resolveStatus(String statusName, Boolean complete) {
+        String mapped = statusName != null ? STATUS_FROM_NOTION.get(statusName) : null;
+        // FAILED is first-class (ADR-039): an explicit Failed is never overridden by the checkbox.
+        if ("FAILED".equals(mapped)) {
+            return "FAILED";
+        }
+        // Option B: the checkbox (or Status=Done) completes to DONE for any non-Failed row.
         if (Boolean.TRUE.equals(complete)) {
             return "DONE";
         }
-        String mapped = statusName != null ? STATUS_FROM_NOTION.get(statusName) : null;
         return mapped != null ? mapped : "TODO";
     }
 

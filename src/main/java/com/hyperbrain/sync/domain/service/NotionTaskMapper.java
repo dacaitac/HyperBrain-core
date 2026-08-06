@@ -61,14 +61,19 @@ public final class NotionTaskMapper {
         "DONE", "Done",
         "FAILED", "Failed");
 
-    private static final Map<String, String> TYPE_TO_NOTION = Map.of(
-        "TASK", "Task",
-        "HABIT", "Habit",
-        "LEAD_MEASURE", "Lead Measure",
-        "ACTIVITY", "Activity",
-        "AGENDA", "Agenda",
-        "LEARNING_SESSION", "Learning Session",
-        "BUYING", "Buying");
+    /** The closed (out-of-inventory) statuses whose Complete checkbox is checked (ADR-039). */
+    private static final java.util.Set<String> CLOSED_STATUSES = java.util.Set.of("DONE", "FAILED");
+
+    private static final Map<String, String> TYPE_TO_NOTION = Map.ofEntries(
+        Map.entry("TASK", "Task"),
+        Map.entry("HABIT", "Habit"),
+        Map.entry("LEAD_MEASURE", "Lead Measure"),
+        Map.entry("ACTIVITY", "Activity"),
+        Map.entry("AGENDA", "Agenda"),
+        Map.entry("LEARNING_SESSION", "Learning Session"),
+        Map.entry("BUYING", "Buying"),
+        // ADR-039: TIME_BLOCK now lives in the Tasks DB as a Type option (its own Notion DB is gone).
+        Map.entry("TIME_BLOCK", "Time Block"));
 
     private NotionTaskMapper() {
     }
@@ -94,7 +99,9 @@ public final class NotionTaskMapper {
                 ? richText(snapshot.description())
                 : Map.of("rich_text", List.of()));
         props.put(NotionSchema.PROP_STATUS, status(mapStatus(snapshot.status())));
-        props.put(NotionSchema.PROP_COMPLETE, checkbox("DONE".equals(snapshot.status())));
+        // ADR-039: the Complete checkbox is the derived mirror of isClosed (DONE or FAILED),
+        // not just DONE — a sanctioned miss leaves the inventory the same way.
+        props.put(NotionSchema.PROP_COMPLETE, checkbox(isClosed(snapshot.status())));
         props.put(NotionSchema.PROP_TYPE, select(mapType(snapshot.type())));
         Map<String, Object> date = dateRange(snapshot.startTime(), snapshot.endTime());
         props.put(NotionSchema.PROP_DATE, date != null ? date : singletonMap("date", null));
@@ -115,9 +122,14 @@ public final class NotionTaskMapper {
     }
 
     /** Projects a domain status to its Notion option name (lossy; shared with the merge). */
-    static String mapStatus(String domainStatus) {
+    public static String mapStatus(String domainStatus) {
         String notionStatus = domainStatus != null ? STATUS_TO_NOTION.get(domainStatus) : null;
         return notionStatus != null ? notionStatus : "Not started";
+    }
+
+    /** @return true when a domain status is closed (DONE or FAILED) — the derived Complete flag. */
+    public static boolean isClosed(String domainStatus) {
+        return CLOSED_STATUSES.contains(domainStatus);
     }
 
     /** Projects a domain type to its Notion option name (shared with the merge). */

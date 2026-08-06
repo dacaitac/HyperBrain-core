@@ -1,5 +1,6 @@
 package com.hyperbrain.core.domain.port.out;
 
+import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
@@ -7,19 +8,25 @@ import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Persistence port for the SYSTEM-owned focus & progress accounting of {@code core_executable}
- * (ADR-013): {@code progress}, {@code system_generated}, {@code pending_reestimation} and
- * {@code imputed_time_block_id} live outside the ADR-012 authority matrix, so the sync upsert
- * never touches them and these writes survive the ingestion transaction untouched.
+ * Persistence port for the SYSTEM-owned focus, progress, containment and streak accounting of
+ * {@code core_executable} (ADR-013, amended by ADR-039): {@code progress},
+ * {@code system_generated}, {@code pending_reestimation}, {@code imputed_block_id}, the
+ * containment columns ({@code container_block_id}, {@code container_planned_minutes},
+ * {@code container_ord}), the hard-copied schedule of contained children and the streak pair
+ * live outside the ADR-012 authority matrix, so the sync upsert never touches them and these
+ * writes survive the ingestion transaction untouched.
  */
 public interface ExecutableStateRepository {
 
     /**
-     * Finds the user's controllable {@code IN_PROGRESS} executables currently holding an
-     * {@code ACTIVE} block — the executing focus a switch must cut (DR-05).
+     * Finds the user's controllable {@code IN_PROGRESS} executables currently accounted by an
+     * executing block — the executing focus a switch must cut (DR-05). {@code TIME_BLOCK} rows
+     * are never candidates: a block in {@code IN_PROGRESS} is focus accounting, not a focus
+     * that cuts (ADR-039).
      *
      * @param userId      owning user
      * @param excludingId the executable taking the focus; never a cut candidate
@@ -29,13 +36,10 @@ public interface ExecutableStateRepository {
 
     /**
      * Finds the user's controllable {@code IN_PROGRESS} executables that pre-date the block
-     * model entirely (no {@code core_time_block} rows at all) and are not already awaiting
-     * re-estimation ({@code pending_reestimation = false}) — a task already flagged was cut once
-     * and must not be re-cut into a redundant zero-duration snapshot. The flag stays a soft
-     * exclusion here, not a hard degradation: it only prevents a second cut, never hides or
-     * downranks the task elsewhere. Legacy fallback of DR-05: consulted only when
-     * {@link #findActiveFocus} returns nothing; their snapshot window is the punctual
-     * {@code [now, now]}.
+     * model entirely (no block rows at all, legacy or new) and are not already awaiting
+     * re-estimation ({@code pending_reestimation = false}). Legacy fallback of DR-05:
+     * consulted only when {@link #findActiveFocus} returns nothing; their snapshot window is
+     * the punctual {@code [now, now]}.
      *
      * @param userId      owning user
      * @param excludingId the executable taking the focus
@@ -53,7 +57,8 @@ public interface ExecutableStateRepository {
     boolean isSystemGenerated(UUID executableId);
 
     /**
-     * Counts the user subtasks of a parent, excluding system-generated snapshots and,
+     * Counts the user subtasks of a parent, excluding system-generated snapshots,
+     * {@code TIME_BLOCK} children (FOCUS accounting rows are not work items, ADR-039) and,
      * optionally, the row being ingested (whose in-memory state supersedes the persisted one).
      *
      * @param parentId    the parent executable
@@ -71,12 +76,7 @@ public interface ExecutableStateRepository {
     void insertSystemSnapshot(SnapshotSubtask snapshot);
 
     /**
-     * Flags a cut task {@code pending_reestimation} without touching its effort values: the
-     * remaining work is no longer the one that was estimated (DR-06), but the last known effort
-     * (executable {@code effort_score} plus profile {@code energy_drain}, {@code mental_load},
-     * {@code impact}, {@code estimated_minutes}) is preserved. The flag is a soft hint for the
-     * user to re-estimate, never a data-destroying operation: the full-mirror propagators keep
-     * echoing the preserved values to the satellites, so a cut never erases the user's labels.
+     * Flags a cut task {@code pending_reestimation} without touching its effort values (DR-06).
      *
      * @param executableId the cut task
      */
@@ -100,21 +100,23 @@ public interface ExecutableStateRepository {
     void updateProgress(UUID executableId, Double progress);
 
     /**
-     * Stamps {@code last_completed_at} on a subtask observed transitioning to {@code DONE}
-     * (DR-07): the sync pipeline does not write that column, so this is the completion clock
-     * the settlement imputation reads. No-op when the row does not exist yet (a subtask
-     * arriving as DONE on CREATE is persisted after the rules run).
+     * Stamps {@code last_completed_at} on an executable observed closing ({@code DONE} or
+     * {@code FAILED}, ADR-039): the sync pipeline does not write that column, so this is the
+     * completion clock the settlement imputation and the intraday-replan guard read. No-op
+     * when the row does not exist yet (a row arriving closed on CREATE is persisted after the
+     * rules run).
      *
-     * @param executableId the completed subtask
-     * @param completedAt  observed completion instant
+     * @param executableId the closed executable
+     * @param completedAt  observed closure instant
      */
     void markCompleted(UUID executableId, OffsetDateTime completedAt);
 
     /**
-     * Eagerly imputes one completed subtask to the block covering its completion (DR-07).
+     * Eagerly imputes one completed subtask to the executing block covering its completion
+     * (DR-07), via {@code imputed_block_id} (ADR-039 successor column).
      *
      * @param subtaskId the completed subtask
-     * @param blockId   the covering open block of the parent
+     * @param blockId   the covering executing {@code TIME_BLOCK} executable
      */
     void imputeToBlock(UUID subtaskId, UUID blockId);
 
@@ -127,24 +129,108 @@ public interface ExecutableStateRepository {
     void clearImputation(UUID subtaskId);
 
     /**
-     * Settlement sweep of DR-08: imputes to a block every user subtask of its executable
-     * completed inside the block window and not yet imputed.
+     * Settlement sweep of DR-08: imputes to a block every user subtask — of the block's FOCUS
+     * anchor or of any of its contained members — that closed as {@code DONE} inside the block
+     * window and is not yet imputed. {@code FAILED} closures are never imputed (ADR-039
+     * matrix: a sanctioned miss earns no execution credit).
      *
-     * @param blockId      the block being settled
-     * @param executableId the block's executable (parent of the subtasks)
-     * @param windowStart  block window start
-     * @param windowEnd    block window end (settlement instant or {@code date_end})
+     * @param blockId     the {@code TIME_BLOCK} executable being settled
+     * @param windowStart block window start
+     * @param windowEnd   block window end (settlement instant or {@code end_time})
      * @return how many subtasks were imputed by this sweep
      */
-    int imputeCompletedSubtasks(UUID blockId, UUID executableId,
-                                OffsetDateTime windowStart, OffsetDateTime windowEnd);
+    int imputeCompletedSubtasks(UUID blockId, OffsetDateTime windowStart, OffsetDateTime windowEnd);
 
     /**
      * Inserts or updates the full attribute set of a {@code core_executable} row plus its
-     * {@code core_execution_profile}, keyed by {@code id}. Used by DR-04 to persist habit
+     * {@code core_execution_profile}, keyed by {@code id}. Used by DR-04 to persist
      * recurrence clones generated inside the ingestion transaction.
      *
      * @param snapshot the clone to persist
      */
     void upsertExecutable(ExecutableSnapshot snapshot);
+
+    // ── ADR-039: containment, hard copy and streaks ───────────────────────────
+
+    /**
+     * Resolves the scheduling authority of a contained executable: the {@code TIME_BLOCK}
+     * container its persisted row points at ({@code container_block_id} wins) or, failing
+     * that, the merged parent the ingestion is about to persist. The returned schedule is what
+     * the hard-copy rule asserts onto the child (date + cycle are SYSTEM-owned for contained
+     * children, ADR-012 D1 as amended by ADR-039).
+     *
+     * @param executableId   the potentially contained executable (persisted row may not exist
+     *                       yet on CREATE)
+     * @param mergedParentId the parent id of the merged in-flight state; may be null
+     * @return the container's schedule, or empty when the executable is not contained
+     */
+    Optional<ContainerSchedule> findContainerSchedule(UUID executableId, UUID mergedParentId);
+
+    /**
+     * Hard-copies a container's schedule onto every transitively contained descendant
+     * (ADR-039: members via {@code container_block_id}, subtasks via {@code parent_id} —
+     * the full recursive chain). Idempotent by value: only rows whose values actually differ
+     * are touched and reported, so an echo converges to zero writes and zero events. The copy
+     * honours DR-01 per child: reminder-backed types receive {@code start_time} only
+     * ({@code end_time} cleared); event-backed types receive the full window. A null
+     * {@code cycleId} carries no signal and preserves each child's own cycle.
+     * {@code TIME_BLOCK} and {@code system_generated} rows never receive copies (containers
+     * own their window; snapshots are frozen history).
+     *
+     * @param containerId the container whose schedule changed
+     * @param start       the container's new start instant
+     * @param end         the container's new end instant; may be null
+     * @param cycleId     the container's cycle, or null to leave children's cycles untouched
+     * @return the ids of the descendants whose row actually changed (outbox fan-out unit)
+     */
+    List<UUID> copyScheduleToContained(UUID containerId, OffsetDateTime start,
+                                       OffsetDateTime end, UUID cycleId);
+
+    /**
+     * Assigns an executable to a container block (Option B monovalent containment): sets
+     * {@code container_block_id}, the member's quota and its order. Overwriting an existing
+     * containment IS the move (no dual-membership policy, ADR-039). Reports whether the row
+     * actually changed so echoes stay event-free.
+     *
+     * @param memberId       the executable joining the container
+     * @param blockId        the {@code TIME_BLOCK} container
+     * @param plannedMinutes the member's quota inside the container; may be null
+     * @param ord            the member's order inside the container
+     * @return true when the containment columns actually changed
+     */
+    boolean assignContainer(UUID memberId, UUID blockId, Integer plannedMinutes, int ord);
+
+    /**
+     * Detaches an executable from its container (clears the containment columns). The
+     * hard-copied schedule values PERSIST by design (ADR-039: detach keeps the copied date).
+     *
+     * @param memberId the executable leaving its container
+     * @return true when the row was contained and is now detached
+     */
+    boolean clearContainer(UUID memberId);
+
+    /**
+     * Records a success closure on the streak pair (ADR-039 {@code isAchieved}):
+     * {@code current_streak + 1}, {@code best_streak = max(best, current + 1)}.
+     *
+     * @param executableId the achieved executable
+     */
+    void recordAchievedStreak(UUID executableId);
+
+    /**
+     * Resets {@code current_streak} to zero on a {@code FAILED} closure (ADR-039 matrix:
+     * a sanctioned miss resets the streak and never extends it); {@code best_streak} is kept.
+     *
+     * @param executableId the failed executable
+     */
+    void resetStreak(UUID executableId);
+
+    /**
+     * Copies the streak pair from a closed recurrence onto its DR-04 clone, so the streak
+     * survives the never-miss-twice cloning chain.
+     *
+     * @param sourceId the closed original
+     * @param targetId the freshly persisted clone
+     */
+    void copyStreaks(UUID sourceId, UUID targetId);
 }

@@ -804,8 +804,10 @@ class NotionInboundSyncIT {
     }
 
     private int countExecutables() {
+        // Excludes the ADR-039 TIME_BLOCK accounting rows (e.g. the FOCUS block auto-opened when a
+        // task is activated): this counter asserts the task inventory, not its scheduling containers.
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_executable", Integer.class);
+            "SELECT count(*) FROM core_executable WHERE type <> 'TIME_BLOCK'", Integer.class);
         return count == null ? 0 : count;
     }
 

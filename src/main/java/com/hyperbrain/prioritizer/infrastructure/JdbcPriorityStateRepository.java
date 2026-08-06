@@ -122,7 +122,7 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
         LEFT JOIN cycle_deadline cd ON cd.cycle_id = e.cycle_id
         WHERE e.user_id = ?
           AND e.status IN ('TODO', 'IN_PROGRESS')
-          AND e.type <> 'AGENDA'
+          AND e.type NOT IN ('AGENDA', 'TIME_BLOCK')
           AND e.system_generated = false
         """.formatted(CYCLE_DEADLINE_INSTANT, URGENCY_RAW_EXPR);
 
@@ -162,7 +162,7 @@ class JdbcPriorityStateRepository implements PriorityStateRepository {
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
         LEFT JOIN cycle_deadline cd ON true
         WHERE e.id = ?
-          AND e.type <> 'AGENDA'
+          AND e.type NOT IN ('AGENDA', 'TIME_BLOCK')
           AND e.system_generated = false
         """.formatted(CYCLE_DEADLINE_INSTANT, URGENCY_RAW_EXPR);
 

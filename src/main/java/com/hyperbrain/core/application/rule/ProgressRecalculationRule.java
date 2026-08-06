@@ -4,9 +4,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.application.event.SubtaskCompletedPayload;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
-import com.hyperbrain.core.domain.model.TimeBlock;
+import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockRepository;
+import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -27,11 +27,12 @@ import java.util.UUID;
  * parent has no user subtasks. The counters exclude the row being ingested and add its
  * in-memory state instead, so a subtask arriving already-DONE on CREATE still counts.
  *
- * <p>On the transition to DONE it additionally stamps {@code last_completed_at} (the
- * completion clock the DR-08 settlement sweep reads), eagerly imputes the subtask to the
- * parent's ACTIVE block when one covers the completion, and emits
- * {@code SubtaskCompletedEvent}. Un-completing reverts the imputation. Both direct writes are
- * no-ops on CREATE (the row is persisted after the rules); the progress itself is still exact.
+ * <p>On the transition to DONE it additionally imputes the subtask eagerly to the parent's
+ * executing block when one covers the completion (via {@code imputed_block_id}, ADR-039), and
+ * emits {@code SubtaskCompletedEvent}. Un-completing reverts the imputation. The completion
+ * clock ({@code last_completed_at}) is owned by {@code CompletionOutcomeRule}, which stamps
+ * DONE and FAILED closures alike. Direct writes are no-ops on CREATE (the row is persisted
+ * after the rules); the progress itself is still exact.
  */
 @Component
 public class ProgressRecalculationRule implements DomainRule {
@@ -43,13 +44,13 @@ public class ProgressRecalculationRule implements DomainRule {
     private static final String SOURCE_SYSTEM = "SYSTEM";
 
     private final ExecutableStateRepository stateRepo;
-    private final TimeBlockRepository timeBlockRepo;
+    private final TimeBlockExecutableRepository timeBlockRepo;
     private final OutboxRepository outboxRepo;
     private final ObjectMapper objectMapper;
 
     public ProgressRecalculationRule(
         ExecutableStateRepository stateRepo,
-        TimeBlockRepository timeBlockRepo,
+        TimeBlockExecutableRepository timeBlockRepo,
         OutboxRepository outboxRepo,
         ObjectMapper objectMapper
     ) {
@@ -82,10 +83,12 @@ public class ProgressRecalculationRule implements DomainRule {
     }
 
     private void onCompleted(ExecutableSnapshot merged, Double parentProgress) {
+        // The completion clock (last_completed_at) is stamped by CompletionOutcomeRule
+        // (ADR-039), which also covers FAILED closures; this rule keeps the DONE-only
+        // imputation and progress accounting.
         OffsetDateTime now = OffsetDateTime.now();
-        stateRepo.markCompleted(merged.id(), now);
-        UUID imputedBlockId = timeBlockRepo.findActiveBlock(merged.parentId())
-            .map(TimeBlock::id)
+        UUID imputedBlockId = timeBlockRepo.findActiveBlockFor(merged.parentId())
+            .map(TimeBlockExecutable::id)
             .orElse(null);
         if (imputedBlockId != null) {
             stateRepo.imputeToBlock(merged.id(), imputedBlockId);

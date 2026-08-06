@@ -1,24 +1,26 @@
 package com.hyperbrain.core.infrastructure;
 
+import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
  * JDBC adapter for {@link ExecutableStateRepository}. Every write targets only the
- * SYSTEM-owned accounting columns (ADR-013) or columns the sync upsert never lists
- * ({@code last_completed_at}), so these side writes and the ingestion upsert compose without
- * clobbering each other inside the same transaction.
+ * SYSTEM-owned accounting columns (ADR-013/ADR-039) or columns the sync upsert never lists
+ * ({@code last_completed_at}, containment, streaks), so these side writes and the ingestion
+ * upsert compose without clobbering each other inside the same transaction.
  */
 @Repository
 class JdbcExecutableStateRepository implements ExecutableStateRepository {
@@ -28,6 +30,11 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         p.energy_drain, p.mental_load, p.impact, p.estimated_minutes
         """;
 
+    /**
+     * A task is "actively focused" when an executing block accounts for it: a FOCUS child
+     * ({@code parent_id}) or its current container, in the new TIME_BLOCK model — or a legacy
+     * {@code core_time_block} ACTIVE row (frozen table; pre-migration data).
+     */
     private static final String FIND_ACTIVE_FOCUS_SQL = """
         SELECT %s
         FROM core_executable e
@@ -35,10 +42,13 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         WHERE e.user_id = ?
           AND e.id <> ?
           AND e.status = 'IN_PROGRESS'
-          AND e.type <> 'AGENDA'
+          AND e.type NOT IN ('AGENDA', 'TIME_BLOCK')
           AND e.system_generated = false
-          AND EXISTS (SELECT 1 FROM core_time_block b
-                      WHERE b.executable_id = e.id AND b.status = 'ACTIVE')
+          AND (EXISTS (SELECT 1 FROM core_executable b
+                       WHERE b.type = 'TIME_BLOCK' AND b.status = 'IN_PROGRESS'
+                         AND (b.parent_id = e.id OR b.id = e.container_block_id))
+               OR EXISTS (SELECT 1 FROM core_time_block lb
+                          WHERE lb.executable_id = e.id AND lb.status = 'ACTIVE'))
         """.formatted(CANDIDATE_COLUMNS);
 
     private static final String FIND_LEGACY_IN_PROGRESS_SQL = """
@@ -48,10 +58,13 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         WHERE e.user_id = ?
           AND e.id <> ?
           AND e.status = 'IN_PROGRESS'
-          AND e.type <> 'AGENDA'
+          AND e.type NOT IN ('AGENDA', 'TIME_BLOCK')
           AND e.system_generated = false
           AND e.pending_reestimation = false
-          AND NOT EXISTS (SELECT 1 FROM core_time_block b WHERE b.executable_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM core_time_block lb WHERE lb.executable_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM core_executable b
+                          WHERE b.type = 'TIME_BLOCK'
+                            AND (b.parent_id = e.id OR b.id = e.container_block_id))
         """.formatted(CANDIDATE_COLUMNS);
 
     private static final String IS_SYSTEM_GENERATED_SQL =
@@ -61,7 +74,8 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         SELECT COUNT(*) AS total,
                COUNT(*) FILTER (WHERE status = 'DONE') AS done
         FROM core_executable
-        WHERE parent_id = ? AND system_generated = false AND id <> ?
+        WHERE parent_id = ? AND system_generated = false
+          AND type <> 'TIME_BLOCK' AND id <> ?
         """;
 
     private static final String INSERT_SNAPSHOT_SQL = """
@@ -96,19 +110,29 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         "UPDATE core_executable SET last_completed_at = ? WHERE id = ?";
 
     private static final String IMPUTE_TO_BLOCK_SQL =
-        "UPDATE core_executable SET imputed_time_block_id = ? WHERE id = ?";
+        "UPDATE core_executable SET imputed_block_id = ? WHERE id = ?";
 
     private static final String CLEAR_IMPUTATION_SQL =
-        "UPDATE core_executable SET imputed_time_block_id = NULL WHERE id = ?";
+        "UPDATE core_executable SET imputed_block_id = NULL WHERE id = ?";
 
+    /**
+     * DR-08 settlement sweep over the executable block model (ADR-039): user subtasks of the
+     * block's FOCUS anchor or of any contained member, closed as DONE inside the window and
+     * not yet imputed. FAILED closures earn no credit (status filter).
+     */
     private static final String IMPUTE_COMPLETED_SQL = """
         UPDATE core_executable
-        SET imputed_time_block_id = ?
-        WHERE parent_id = ?
-          AND status = 'DONE'
+        SET imputed_block_id = ?
+        WHERE status = 'DONE'
           AND system_generated = false
-          AND imputed_time_block_id IS NULL
+          AND type <> 'TIME_BLOCK'
+          AND imputed_block_id IS NULL
           AND last_completed_at BETWEEN ? AND ?
+          AND parent_id IN (
+              SELECT m.id FROM core_executable m WHERE m.container_block_id = ?
+              UNION
+              SELECT b.parent_id FROM core_executable b
+              WHERE b.id = ? AND b.parent_id IS NOT NULL)
         """;
 
     private static final String UPSERT_EXECUTABLE_SQL = """
@@ -141,6 +165,93 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
             energy_drain = EXCLUDED.energy_drain,
             mental_load  = EXCLUDED.mental_load,
             impact       = EXCLUDED.impact
+        """;
+
+    /**
+     * The child's scheduling authority: its persisted container block wins over the merged
+     * parent (ADR-039). On CREATE the child row does not exist yet and the subquery yields
+     * null, so the merged parent decides alone.
+     */
+    private static final String FIND_CONTAINER_SCHEDULE_SQL = """
+        SELECT c.id, c.name, c.start_time, c.end_time, c.cycle_id
+        FROM core_executable c
+        WHERE c.id = COALESCE(
+            (SELECT child.container_block_id FROM core_executable child WHERE child.id = ?),
+            ?)
+        """;
+
+    /**
+     * The transitive containment closure of one container (members via {@code
+     * container_block_id}, subtasks via {@code parent_id}), excluding {@code TIME_BLOCK} rows
+     * (containers own their window) and system snapshots (frozen history). The walk carries a
+     * path guard and a defensive depth bound like every other recursive read of this codebase.
+     * The single UPDATE applies the DR-01 projection per child type and only touches rows whose
+     * values actually differ ({@code IS DISTINCT FROM} guards) — the idempotence that keeps
+     * echoes event-free. {@code RETURNING} reports the changed ids for the outbox fan-out.
+     */
+    private static final String COPY_SCHEDULE_SQL = """
+        WITH RECURSIVE contained (id, type, depth, path) AS (
+            SELECT e.id, e.type, 1, ARRAY[e.id]
+            FROM core_executable e
+            WHERE (e.parent_id = ? OR e.container_block_id = ?)
+              AND e.type <> 'TIME_BLOCK'
+              AND e.system_generated = false
+            UNION ALL
+            SELECT child.id, child.type, c.depth + 1, c.path || child.id
+            FROM contained c
+            JOIN core_executable child
+              ON (child.parent_id = c.id OR child.container_block_id = c.id)
+            WHERE c.depth < 8
+              AND NOT child.id = ANY(c.path)
+              AND child.type <> 'TIME_BLOCK'
+              AND child.system_generated = false
+        )
+        UPDATE core_executable e
+        SET start_time = ?::timestamptz,
+            end_time   = CASE WHEN e.type IN ('ACTIVITY', 'AGENDA', 'LEARNING_SESSION')
+                              THEN ?::timestamptz ELSE NULL END,
+            cycle_id   = COALESCE(?::uuid, e.cycle_id)
+        FROM (SELECT DISTINCT id, type FROM contained) c
+        WHERE e.id = c.id
+          AND (e.start_time IS DISTINCT FROM ?::timestamptz
+               OR e.end_time IS DISTINCT FROM
+                  CASE WHEN e.type IN ('ACTIVITY', 'AGENDA', 'LEARNING_SESSION')
+                       THEN ?::timestamptz ELSE NULL END
+               OR e.cycle_id IS DISTINCT FROM COALESCE(?::uuid, e.cycle_id))
+        RETURNING e.id
+        """;
+
+    private static final String ASSIGN_CONTAINER_SQL = """
+        UPDATE core_executable
+        SET container_block_id = ?, container_planned_minutes = ?, container_ord = ?
+        WHERE id = ?
+          AND (container_block_id IS DISTINCT FROM ?
+               OR container_planned_minutes IS DISTINCT FROM ?
+               OR container_ord IS DISTINCT FROM ?)
+        """;
+
+    private static final String CLEAR_CONTAINER_SQL = """
+        UPDATE core_executable
+        SET container_block_id = NULL, container_planned_minutes = NULL, container_ord = NULL
+        WHERE id = ? AND container_block_id IS NOT NULL
+        """;
+
+    private static final String ACHIEVED_STREAK_SQL = """
+        UPDATE core_executable
+        SET current_streak = current_streak + 1,
+            best_streak    = GREATEST(best_streak, current_streak + 1)
+        WHERE id = ?
+        """;
+
+    private static final String RESET_STREAK_SQL =
+        "UPDATE core_executable SET current_streak = 0 WHERE id = ?";
+
+    private static final String COPY_STREAKS_SQL = """
+        UPDATE core_executable target
+        SET current_streak = source.current_streak,
+            best_streak    = source.best_streak
+        FROM core_executable source
+        WHERE target.id = ? AND source.id = ?
         """;
 
     private static final RowMapper<FocusCandidate> CANDIDATE_MAPPER = (rs, rowNum) ->
@@ -226,14 +337,14 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     }
 
     @Override
-    public int imputeCompletedSubtasks(UUID blockId, UUID executableId,
+    public int imputeCompletedSubtasks(UUID blockId,
                                        OffsetDateTime windowStart, OffsetDateTime windowEnd) {
         return jdbcTemplate.update(IMPUTE_COMPLETED_SQL,
-            blockId, executableId, toTimestamp(windowStart), toTimestamp(windowEnd));
+            blockId, toTimestamp(windowStart), toTimestamp(windowEnd), blockId, blockId);
     }
 
     @Override
-    public void upsertExecutable(ExecutableSnapshot s) {
+    public void upsertExecutable(com.hyperbrain.sync.domain.model.ExecutableSnapshot s) {
         jdbcTemplate.update(UPSERT_EXECUTABLE_SQL,
             s.id(), s.userId(), s.parentId(), s.cycleId(), s.name(), s.description(),
             s.type(), s.status(), s.priorityScore(), s.urgencyScore(), s.effortScore(),
@@ -243,7 +354,63 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
             s.id(), s.energyDrain(), s.mentalLoad(), s.impact());
     }
 
+    @Override
+    public Optional<ContainerSchedule> findContainerSchedule(UUID executableId, UUID mergedParentId) {
+        List<ContainerSchedule> rows = jdbcTemplate.query(FIND_CONTAINER_SCHEDULE_SQL,
+            (rs, rowNum) -> new ContainerSchedule(
+                rs.getObject("id", UUID.class),
+                rs.getString("name"),
+                toOffset(rs.getTimestamp("start_time")),
+                toOffset(rs.getTimestamp("end_time")),
+                rs.getObject("cycle_id", UUID.class)),
+            executableId, mergedParentId);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    @Override
+    public List<UUID> copyScheduleToContained(UUID containerId, OffsetDateTime start,
+                                              OffsetDateTime end, UUID cycleId) {
+        Timestamp startTs = toTimestamp(start);
+        Timestamp endTs = toTimestamp(end);
+        // UPDATE ... RETURNING runs as a query on the PostgreSQL driver.
+        return jdbcTemplate.query(COPY_SCHEDULE_SQL,
+            (rs, rowNum) -> rs.getObject("id", UUID.class),
+            containerId, containerId,
+            startTs, endTs, cycleId,
+            startTs, endTs, cycleId);
+    }
+
+    @Override
+    public boolean assignContainer(UUID memberId, UUID blockId, Integer plannedMinutes, int ord) {
+        return jdbcTemplate.update(ASSIGN_CONTAINER_SQL,
+            blockId, plannedMinutes, ord, memberId, blockId, plannedMinutes, ord) > 0;
+    }
+
+    @Override
+    public boolean clearContainer(UUID memberId) {
+        return jdbcTemplate.update(CLEAR_CONTAINER_SQL, memberId) > 0;
+    }
+
+    @Override
+    public void recordAchievedStreak(UUID executableId) {
+        jdbcTemplate.update(ACHIEVED_STREAK_SQL, executableId);
+    }
+
+    @Override
+    public void resetStreak(UUID executableId) {
+        jdbcTemplate.update(RESET_STREAK_SQL, executableId);
+    }
+
+    @Override
+    public void copyStreaks(UUID sourceId, UUID targetId) {
+        jdbcTemplate.update(COPY_STREAKS_SQL, targetId, sourceId);
+    }
+
     private static Timestamp toTimestamp(OffsetDateTime odt) {
         return odt != null ? Timestamp.from(odt.toInstant()) : null;
+    }
+
+    private static OffsetDateTime toOffset(Timestamp ts) {
+        return ts != null ? ts.toInstant().atOffset(ZoneOffset.UTC) : null;
     }
 }
