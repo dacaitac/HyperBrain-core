@@ -84,6 +84,7 @@ class NotionTimeBlockInboundIT {
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private com.hyperbrain.shared.outbox.OutboxWorker outboxWorker;
     @Autowired private SyncEventIngestionService ingestionService;
     @Autowired private NotionEnvelopeNormalizer normalizer;
     @Autowired private PlannerTimeBlockPort blockPort;
@@ -96,6 +97,7 @@ class NotionTimeBlockInboundIT {
     void cleanState() throws Exception {
         consumer = new SqsConsumer(objectMapper, ingestionService, normalizer);
         jdbcTemplate.update("DELETE FROM outbox_events");
+        jdbcTemplate.update("DELETE FROM sync_write_commands");
         jdbcTemplate.update("DELETE FROM processed_message");
         jdbcTemplate.update("DELETE FROM sync_mappings");
         jdbcTemplate.update("DELETE FROM core_time_block_member");
@@ -171,6 +173,36 @@ class NotionTimeBlockInboundIT {
             "SELECT origin FROM core_time_block WHERE id = ?", String.class, blockId))
             .isEqualTo("PLANNER");
         assertThat(totalOutboxEvents()).isZero();
+    }
+
+    @Test
+    @DisplayName("regression core#57 ghost state: a retime applies even when the checksum matches the mirror's own write")
+    void retime_applies_when_checksum_matches_mirror_write() {
+        // Given a mapped USER block whose mapping stores the checksum of the mirror's last write
+        // (the exact prod state after a Notion-born block's re-mirror)
+        UUID taskId = insertExecutable("Deep work task", "TASK");
+        String taskPage = insertTaskMapping(taskId);
+        UUID blockId = insertBlock(NINE, NINE.plusMinutes(60), "USER", "Deep work");
+        insertMember(blockId, taskId, 60, 0);
+        String pageId = newPageId();
+        TimeBlockSnapshot snapshot = blockPort.findBlock(blockId).orElseThrow();
+        insertBlockMapping(blockId, pageId,
+            mirrorService.checksum(pageId, mirrorService.canonicalProps(snapshot, null)));
+
+        // When the user retimes the page 09:00–10:00 → 10:30–11:30 (Notion millisecond format)
+        deliver(timeBlockPage(pageId, "Mié 05 · 09:00–10:00 · Deep work",
+            "2026-08-05T10:30:00.000-05:00", "2026-08-05T11:30:00.000-05:00", false, taskPage));
+
+        // Then — PG takes the new window (never a silent echo-discard) and both satellites follow
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+            "SELECT origin, date_start, date_end FROM core_time_block WHERE id = ?", blockId);
+        assertThat(instant(row.get("date_start")))
+            .isEqualTo(Instant.parse("2026-08-05T15:30:00Z"));
+        assertThat(instant(row.get("date_end")))
+            .isEqualTo(Instant.parse("2026-08-05T16:30:00Z"));
+        assertThat(row.get("origin")).isEqualTo("USER");
+        assertThat(countEvents("TimeBlockChangedEvent", "NOTION")).isEqualTo(1);
+        assertThat(countEvents("TimeBlockChangedEvent", "SYSTEM")).isEqualTo(1);
     }
 
     @Test
@@ -358,6 +390,21 @@ class NotionTimeBlockInboundIT {
         // Relation-only: no executable was born from the page
         assertThat(countExecutables()).isEqualTo(executablesBefore);
         assertThat(countEvents("TimeBlockChangedEvent", "NOTION")).isEqualTo(1);
+
+        // Regression core#57: the CREATED change and its immediate canonical re-assertion drain
+        // back-to-back BEFORE any WriteCommandResult can close the Apple mapping — the in-flight
+        // guard must collapse them into exactly ONE Apple CREATE (no duplicate EKEvent).
+        NOTION.stubFor(com.github.tomakehurst.wiremock.client.WireMock.patch(
+                com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching("/v1/pages/.*"))
+            .willReturn(com.github.tomakehurst.wiremock.client.WireMock.aResponse()
+                .withStatus(200).withHeader("Content-Type", "application/json")
+                .withBody("{\"object\":\"page\",\"id\":\"" + pageId + "\"}")));
+        outboxWorker.drainBatch();
+        Map<String, Object> command = jdbcTemplate.queryForMap(
+            "SELECT count(*) AS commands, max(operation) AS operation "
+                + "FROM sync_write_commands WHERE local_id = ?", blockId);
+        assertThat(command.get("commands")).isEqualTo(1L);
+        assertThat(command.get("operation")).isEqualTo("CREATED");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

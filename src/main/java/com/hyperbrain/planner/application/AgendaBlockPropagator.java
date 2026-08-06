@@ -260,6 +260,9 @@ public class AgendaBlockPropagator implements IEventPropagator {
         String entityId = mapping.map(SyncMapping::externalId).orElse(null);
         String groupKey = mapping.isPresent() ? entityId : block.blockId().toString();
         UUID commandId = deterministicCommandId(event.id(), block.blockId());
+        if (mapping.isEmpty() && createAlreadyInFlight(block.blockId(), commandId, event)) {
+            return;
+        }
 
         // A time-boxed calendar event (start + end), not a reminder: the block's duration must not be
         // lost. Written to HyperBrain's own writable calendar, never a read-only AGENDA one (ADR-009);
@@ -284,6 +287,29 @@ public class AgendaBlockPropagator implements IEventPropagator {
         commandPublisher.publish(command, groupKey);
         log.debug("Agenda block {} ({}-{}) emitted as calendar event command {} ({}) for user {}",
             block.blockId(), block.start(), block.end(), commandId, operation, userId);
+    }
+
+    /**
+     * The in-flight CREATE guard the executable write-back already applies
+     * ({@code AppleEventPropagator}), extended to blocks (core#57 hotfix): the block's Apple
+     * mapping only closes when the {@code WriteCommandResult} lands (ADR-010), so two outbound
+     * events drained back-to-back — the deterministic case being a Notion-born block, whose
+     * materialization stages a {@code CREATED} change plus its immediate canonical re-assertion —
+     * would both miss the mapping and emit two CREATEs, duplicating the EKEvent. A pending
+     * CREATE with a <em>different</em> command id means the first emission is still awaiting its
+     * result: the later event is skipped (the CREATE re-read current state at drain time, and any
+     * post-result change re-mirrors as an UPDATE). The same-id case falls through, keeping the
+     * at-least-once drain retry idempotent.
+     */
+    private boolean createAlreadyInFlight(UUID blockId, UUID commandId, OutboxEvent event) {
+        Optional<PendingWriteCommand> inFlight =
+            commandLogRepo.findPendingCreateByLocalId(blockId);
+        if (inFlight.isPresent() && !inFlight.get().commandId().equals(commandId)) {
+            log.warn("CREATE already in flight for block {} (command {}); skipping event {}",
+                blockId, inFlight.get().commandId(), event.id());
+            return true;
+        }
+        return false;
     }
 
     /**

@@ -131,33 +131,43 @@ public class NotionTimeBlockSyncService {
         }
         TimeBlockSnapshot block = current.get();
 
-        // CA-4 echo discard: the canonical projection of the current row, with the note the page
-        // currently shows, must reproduce the stored checksum bit-identically.
-        Map<String, Object> canonical = mirrorService.canonicalProps(block, page.syncNote());
-        if (ChecksumSupport.matches(mapping.get().lastKnownChecksum(), page.pageId(), canonical,
-            objectMapper)) {
-            log.debug("TIME_BLOCK page {} unchanged (checksum match); discarded (CA-4)",
-                page.pageId());
-            return SyncOutcome.SKIPPED_ECHO;
-        }
-
+        // The USER-writable diff decides first (core#57 hotfix): a checksum-first echo discard
+        // is wrong for this aggregate, because the stored checksum covers the canonical
+        // projection of the CURRENT ROW — after any mirror write, every later inbound delivery
+        // (including a genuine user retime) reproduces it and would be swallowed as an echo (the
+        // ghost-state worst case). The checksum only breaks the tie once the page carries no
+        // user-facet change: bit-identical to our last write ⇒ true echo; otherwise ⇒
+        // SYSTEM-owned drift to re-assert.
         EffectiveDiff diff = computeDiff(block, page);
         if (block.terminal()) {
             if (diff.touchesUserFacets()) {
                 // Frozen history is read-only, hard: reject + re-assert with a visible note.
                 appendChanged(TimeBlockChangedEvent.reassertion(blockId, block.userId(),
                     OffsetDateTime.now(), "Settled blocks are frozen history; edit reverted"));
-                log.info("TIME_BLOCK page {}: edit on terminal block {} rejected (read-only)",
-                    page.pageId(), blockId);
-            } else {
-                appendChanged(TimeBlockChangedEvent.reassertion(blockId, block.userId(),
-                    OffsetDateTime.now(), null));
+                log.info("TIME_BLOCK page {}: rejected — terminal block {} is read-only; "
+                    + "canonical state re-asserted", page.pageId(), blockId);
+                return SyncOutcome.REASSERTED;
             }
+            if (isEcho(mapping.get(), block, page)) {
+                log.info("TIME_BLOCK page {}: no-op — echo of the mirror's own write on terminal "
+                    + "block {} (CA-4)", page.pageId(), blockId);
+                return SyncOutcome.SKIPPED_ECHO;
+            }
+            appendChanged(TimeBlockChangedEvent.reassertion(blockId, block.userId(),
+                OffsetDateTime.now(), null));
+            log.info("TIME_BLOCK page {}: SYSTEM-owned drift on terminal block {}; canonical "
+                + "state re-asserted", page.pageId(), blockId);
             return SyncOutcome.REASSERTED;
         }
         if (!diff.touchesUserFacets()) {
+            if (isEcho(mapping.get(), block, page)) {
+                // A true echo is an absolute no-op — crucially the origin is never flipped.
+                log.info("TIME_BLOCK page {}: no-op — echo of the mirror's own write on block {} "
+                    + "(CA-4)", page.pageId(), blockId);
+                return SyncOutcome.SKIPPED_ECHO;
+            }
             // Only SYSTEM-owned fields drifted (Status/Origin/minutes/Agenda/Reason edits):
-            // ignore-and-reassert, and crucially never flip the origin (anti-echo guard).
+            // ignore-and-reassert, and still never flip the origin.
             appendChanged(TimeBlockChangedEvent.reassertion(blockId, block.userId(),
                 OffsetDateTime.now(), null));
             log.info("TIME_BLOCK page {}: SYSTEM-owned drift on block {}; canonical re-asserted",
@@ -179,9 +189,12 @@ public class NotionTimeBlockSyncService {
         String note = buildNote(outcome.rejections(), diff.notes());
         appendChanged(TimeBlockChangedEvent.reassertion(blockId, block.userId(),
             OffsetDateTime.now(), note));
-        log.info("TIME_BLOCK page {}: edit on block {} {} ({} rejection(s))", page.pageId(),
-            blockId, outcome.applied() ? "applied (origin=USER)" : "not applied",
-            outcome.rejections().size());
+        log.info("TIME_BLOCK page {}: {} on block {} — retime={}, retheme={}, membership={}, "
+                + "{} rejection(s){}", page.pageId(),
+            outcome.applied() ? "applied (origin=USER)" : "rejected", blockId,
+            diff.newStart() != null, diff.newTheme() != null, diff.desiredMembers() != null,
+            outcome.rejections().size(),
+            note != null ? " — Sync Note: " + note : "");
         return outcome.applied() ? SyncOutcome.UPDATED : SyncOutcome.REASSERTED;
     }
 
@@ -198,7 +211,7 @@ public class NotionTimeBlockSyncService {
 
     private SyncOutcome handleArchived(String pageId, Optional<SyncMapping> mapping) {
         if (mapping.isEmpty()) {
-            log.debug("TIME_BLOCK page {} has no mapping; archive needs no effect", pageId);
+            log.info("TIME_BLOCK page {}: no-op — archived page has no mapping", pageId);
             return SyncOutcome.DELETED;
         }
         UUID blockId = mapping.get().localId();
@@ -272,6 +285,17 @@ public class NotionTimeBlockSyncService {
             OffsetDateTime.now(), buildNote(outcome.rejections(), List.of())));
         log.info("TIME_BLOCK page {} materialized as USER/PLANNED block {}", page.pageId(), blockId);
         return SyncOutcome.CREATED;
+    }
+
+    /**
+     * True echo detector (CA-4), only consulted once the delivery carries no USER-facet change:
+     * the canonical projection of the current row with the note the page shows must reproduce
+     * the stored checksum bit-identically — i.e. the page is exactly what the mirror last wrote.
+     */
+    private boolean isEcho(SyncMapping mapping, TimeBlockSnapshot block, NotionTimeBlockPage page) {
+        Map<String, Object> canonical = mirrorService.canonicalProps(block, page.syncNote());
+        return ChecksumSupport.matches(mapping.lastKnownChecksum(), page.pageId(), canonical,
+            objectMapper);
     }
 
     // ── Effective diff (loss-aware projection) ────────────────────────────────

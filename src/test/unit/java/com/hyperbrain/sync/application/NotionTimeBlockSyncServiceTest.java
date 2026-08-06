@@ -93,6 +93,42 @@ class NotionTimeBlockSyncServiceTest {
     }
 
     @Test
+    @DisplayName("regression core#57 ghost state: a retime applies even when the stored checksum matches the current row")
+    void retime_applies_even_when_checksum_matches_current_row() {
+        // Given the mapping stores the checksum of the mirror's own last write — which is the
+        // canonical projection of the CURRENT row, so a checksum-first echo guard would swallow
+        // the user's genuine retime (the prod ghost state: Notion moved, PG frozen, no trace)
+        TimeBlockSnapshot block = plannedBlock("USER");
+        Map<String, Object> canonical = Map.of("Name", "canonical");
+        when(blockPort.findBlock(BLOCK_ID)).thenReturn(Optional.of(block));
+        givenMapping(ChecksumSupport.compute(PAGE_ID, canonical, objectMapper));
+        when(blockPort.applyUserEdit(any())).thenReturn(new TimeBlockEditOutcome(
+            true, List.of(), Set.of(), Set.of(), Set.of(), Set.of()));
+
+        // When the user retimes the page (Notion's millisecond date format)
+        SyncOutcome outcome = service.apply(new NotionTimeBlockPage(PAGE_ID, EDITED_AT, false,
+            "Mié 05 · 09:00–10:30 · Theme",
+            "2026-08-06T10:30:00.000-05:00", "2026-08-06T11:30:00.000-05:00",
+            "Planned", "User", 90.0, null, List.of(TASK_PAGE_ID), false, null));
+
+        // Then — the retime is applied with the exact parsed bounds, never echo-discarded
+        assertThat(outcome).isEqualTo(SyncOutcome.UPDATED);
+        ArgumentCaptor<com.hyperbrain.sync.domain.model.TimeBlockUserEdit> edit =
+            ArgumentCaptor.forClass(com.hyperbrain.sync.domain.model.TimeBlockUserEdit.class);
+        verify(blockPort).applyUserEdit(edit.capture());
+        assertThat(edit.getValue().newStart())
+            .isEqualTo(OffsetDateTime.of(2026, 8, 6, 10, 30, 0, 0, ZoneOffset.ofHours(-5)));
+        assertThat(edit.getValue().newEnd())
+            .isEqualTo(OffsetDateTime.of(2026, 8, 6, 11, 30, 0, 0, ZoneOffset.ofHours(-5)));
+        // And the accepted edit stages the Apple follow-up + the canonical re-assertion
+        ArgumentCaptor<OutboxEvent> events = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxRepo, atLeastOnce()).append(events.capture());
+        assertThat(events.getAllValues())
+            .anySatisfy(event -> assertThat(event.sourceSystem()).isEqualTo("NOTION"))
+            .anySatisfy(event -> assertThat(event.payload()).contains("CANONICAL_STATE"));
+    }
+
+    @Test
     @DisplayName("has_more guard: a truncated Tasks relation is never applied — canonical state re-asserted")
     void has_more_discards_membership_and_reasserts() {
         // Given a truncated relation (window/theme unchanged, so membership is the only signal)

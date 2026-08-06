@@ -205,6 +205,39 @@ class AgendaBlockPropagatorTest {
         assertThat(command.payload()).isNull();
     }
 
+    @Test
+    @DisplayName("regression core#57: CREATED + immediate re-assertion emit exactly ONE Apple CREATE (in-flight guard)")
+    void immediate_reassertion_after_create_emits_single_create() {
+        // Given a Notion-born block (no Apple mapping yet) whose materialization stages two
+        // back-to-back outbox events: the CREATED change and its canonical re-assertion
+        com.hyperbrain.sync.domain.model.TimeBlockSnapshot snapshot =
+            new com.hyperbrain.sync.domain.model.TimeBlockSnapshot(BLOCK_ID_1, USER_ID, START, END,
+                "PLANNED", "USER", "My Notion block", null, 60, null, null,
+                List.of(new com.hyperbrain.sync.domain.model.TimeBlockMemberSnapshot(
+                    EXECUTABLE_ID, "Task A", 60, 0)));
+        when(timeBlockPort.findBlock(BLOCK_ID_1)).thenReturn(Optional.of(snapshot));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", BLOCK_ID_1))
+            .thenReturn(Optional.empty());
+        // The first drain finds no in-flight CREATE; the second sees the first one still pending
+        // (its WriteCommandResult has not closed the mapping yet, ADR-010)
+        com.hyperbrain.sync.domain.model.PendingWriteCommand pending =
+            new com.hyperbrain.sync.domain.model.PendingWriteCommand(
+                UUID.randomUUID(), USER_ID, BLOCK_ID_1, CommandType.CALENDAR_EVENT,
+                Operation.CREATED, BLOCK_ID_1.toString(), "{}", "PENDING");
+        when(commandLogRepo.findPendingCreateByLocalId(BLOCK_ID_1))
+            .thenReturn(Optional.empty(), Optional.of(pending));
+
+        // When both events drain back-to-back
+        propagator.propagate(timeBlockChangedEvent("CREATED"));
+        propagator.propagate(timeBlockChangedEvent("UPDATED"));
+
+        // Then exactly one CREATE reaches Apple — the duplicate-EKEvent bug cannot reproduce
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), anyString());
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.CREATED);
+        verify(commandLogRepo).upsertPending(any());
+    }
+
     private static OutboxEvent timeBlockChangedEvent(String operation) {
         String payload = """
             {"block_id":"%s","user_id":"%s","operation":"%s","source_system":"NOTION"}
