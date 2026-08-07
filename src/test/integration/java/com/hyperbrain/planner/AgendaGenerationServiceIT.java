@@ -98,6 +98,25 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("wall: a real TIME_BLOCK executable (ADR-039 model) is never scheduled over")
+    void does_not_schedule_over_a_time_block_executable() {
+        // A block that already holds 07:00-09:00 of the day. Since ADR-039 it lives in
+        // core_executable, so a Planner reading the frozen table would not see it and would plan on
+        // top of it.
+        insertTimeBlockExecutable("Morning window",
+            OffsetDateTime.of(2026, 7, 10, 7, 0, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
+        UUID task = insertTask("Work", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        OffsetDateTime blockStart = jdbcTemplate.queryForObject(
+            "SELECT date_start FROM core_time_block WHERE executable_id = ?",
+            OffsetDateTime.class, task);
+        assertThat(blockStart).isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
+    }
+
+    @Test
     @DisplayName("F1: the WIG lead measure of the active MCI is reserved first")
     void reserves_wig_first() {
         UUID mci = insertCycle("MCI", "ACTIVE",
@@ -689,6 +708,13 @@ class AgendaGenerationServiceIT {
             VALUES (?, 30)
             """, id);
         return id;
+    }
+
+    private void insertTimeBlockExecutable(String name, OffsetDateTime start, OffsetDateTime end) {
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, origin, start_time, end_time)
+            VALUES (?, ?, ?, 'TIME_BLOCK', 'PLANNED', 'USER', ?, ?)
+            """, UUID.randomUUID(), USER, name, start, end);
     }
 
     private void insertAgendaEvent(String name, OffsetDateTime start, OffsetDateTime end) {

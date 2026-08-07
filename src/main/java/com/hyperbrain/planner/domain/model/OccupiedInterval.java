@@ -5,11 +5,12 @@ import java.util.UUID;
 
 /**
  * A stretch of the day already spoken for — a hard wall the generator plans around and the
- * {@code AgendaValidator} re-checks: an existing open/settled {@code core_time_block}, or a
- * read-only AGENDA executable's window (ADR-009). The Planner never schedules on top of these.
+ * {@code AgendaValidator} re-checks: an existing {@code TIME_BLOCK} executable's window (ADR-039), or
+ * a read-only AGENDA executable's window (ADR-009). The Planner never schedules on top of these.
  *
- * @param executableId the executable owning the wall (a block's or an AGENDA's); may be null when the
- *                     wall is not tied to one executable
+ * @param executableId the executable owning the wall — the block itself for a {@code TIME_BLOCK}, the
+ *                     event for an AGENDA; may be null when the wall is not tied to one executable
+ *                     (a meal anchor, a transition buffer)
  * @param start        wall start; never null
  * @param end          wall end; never null, strictly after {@code start}
  * @param readOnlyAgenda true when the wall is a read-only AGENDA window (ADR-009)
