@@ -2,7 +2,7 @@ package com.hyperbrain.sync;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.hyperbrain.core.application.TimeBlockSettlementService;
+import com.hyperbrain.core.application.TimeBlockExpiryService;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -41,7 +41,7 @@ class AppleWriteBackIT {
     @Autowired private SqsTemplate sqsTemplate;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
-    @Autowired private TimeBlockSettlementService settlementService;
+    @Autowired private TimeBlockExpiryService expiryService;
 
     @BeforeEach
     void cleanState() throws Exception {
@@ -152,7 +152,7 @@ class AppleWriteBackIT {
         insertMapping(blockId, entityId);
 
         // When the block settles and the outbox drains
-        assertThat(settlementService.expireDueBlocks(OffsetDateTime.now())).isEqualTo(1);
+        assertThat(expiryService.expireDueBlocks(OffsetDateTime.now())).isEqualTo(1);
         outboxWorker.drainBatch();
 
         // Then the block is closed and its calendar event is UPDATED, not removed: a settled block
@@ -177,7 +177,7 @@ class AppleWriteBackIT {
     void settled_focus_block_is_not_written_back() {
         UUID blockId = insertElapsedBlock("FOCUS");
 
-        assertThat(settlementService.expireDueBlocks(OffsetDateTime.now())).isEqualTo(1);
+        assertThat(expiryService.expireDueBlocks(OffsetDateTime.now())).isEqualTo(1);
         outboxWorker.drainBatch();
 
         assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();

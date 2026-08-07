@@ -55,7 +55,6 @@ class PlannerConstantsLoaderIT {
                 "pacePrecisionEpsilon": 0.1,
                 "hysteresisMargin": 0.2,
                 "degradedStreakThreshold": 4,
-                "highMargin": 0.3,
                 "highQuota": 2
             }}'::jsonb
             WHERE id = ?
@@ -72,9 +71,8 @@ class PlannerConstantsLoaderIT {
             .isEqualTo(PlannerConstraints.DEFAULT.highLoadDrainFloor());
 
         EnergyThresholds thresholds = loader.resolveThresholds();
-        assertThat(thresholds.highMargin()).isEqualTo(0.3);
         assertThat(thresholds.highQuota()).isEqualTo(2);
-        assertThat(thresholds.lowMargin()).isEqualTo(EnergyThresholds.DEFAULT.lowMargin());
+        assertThat(thresholds.lowQuota()).isEqualTo(EnergyThresholds.DEFAULT.lowQuota());
     }
 
     @Test

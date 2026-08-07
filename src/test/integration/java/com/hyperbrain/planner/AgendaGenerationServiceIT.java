@@ -3,6 +3,7 @@ package com.hyperbrain.planner;
 import com.hyperbrain.planner.application.AgendaGenerationService;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -39,6 +40,7 @@ class AgendaGenerationServiceIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
         jdbcTemplate.update("DELETE FROM core_execution_profile");
@@ -64,7 +66,7 @@ class AgendaGenerationServiceIT {
 
         assertThat(agenda.blocks()).hasSize(2);
         List<Map<String, Object>> persisted = jdbcTemplate.queryForList(
-            "SELECT executable_id, status, origin FROM core_time_block ORDER BY date_start");
+            "SELECT executable_id, status, origin FROM planner_blocks ORDER BY date_start");
         assertThat(persisted).hasSize(2);
         assertThat(persisted.get(0).get("executable_id")).isEqualTo(high);
         assertThat(persisted).allSatisfy(row -> {
@@ -86,13 +88,13 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?",
+            "SELECT date_start FROM planner_blocks WHERE executable_id = ?",
             OffsetDateTime.class, task);
         // The block cannot start before the AGENDA wall ends at 09:00.
         assertThat(blockStart).isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
         // And the AGENDA executable itself is never given a block.
         Integer agendaBlocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block b JOIN core_executable e ON e.id = b.executable_id "
+            "SELECT count(*) FROM planner_blocks b JOIN core_executable e ON e.id = b.executable_id "
                 + "WHERE e.type = 'AGENDA'", Integer.class);
         assertThat(agendaBlocks).isZero();
     }
@@ -111,7 +113,7 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?",
+            "SELECT date_start FROM planner_blocks WHERE executable_id = ?",
             OffsetDateTime.class, task);
         assertThat(blockStart).isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
     }
@@ -126,10 +128,17 @@ class AgendaGenerationServiceIT {
 
         service.generate(USER, DAY, UTC, NOON, false);
 
-        // The earliest block belongs to the WIG lead measure, ahead of the higher-scored task.
-        UUID firstBlockExecutable = jdbcTemplate.queryForObject(
-            "SELECT executable_id FROM core_time_block ORDER BY date_start LIMIT 1", UUID.class);
-        assertThat(firstBlockExecutable).isEqualTo(wig);
+        // The lead measure holds a goal window, and holds it ALONE: the band the template calls
+        // «Meta» is for the goal. It no longer has to be the earliest block of the day — under the
+        // window model the goal takes its band, not the first free minute.
+        UUID goalBlock = jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, wig);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT template_slot_id FROM core_executable WHERE id = ?", String.class, goalBlock))
+            .isEqualTo("GOAL_MORNING");
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE container_block_id = ?",
+            Integer.class, goalBlock)).isEqualTo(1);
     }
 
     @Test
@@ -145,7 +154,7 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         List<UUID> wigBlocks = jdbcTemplate.queryForList(
-            "SELECT executable_id FROM core_time_block WHERE executable_id IN (?, ?)",
+            "SELECT executable_id FROM planner_blocks WHERE executable_id IN (?, ?)",
             UUID.class, wigA, wigB);
         assertThat(wigBlocks).containsExactlyInAnyOrder(wigA, wigB);
     }
@@ -202,7 +211,7 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?",
+            "SELECT date_start FROM planner_blocks WHERE executable_id = ?",
             OffsetDateTime.class, task);
         // Wake observed at 05:00 lets the block start earlier than the cold-start default would.
         assertThat(blockStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 5, 0, 0, 0, UTC));
@@ -231,7 +240,7 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?",
+            "SELECT date_start FROM planner_blocks WHERE executable_id = ?",
             OffsetDateTime.class, task);
         // The stale 05:00 observations are ignored; the block opens at the settings wake of 08:00.
         assertThat(blockStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC));
@@ -251,7 +260,7 @@ class AgendaGenerationServiceIT {
         // block keeps its id — and therefore its Apple mapping / EKEvent (no duplication, #15).
         service.generate(USER, DAY, UTC, NOON, false);
         Integer afterSecond = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             Integer.class);
 
         assertThat(afterSecond).isEqualTo(2);
@@ -278,18 +287,20 @@ class AgendaGenerationServiceIT {
         // The high block survives with the same id; the low block row is gone.
         assertThat(blockId(high)).isEqualTo(highBlockFirst);
         Integer lowBlocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE executable_id = ?", Integer.class, low);
+            "SELECT count(*) FROM planner_blocks WHERE executable_id = ?", Integer.class, low);
         assertThat(lowBlocks).isZero();
 
-        // And the staged write-back carries the removed block id so its Apple EKEvent is deleted.
+        // And the withdrawal is announced as a deletion of the block executable, carrying its type so
+        // Apple removes the calendar event rather than looking for a reminder that never existed.
         String payload = jdbcTemplate.queryForObject(
-            "SELECT payload FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", String.class);
-        assertThat(payload).contains(lowBlockFirst.toString());
+            "SELECT payload FROM outbox_events WHERE event_type = 'ExecutableDeletedEvent'",
+            String.class);
+        assertThat(payload).contains(lowBlockFirst.toString()).contains("TIME_BLOCK");
     }
 
     @Test
-    @DisplayName("reconciliation: a task added on the replan is inserted while the prior block keeps its id")
-    void regeneration_inserts_new_block_without_disturbing_survivors() {
+    @DisplayName("a replan admits new work into the window that already exists, keeping its id")
+    void a_replan_admits_new_work_without_disturbing_the_window() {
         UUID high = insertTask("High", 0.9, 60);
 
         service.generate(USER, DAY, UTC, NOON, false);
@@ -299,14 +310,17 @@ class AgendaGenerationServiceIT {
         UUID added = insertTask("Added", 0.5, 60);
         service.generate(USER, DAY, UTC, NOON, false);
 
-        // The prior block is untouched (same id); the new task gets its own fresh block.
+        // The window keeps its identity — so its calendar event is updated, never duplicated — and the
+        // newcomer joins it rather than opening a block of its own. The plan is conserved, not frozen.
         assertThat(blockId(high)).isEqualTo(highBlockFirst);
-        assertThat(blockId(added)).isNotNull().isNotEqualTo(highBlockFirst);
-        // Nothing was removed, so the staged event carries an empty removed list.
-        Integer removedCount = jdbcTemplate.queryForObject(
-            "SELECT jsonb_array_length(payload -> 'removed_block_ids') FROM outbox_events "
-                + "WHERE aggregate_type = 'AGENDA_BLOCK'", Integer.class);
-        assertThat(removedCount).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, added))
+            .isEqualTo(highBlockFirst);
+        // Nothing was withdrawn, so nothing announces a deletion.
+        Integer deletions = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableDeletedEvent'",
+            Integer.class);
+        assertThat(deletions).isZero();
     }
 
     @Test
@@ -314,34 +328,45 @@ class AgendaGenerationServiceIT {
     void regeneration_preserves_non_planner_blocks() {
         UUID task = insertTask("High", 0.9, 60);
         // A USER-origin block on the same day must not be cleared by the planner delete.
+        UUID userBlock = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_time_block (id, executable_id, date_start, date_end, status, origin)
-            VALUES (?, ?, ?, ?, 'PLANNED', 'USER')
-            """, UUID.randomUUID(), task,
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time)
+            VALUES (?, ?, 'User block', 'TIME_BLOCK', 'PLANNED', 'USER', ?, ?)
+            """, userBlock,
+            USER,
             OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC),
             OffsetDateTime.of(2026, 7, 10, 16, 0, 0, 0, UTC));
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            userBlock, task);
 
         service.generate(USER, DAY, UTC, NOON, false);
 
         Integer userBlocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'USER'", Integer.class);
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'USER'", Integer.class);
         assertThat(userBlocks).isEqualTo(1);
     }
 
     @Test
-    @DisplayName("write-back staging: a planned day stages one AgendaBlockPlannedEvent on the outbox")
+    @DisplayName("write-back staging: a planned day announces each block as an executable change")
     void planned_day_stages_agenda_block_event() {
         insertTask("High", 0.9, 60);
 
         service.generate(USER, DAY, UTC, NOON, false);
 
         Integer events = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK' "
-                + "AND event_type = 'AgendaBlockPlannedEvent'", Integer.class);
+            "SELECT count(*) FROM outbox_events WHERE aggregate_type = 'CORE_EXECUTABLE' "
+                + "AND event_type = 'ExecutableCreatedEvent' AND aggregate_id IN "
+                + "(SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK')", Integer.class);
         assertThat(events).isEqualTo(1);
+        // The block is announced under its OWN id now, not under the user's: it is an executable like
+        // any other, and its mirrors are reached by the standard propagators.
         String aggregateId = jdbcTemplate.queryForObject(
-            "SELECT aggregate_id FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", String.class);
-        assertThat(aggregateId).isEqualTo(USER.toString());
+            "SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK'", String.class);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", Integer.class, aggregateId))
+            .isPositive();
     }
 
     @Test
@@ -352,7 +377,7 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, true);
 
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
-            "SELECT min(date_start) FROM core_time_block", OffsetDateTime.class);
+            "SELECT min(date_start) FROM planner_blocks", OffsetDateTime.class);
         assertThat(blockStart).isAfterOrEqualTo(NOON);
     }
 
@@ -378,7 +403,7 @@ class AgendaGenerationServiceIT {
         assertThat(todayBlocks).isGreaterThan(tomorrowBlocks);
         // The first block opens at the local wake (07:00 Bogota), never in the pre-wake hours.
         OffsetDateTime firstStartLocal = jdbcTemplate.queryForObject(
-            "SELECT min(date_start) FROM core_time_block WHERE origin = 'PLANNER'", OffsetDateTime.class)
+            "SELECT min(date_start) FROM planner_blocks WHERE origin = 'PLANNER'", OffsetDateTime.class)
             .atZoneSameInstant(bogota).toOffsetDateTime();
         assertThat(firstStartLocal.toLocalTime()).isEqualTo(java.time.LocalTime.of(7, 0));
         assertThat(firstStartLocal.toLocalDate()).isEqualTo(java.time.LocalDate.of(2026, 7, 22));
@@ -388,7 +413,7 @@ class AgendaGenerationServiceIT {
         OffsetDateTime start = java.time.LocalDate.of(year, month, day).atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime end = start.plusDays(1);
         Integer n = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED' "
                 + "AND date_start >= ? AND date_start < ?", Integer.class, start, end);
         return n == null ? 0 : n;
     }
@@ -431,10 +456,10 @@ class AgendaGenerationServiceIT {
         service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, false);
 
         // The tomorrow-due task is not scheduled today (its start_time due date is respected)...
-        assertThat(count("SELECT count(*) FROM core_time_block WHERE executable_id = ?", dueTomorrow))
+        assertThat(count("SELECT count(*) FROM planner_blocks WHERE executable_id = ?", dueTomorrow))
             .isZero();
         // ...while the undated task is planned today.
-        assertThat(count("SELECT count(*) FROM core_time_block WHERE executable_id = ?", undated))
+        assertThat(count("SELECT count(*) FROM planner_blocks WHERE executable_id = ?", undated))
             .isEqualTo(1);
     }
 
@@ -444,8 +469,8 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("overdue task (due in the past) is replanned today, not filtered from every day")
-    void overdue_task_is_replanned_today() {
+    @DisplayName("admission: yesterday's leftovers are not dragged into today — the day-close sweep owns them")
+    void an_overdue_task_is_not_admitted() {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
         UUID overdue = insertTask("Overdue", 0.9, 30);
@@ -455,9 +480,12 @@ class AgendaGenerationServiceIT {
 
         service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, true);
 
-        Integer blocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE executable_id = ?", Integer.class, overdue);
-        assertThat(blocks).isEqualTo(1);
+        // The day takes what is dated FOR it plus the dateless bag, and nothing else (ADR-040 D3).
+        // What was left undone yesterday returns through the day-close sweep, which re-dates it to
+        // today; pulling it forward here as well would double-count it and undo the sweep's work.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, overdue))
+            .isNull();
     }
 
     @Test
@@ -472,7 +500,7 @@ class AgendaGenerationServiceIT {
         // No exception, an empty day, and nothing persisted (today's plan, if any, is left untouched).
         assertThat(agenda.blocks()).isEmpty();
         Integer todayBlocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block", Integer.class);
+            "SELECT count(*) FROM planner_blocks", Integer.class);
         assertThat(todayBlocks).isZero();
     }
 
@@ -488,12 +516,12 @@ class AgendaGenerationServiceIT {
         assertThat(replanned).isTrue();
         // Nothing is planned for today (its forward window was empty)...
         Integer todayBlocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE date_start < ?", Integer.class,
+            "SELECT count(*) FROM planner_blocks WHERE date_start < ?", Integer.class,
             OffsetDateTime.of(2026, 7, 11, 0, 0, 0, 0, UTC));
         assertThat(todayBlocks).isZero();
         // ...but tomorrow (2026-07-11) is planned as a full day: the task lands within its frontier.
         OffsetDateTime tomorrowBlockStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, task);
+            "SELECT date_start FROM planner_blocks WHERE executable_id = ?", OffsetDateTime.class, task);
         assertThat(tomorrowBlockStart)
             .isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 11, 7, 0, 0, 0, UTC));
     }
@@ -554,67 +582,70 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("H1 humanized floor: buffers, meal protection, no slivers and an occupancy cap hold together")
-    void humanized_floor_invariants_hold_together() {
-        // A full day of work plus a sliver and a dated task, over the cold-start 07:00–23:00 window.
-        // The humanized floor must space, protect meals, drop the sliver and cap occupancy. Since
-        // ADR-026 D4 the authorial reminder hour no longer seeds placement — the dated task is placed
-        // by rank like any other, not anchored to its 15:00 due instant.
+    @DisplayName("the day stops being a wall of blocks: sixteen tasks become a handful of windows")
+    void a_full_day_yields_windows_not_a_wall_of_blocks() {
+        // The regression test for the failure that motivated ADR-040. In production the old engine
+        // turned a day like this into twenty-one flat blocks between 07:00 and 17:30 — a wall nobody
+        // executes, so the day gets abandoned and rebuilt by hand, which is exactly the failure the
+        // system exists to prevent.
         for (int i = 0; i < 16; i++) {
             insertTask("Work " + i, 0.99 - i * 0.01, 60);
         }
-        UUID sliver = insertTask("Sliver", 0.95, 10);
-        // Highest priority, so it is ranked first and placed at the window start by the cursor.
-        UUID dated = insertTaskDueAt("Reminder at 15:00", 0.999, 60,
-            OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
 
         service.generate(USER, DAY, UTC, NOON, false);
 
         List<Map<String, Object>> blocks = jdbcTemplate.queryForList(
-            "SELECT executable_id, date_start, date_end FROM core_time_block "
+            "SELECT executable_id, date_start, date_end FROM planner_blocks "
                 + "WHERE origin = 'PLANNER' AND status = 'PLANNED' ORDER BY date_start");
 
-        // Rule 2 — no block invades either protected meal window (12:30–13:30, 19:00–20:00 UTC).
+        // One block per window, never one per task: the sixteen tasks live INSIDE the day's windows.
+        assertThat(blocks).hasSizeLessThan(16);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE container_block_id IS NOT NULL AND type = 'TASK'",
+            Integer.class)).isEqualTo(16);
+
+        // The meal anchors still wall — they are commitments on the time axis, which is the one place
+        // ADR-040 D1 allows availability to be expressed.
         assertNoBlockOverlaps(blocks,
             OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, UTC),
             OffsetDateTime.of(2026, 7, 10, 13, 30, 0, 0, UTC));
         assertNoBlockOverlaps(blocks,
             OffsetDateTime.of(2026, 7, 10, 19, 0, 0, 0, UTC),
             OffsetDateTime.of(2026, 7, 10, 20, 0, 0, 0, UTC));
-
-        // Rule 3 — no sub-minimum sliver survives; the 10-min task is left unscheduled.
-        assertThat(blocks).allSatisfy(row ->
-            assertThat(minutesBetween(row)).isGreaterThanOrEqualTo(15));
-        assertThat(blocks).noneMatch(row -> sliver.equals(row.get("executable_id")));
-
-        // Rule 6 — the day is never packed past the 85% occupancy cap of the 960-min window.
-        long busy = blocks.stream().mapToLong(AgendaGenerationServiceIT::minutesBetween).sum();
-        assertThat(busy).isLessThanOrEqualTo(Math.round(960 * 0.85));
-
-        // ADR-026 D4 — the dated task's placement is the Planner's own authorship: it is NOT anchored
-        // to its 15:00 reminder instant. Highest-ranked, it lands at the window start instead.
-        OffsetDateTime datedStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, dated);
-        assertThat(datedStart).isNotEqualTo(OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
-        assertThat(datedStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 7, 0, 0, 0, UTC));
     }
 
     @Test
-    @DisplayName("H1 rule 1: consecutive cursor-placed blocks are spaced by the transition buffer")
-    void consecutive_blocks_carry_a_transition_buffer() {
-        insertTask("High", 0.9, 60);
-        insertTask("Low", 0.3, 60);
+    @DisplayName("nothing trims the tail of the day: the evening is planned like any other band")
+    void the_evening_is_no_longer_cut_off() {
+        for (int i = 0; i < 16; i++) {
+            insertTask("Work " + i, 0.99 - i * 0.01, 60);
+        }
 
         service.generate(USER, DAY, UTC, NOON, false);
 
-        List<OffsetDateTime> bounds = jdbcTemplate.queryForList(
-            "SELECT date_end FROM core_time_block ORDER BY date_start", OffsetDateTime.class);
-        OffsetDateTime firstEnd = bounds.get(0);
-        OffsetDateTime secondStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block ORDER BY date_start OFFSET 1 LIMIT 1",
-            OffsetDateTime.class);
-        // A 5-min transition buffer separates the two blocks (07:00–08:00 then 08:05–09:05).
-        assertThat(java.time.Duration.between(firstEnd, secondStart).toMinutes()).isEqualTo(5);
+        // The retired chaos margin was implemented as a cut to the TAIL of the day: with a 30% margin
+        // over 06:00-22:00 the placement limit fell to 17:12, so the afternoon was dead by side effect
+        // and not by decision. Daniel's 2026-08-07 directive reopens the evening bands on top of that.
+        OffsetDateTime latestEnd = jdbcTemplate.queryForObject(
+            "SELECT max(date_end) FROM planner_blocks WHERE origin = 'PLANNER'", OffsetDateTime.class);
+        assertThat(latestEnd).isAfter(OffsetDateTime.of(2026, 7, 10, 17, 12, 0, 0, UTC));
+    }
+
+    @Test
+    @DisplayName("two tasks share a window instead of being glued into two back-to-back blocks")
+    void two_tasks_share_a_window() {
+        UUID high = insertTask("High", 0.9, 60);
+        UUID low = insertTask("Low", 0.3, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // The five-minute cushion that used to separate two blocks is gone with the other capacity
+        // discounts (ADR-040 D1) — and it needs no successor, because the two tasks are no longer two
+        // blocks at all. The tail of the window itself is the transition.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, high)).isNotNull();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, low)).isNotNull();
     }
 
     private static void assertNoBlockOverlaps(List<Map<String, Object>> blocks,
@@ -641,7 +672,7 @@ class AgendaGenerationServiceIT {
 
     private List<UUID> scheduledExecutableIds() {
         return jdbcTemplate.queryForList(
-            "SELECT executable_id FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            "SELECT executable_id FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             UUID.class);
     }
 
@@ -666,7 +697,7 @@ class AgendaGenerationServiceIT {
 
     private UUID blockId(UUID executableId) {
         return jdbcTemplate.queryForObject(
-            "SELECT id FROM core_time_block WHERE executable_id = ? AND origin = 'PLANNER' "
+            "SELECT id FROM planner_blocks WHERE executable_id = ? AND origin = 'PLANNER' "
                 + "AND status = 'PLANNED'", UUID.class, executableId);
     }
 
@@ -757,10 +788,15 @@ class AgendaGenerationServiceIT {
     }
 
     private void insertPlannerBlock(UUID executableId, OffsetDateTime start) {
+        UUID blockId = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_time_block (id, executable_id, date_start, date_end, status, origin)
-            VALUES (?, ?, ?, ?, 'SETTLED', 'PLANNER')
-            """, UUID.randomUUID(), executableId, start, start.plusMinutes(45));
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time)
+            VALUES (?, ?, 'Settled block', 'TIME_BLOCK', 'DONE', 'PLANNER', ?, ?)
+            """, blockId, USER, start, start.plusMinutes(45));
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            blockId, executableId);
     }
 
     private void insertSleepRecord(OffsetDateTime bedtime, OffsetDateTime wake, Integer sleepScore,

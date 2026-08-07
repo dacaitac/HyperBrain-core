@@ -40,29 +40,26 @@ public class EnergyResolver {
     }
 
     /**
-     * Resolves the day's load parameters from a fresh {@code sleep_score}, or the NEUTRAL default when
+     * Resolves the day's energy reading from a fresh {@code sleep_score}, or the NEUTRAL default when
      * no fresh score is available.
      *
      * @param sleepScore last night's fresh {@code sleep_score}, or null when absent/stale
-     * @return the resolved F3 margin, F6 quota and readable criterion
+     * @return the resolved tier, goal-reservation budget and readable criterion
      */
     public EnergyProfile resolve(Integer sleepScore) {
         if (sleepScore == null) {
-            return profile(EnergyTier.NEUTRAL, thresholds.neutralMargin(), thresholds.neutralQuota(),
+            return new EnergyProfile(EnergyTier.NEUTRAL, thresholds.neutralQuota(),
                 String.format(Locale.ROOT,
-                    "No fresh sleep score → neutral energy → chaos margin %.0f%% (F3), "
-                        + "high-load quota %d (F6)",
-                    thresholds.neutralMargin() * 100, thresholds.neutralQuota()));
+                    "No fresh sleep score → neutral energy → goal budget %d",
+                    thresholds.neutralQuota()));
         }
         EnergyTier tier = tierOf(sleepScore);
-        return switch (tier) {
-            case LOW -> profile(tier, thresholds.lowMargin(), thresholds.lowQuota(),
-                criterion(sleepScore, thresholds.lowMargin(), thresholds.lowQuota()));
-            case NEUTRAL -> profile(tier, thresholds.neutralMargin(), thresholds.neutralQuota(),
-                criterion(sleepScore, thresholds.neutralMargin(), thresholds.neutralQuota()));
-            case HIGH -> profile(tier, thresholds.highMargin(), thresholds.highQuota(),
-                criterion(sleepScore, thresholds.highMargin(), thresholds.highQuota()));
+        int budget = switch (tier) {
+            case LOW -> thresholds.lowQuota();
+            case NEUTRAL -> thresholds.neutralQuota();
+            case HIGH -> thresholds.highQuota();
         };
+        return new EnergyProfile(tier, budget, criterion(sleepScore, tier, budget));
     }
 
     private EnergyTier tierOf(int sleepScore) {
@@ -75,13 +72,13 @@ public class EnergyResolver {
         return EnergyTier.NEUTRAL;
     }
 
-    private static EnergyProfile profile(EnergyTier tier, double margin, int quota, String criterion) {
-        return new EnergyProfile(tier, margin, quota, criterion);
-    }
-
-    private static String criterion(int sleepScore, double margin, int quota) {
-        return String.format(Locale.ROOT,
-            "Sleep Score %d → chaos margin %.0f%% (F3) → high-load quota %d (F6)",
-            sleepScore, margin * 100, quota);
+    /**
+     * The readable chain the agenda surfaces. It no longer mentions a chaos margin, because there is
+     * none: nothing trims the day any more, and a criterion naming a mechanism that was retired would
+     * explain the day by something that did not happen to it.
+     */
+    private static String criterion(int sleepScore, EnergyTier tier, int budget) {
+        return String.format(Locale.ROOT, "Sleep Score %d → %s energy → goal budget %d",
+            sleepScore, tier, budget);
     }
 }

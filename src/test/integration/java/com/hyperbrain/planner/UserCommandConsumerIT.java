@@ -3,6 +3,7 @@ package com.hyperbrain.planner;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,6 +67,7 @@ class UserCommandConsumerIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
         jdbcTemplate.update("DELETE FROM processed_message");
@@ -94,9 +96,10 @@ class UserCommandConsumerIT {
         // Then one PLANNED/PLANNER block materializes at or after the replan instant
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
         assertThat(earliestBlockStart()).isAfterOrEqualTo(NOON);
-        // And the write-back rides the existing outbox path (AgendaBlockPlannedEvent staged)
+        // And the write-back rides the standard executable path: the block announces itself
         Integer staged = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE event_type = 'AgendaBlockPlannedEvent'",
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableCreatedEvent' "
+                + "AND aggregate_id IN (SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK')",
             Integer.class);
         assertThat(staged).isEqualTo(1);
 
@@ -104,10 +107,13 @@ class UserCommandConsumerIT {
         UUID second = UUID.randomUUID();
         send(replanBody(second, HALF_PAST_NOON), second.toString());
 
-        // Then the day converges to a single regenerated set (delete-before-persist), from 12:30
+        // Then the day still holds exactly one block — the replan converges instead of duplicating.
+        // It is the SAME block, still at 12:00: its start had already gone by, so the second replan
+        // neither re-times it nor re-places the work inside it (ADR-040 D8, the past is never
+        // rewritten). A morning already under way is not a draft to be reshuffled at 12:30.
         await().atMost(TIMEOUT).untilAsserted(() ->
-            assertThat(earliestBlockStart()).isAfterOrEqualTo(HALF_PAST_NOON));
-        assertThat(countPlannedBlocks()).isEqualTo(1);
+            assertThat(countPlannedBlocks()).isEqualTo(1));
+        assertThat(earliestBlockStart()).isEqualTo(NOON);
     }
 
     @Test
@@ -368,14 +374,14 @@ class UserCommandConsumerIT {
 
     private int countPlannedBlocks() {
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE status = 'PLANNED' AND origin = 'PLANNER'",
+            "SELECT count(*) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             Integer.class);
         return count == null ? 0 : count;
     }
 
     private OffsetDateTime earliestBlockStart() {
         return jdbcTemplate.queryForObject(
-            "SELECT min(date_start) FROM core_time_block WHERE status = 'PLANNED' AND origin = 'PLANNER'",
+            "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
     }
 

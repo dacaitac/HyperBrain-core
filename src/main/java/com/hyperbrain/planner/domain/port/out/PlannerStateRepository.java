@@ -1,9 +1,11 @@
 package com.hyperbrain.planner.domain.port.out;
 
-import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.MciWig;
+import com.hyperbrain.planner.domain.model.MovableCommitment;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
+import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
+import com.hyperbrain.planner.domain.model.PlannerBlockRow;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
 
@@ -17,10 +19,11 @@ import java.util.UUID;
 
 /**
  * Out-port through which the deterministic agenda floor (#6a) reads the day's domain state directly
- * from the aggregates ({@code core_executable}, {@code core_time_block}, {@code core_cycle},
- * {@code tel_sleep_record}, {@code sys_user.settings}) and persists the resulting {@code PLANNED}
- * blocks. The floor does <b>not</b> consume the UserStateReadModel (#61) — that is the LLM tier's
- * contract (#6b), not the floor's (Daniel, 2026-07-09).
+ * from the aggregates ({@code core_executable}, {@code core_cycle}, {@code tel_sleep_record},
+ * {@code sys_user.settings}) and persists the resulting {@code PLANNED} blocks — which since ADR-039
+ * are {@code core_executable} rows of type {@code TIME_BLOCK}, not rows of the frozen
+ * {@code core_time_block} table. The floor does <b>not</b> consume the UserStateReadModel
+ * (#61) — that is the LLM tier's contract (#6b), not the floor's (Daniel, 2026-07-09).
  *
  * <p>The implementation lives in {@code planner.infrastructure} (JDBC), keeping the domain services
  * free of persistence. All reads are per user and, where relevant, anchored to the target day and the
@@ -73,12 +76,21 @@ public interface PlannerStateRepository {
      * morning nothing is completed yet, so the guard is a no-op there.
      *
      * @param userId   the owning user
-     * @param dayStart the target day's start instant (inclusive), for the completed-today guard
-     * @param dayEnd   the target day's end instant (exclusive), for the completed-today guard
+     * <p>Work already held by a block this run may not re-time is not a candidate either: a
+     * {@code USER} block the user timed by hand, one already under way, or a planner block whose start
+     * has gone by. Containment is monovalent, so offering such an executable would silently pull it out
+     * of the block that holds it — the guard has to live in the admission, because by the time a block
+     * row is written the move has already happened.
+     *
+     * @param userId    the owning user
+     * @param dayStart  the target day's start instant (inclusive), for the completed-today guard
+     * @param dayEnd    the target day's end instant (exclusive), for the completed-today guard
+     * @param notBefore the earliest block start this run may still re-time; blocks older than it hold
+     *                  their members
      * @return the ranked schedulables; never null, may be empty
      */
     List<SchedulableExecutable> loadRankedExecutables(UUID userId, OffsetDateTime dayStart,
-                                                      OffsetDateTime dayEnd);
+                                                      OffsetDateTime dayEnd, OffsetDateTime notBefore);
 
     /**
      * Reads the day's WIG portfolio: the {@code ACTIVE MCI} cycles ({@code CoreCycle type=MCI}), each
@@ -109,42 +121,68 @@ public interface PlannerStateRepository {
                                                  OffsetDateTime dayEnd);
 
     /**
-     * Reconciles the day's regenerable {@code PLANNED}/{@code PLANNER} blocks against a freshly
-     * generated plan, <b>preserving block identity</b> so a regeneration converges without churning
-     * the Apple calendar (#15). Identity is a <b>persisted surrogate</b> reconciled by anchoring
-     * ({@link com.hyperbrain.planner.domain.model.PlannerBlockIdentity}, ADR-027 D3) — never a function
-     * of the block's membership, so a member entering or leaving the theme cannot regenerate the id:
-     * <ul>
-     *   <li>a block the plan continues keeps its id and is <b>updated</b> in place (new
-     *       start/end/reason, new membership on {@code core_time_block_member}), keeping
-     *       its {@code core_time_block.id} and therefore its {@code sync_mapping} → the write-back
-     *       emits an {@code UPDATE} of the existing EKEvent instead of a duplicate {@code CREATE};</li>
-     *   <li>a genuinely new block is <b>inserted</b>;</li>
-     *   <li>a block that dropped out of the new plan is <b>deleted</b>, and its id is returned so the
-     *       caller can stage the deletion of its Apple counterpart (the mapping is not touched here —
-     *       it is closed by the write-command result loop once Apple confirms the delete).</li>
-     * </ul>
-     * Scoped to {@code PLANNER}-origin {@code PLANNED} rows: {@code FOCUS}/{@code USER} blocks and any
-     * {@code ACTIVE}/{@code SETTLED} work (which carries telemetry) are never touched. An executable
-     * already held by such a live block on the target day keeps its membership there — the D5 invariant
-     * (≤ 1 live block per executable per day) wins over the new plan's projection, and the conflicting
-     * bridge row is skipped rather than letting a constraint violation abort the day. Must run in the
-     * same transaction as the write-back staging so the plan and its delivery are atomic.
+     * Reads the day's movable commitments: the open {@code ACTIVITY} and {@code LEARNING_SESSION} rows
+     * whose window falls on the target day (ADR-040 D9, middle tier). They are never window members —
+     * they carry a calendar window of their own — but the planner may move them in hour inside their
+     * day.
      *
-     * @param userId    the owning user; never null
-     * @param targetDay the calendar day being reconciled; never null
-     * @param zone      the user's timezone used to bound the local day; never null
-     * @param desired   the accepted blocks the new plan wants for the day; never null, may be empty
-     * @return the ids of previously-persisted {@code PLANNED} blocks that dropped out of the new plan;
-     *         never null, may be empty
+     * @param userId   the owning user; never null
+     * @param dayStart the day's start instant (inclusive); never null
+     * @param dayEnd   the day's end instant (exclusive); never null
+     * @return the day's movable commitments, earliest first; never null, may be empty
      */
-    List<UUID> reconcilePlannedBlocks(UUID userId, LocalDate targetDay, ZoneId zone,
-                                      List<AgendaBlock> desired);
+    List<MovableCommitment> loadMovableCommitments(UUID userId, OffsetDateTime dayStart,
+                                                   OffsetDateTime dayEnd);
 
     /**
-     * Re-reads the persisted {@code PLANNED}/{@code PLANNER} blocks of the target day, each joined to
-     * its executable's display name, for the agenda write-back (HU-01b). Ordered by {@code date_start}
-     * so the emitted reminders follow the day's chronology.
+     * Re-reads the day's <b>regenerable</b> blocks — the {@code TIME_BLOCK} executables of
+     * {@code origin = PLANNER} still in {@code PLANNED}, with the membership each currently holds
+     * through {@code container_block_id} and the template slot each realises.
+     *
+     * <p>This is the reconciliation universe <b>and</b> the starting point of the conservative replan
+     * (ADR-040 D8): a replan does not start from nothing, it starts from the plan that is already
+     * there. Everything outside this set is untouchable: {@code USER} blocks, blocks already
+     * {@code IN_PROGRESS} or closed, and the read-only agenda.
+     *
+     * <p><b>{@code notBefore} is what makes "the past is never rewritten" an invariant rather than a
+     * convention.</b> A block whose start has already gone by is not regenerable: it is not re-timed,
+     * it is not withdrawn, and — because this same read feeds the wall subtraction — it keeps walling
+     * the time it took. A morning already lived is not a draft.
+     *
+     * @param userId    the owning user; never null
+     * @param targetDay the calendar day to read; never null
+     * @param zone      the user's timezone used to bound the local day; never null
+     * @param notBefore the earliest start this run may still touch; never null
+     * @return the day's regenerable blocks, chronologically ordered; never null, may be empty
+     */
+    List<PlannerBlockIdentity.PersistedBlock> loadRegenerableBlocks(UUID userId, LocalDate targetDay,
+                                                                    ZoneId zone,
+                                                                    OffsetDateTime notBefore);
+
+    /**
+     * Inserts or re-times one planner block as a {@code TIME_BLOCK} executable (ADR-039: the block IS
+     * the executable), under the id the identity reconciliation assigned it — so a continued block keeps
+     * its {@code sync_mapping} and its calendar event is <b>updated</b> rather than duplicated (#15).
+     *
+     * <p>Two things are deliberately <b>not</b> written on an update:
+     * <ul>
+     *   <li><b>the name</b>, because grouping and naming are the LLM's work and they survive a replan
+     *       untouched (ADR-040 D8) — re-invoking the model on every replan would be precisely the
+     *       friction that decision exists to avoid;</li>
+     *   <li><b>anything at all when nothing moved</b>: the statement's own guard makes an unchanged
+     *       block a zero-row write, so a replan that changes two blocks announces two, not thirty
+     *       (ADR-040 D17).</li>
+     * </ul>
+     *
+     * @param block the block row to persist; never null
+     * @return true when the row was actually inserted or moved — the caller's signal to announce it
+     */
+    boolean upsertBlock(PlannerBlockRow block);
+
+    /**
+     * Re-reads the persisted {@code PLANNED}/{@code PLANNER} blocks of the target day with their
+     * members' display names, for the agenda write-back (HU-01b). Ordered by start instant so the
+     * emitted reminders follow the day's chronology.
      *
      * @param userId    the owning user; never null
      * @param targetDay the calendar day to read; never null

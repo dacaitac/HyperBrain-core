@@ -11,7 +11,8 @@ import java.util.UUID;
  * the proposal is atomic with the materialization — either the empty day is claimed <em>and</em> the
  * notice is queued, or neither. This removes the crash window a post-commit publish left open.
  *
- * <p>It shares the {@code AGENDA_BLOCK} aggregate type with {@link AgendaBlockPlannedEvent} so the
+ * <p>It keeps the {@code AGENDA_BLOCK} aggregate type — unchanged on purpose, so a notice already in
+ * the outbox at the moment of the cut still routes — so the
  * same Apple propagator routes it; the {@code event_type} distinguishes the two. The propagator emits
  * the notice reminder with a command id derived deterministically from {@code (user, day)}, so an
  * at-least-once drain never doubles it.
@@ -30,8 +31,8 @@ public record EmptyAgendaProposedEvent(
     OffsetDateTime referenceInstant
 ) {
 
-    /** Outbox {@code aggregate_type}: shared with {@link AgendaBlockPlannedEvent} for propagator routing. */
-    public static final String AGGREGATE_TYPE = AgendaBlockPlannedEvent.AGGREGATE_TYPE;
+    /** Outbox {@code aggregate_type} the notice propagator routes on. */
+    public static final String AGGREGATE_TYPE = "AGENDA_BLOCK";
 
     /** Outbox {@code event_type} (past participle). */
     public static final String EVENT_TYPE = "EmptyAgendaProposedEvent";

@@ -9,7 +9,7 @@ import java.time.OffsetDateTime;
 /**
  * Schedules the block expiry sweep: open blocks whose {@code end_time} passed settle as
  * {@code DONE} (ADR-040 D4 — a container of time that elapsed, not a broken commitment).
- * Separated from {@link TimeBlockSettlementService} so tests can drive {@code expireDueBlocks()}
+ * Separated from {@link TimeBlockExpiryService} so tests can drive {@code expireDueBlocks()}
  * deterministically — the bean is switched off via {@code app.timeblock.scheduling-enabled=false}
  * in the integration-test profile, mirroring the OutboxScheduler pattern. No replanning happens
  * here: relocating the remainder (TaskOverrunDetectedEvent) is HU-02.
@@ -23,14 +23,14 @@ import java.time.OffsetDateTime;
 @ConditionalOnProperty(prefix = "app.timeblock", name = "scheduling-enabled", havingValue = "true", matchIfMissing = true)
 public class TimeBlockExpiryScheduler {
 
-    private final TimeBlockSettlementService settlementService;
+    private final TimeBlockExpiryService expiryService;
 
-    public TimeBlockExpiryScheduler(TimeBlockSettlementService settlementService) {
-        this.settlementService = settlementService;
+    public TimeBlockExpiryScheduler(TimeBlockExpiryService expiryService) {
+        this.expiryService = expiryService;
     }
 
     @Scheduled(fixedDelayString = "${app.timeblock.expiry-poll-ms:60000}")
     public void expire() {
-        settlementService.expireDueBlocks(OffsetDateTime.now());
+        expiryService.expireDueBlocks(OffsetDateTime.now());
     }
 }

@@ -4,9 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.application.event.SubtaskCompletedPayload;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
-import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
-import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -27,12 +25,14 @@ import java.util.UUID;
  * parent has no user subtasks. The counters exclude the row being ingested and add its
  * in-memory state instead, so a subtask arriving already-DONE on CREATE still counts.
  *
- * <p>On the transition to DONE it additionally imputes the subtask eagerly to the parent's
- * executing block when one covers the completion (via {@code imputed_block_id}, ADR-039), and
- * emits {@code SubtaskCompletedEvent}. Un-completing reverts the imputation. The completion
- * clock ({@code last_completed_at}) is owned by {@code CompletionOutcomeRule}, which stamps
- * DONE and FAILED closures alike. Direct writes are no-ops on CREATE (the row is persisted
- * after the rules); the progress itself is still exact.
+ * <p>On the transition to DONE it also emits {@code SubtaskCompletedEvent}. The completion clock
+ * ({@code last_completed_at}) is owned by {@code CompletionOutcomeRule}, which stamps DONE and FAILED
+ * closures alike. Direct writes are no-ops on CREATE (the row is persisted after the rules); the
+ * progress itself is still exact.
+ *
+ * <p>The imputation that used to attribute a completed subtask to the block covering it went with the
+ * focus register (ADR-040 D13). It existed to answer how much of the work done had been planned, and
+ * that question lost its consumer when time estimation was retired.
  */
 @Component
 public class ProgressRecalculationRule implements DomainRule {
@@ -44,18 +44,15 @@ public class ProgressRecalculationRule implements DomainRule {
     private static final String SOURCE_SYSTEM = "SYSTEM";
 
     private final ExecutableStateRepository stateRepo;
-    private final TimeBlockExecutableRepository timeBlockRepo;
     private final OutboxRepository outboxRepo;
     private final ObjectMapper objectMapper;
 
     public ProgressRecalculationRule(
         ExecutableStateRepository stateRepo,
-        TimeBlockExecutableRepository timeBlockRepo,
         OutboxRepository outboxRepo,
         ObjectMapper objectMapper
     ) {
         this.stateRepo = stateRepo;
-        this.timeBlockRepo = timeBlockRepo;
         this.outboxRepo = outboxRepo;
         this.objectMapper = objectMapper;
     }
@@ -76,31 +73,25 @@ public class ProgressRecalculationRule implements DomainRule {
 
         if (becameDone(previous, merged)) {
             onCompleted(merged, counts.progress());
-        } else if (becameUndone(previous, merged)) {
-            stateRepo.clearImputation(merged.id());
         }
         return merged;
     }
 
     private void onCompleted(ExecutableSnapshot merged, Double parentProgress) {
-        // The completion clock (last_completed_at) is stamped by CompletionOutcomeRule
-        // (ADR-039), which also covers FAILED closures; this rule keeps the DONE-only
-        // imputation and progress accounting.
+        // The completion clock (last_completed_at) is stamped by CompletionOutcomeRule, which also
+        // covers FAILED closures; this rule keeps the DONE-only progress accounting. The imputation
+        // that used to attribute a completed subtask to the block covering it went with the focus
+        // register (ADR-040 D13): it existed to answer how much of the work done had been planned, and
+        // that question lost its consumer along with the rest of the series.
         OffsetDateTime now = OffsetDateTime.now();
-        UUID imputedBlockId = timeBlockRepo.findActiveBlockFor(merged.parentId())
-            .map(TimeBlockExecutable::id)
-            .orElse(null);
-        if (imputedBlockId != null) {
-            stateRepo.imputeToBlock(merged.id(), imputedBlockId);
-        }
         outboxRepo.append(new OutboxEvent(
             UUID.randomUUID(), EXECUTABLE_AGGREGATE, merged.id().toString(),
             "SubtaskCompletedEvent",
             toJson(new SubtaskCompletedPayload(
-                merged.id(), merged.parentId(), now, imputedBlockId, parentProgress)),
+                merged.id(), merged.parentId(), now, parentProgress)),
             SOURCE_SYSTEM, now));
-        log.info("Subtask {} of parent {} completed (progress {}, imputed block {})",
-            merged.id(), merged.parentId(), parentProgress, imputedBlockId);
+        log.info("Subtask {} of parent {} completed (progress {})",
+            merged.id(), merged.parentId(), parentProgress);
     }
 
     private static boolean statusChanged(ExecutableSnapshot previous, ExecutableSnapshot merged) {

@@ -1,18 +1,18 @@
 package com.hyperbrain.planner.infrastructure;
 
 import com.hyperbrain.planner.domain.model.AdherenceThresholds;
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.EnergyThresholds;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.service.AdherenceCalculator;
 import com.hyperbrain.planner.domain.service.AgendaGenerator;
-import com.hyperbrain.planner.domain.service.AgendaHumanizer;
 import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
 import com.hyperbrain.planner.domain.service.ContextBatcher;
+import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
-import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
@@ -45,9 +45,16 @@ class PlannerConfig {
         return loader.resolveThresholds();
     }
 
+    /**
+     * The day template (ADR-040 D14), resolved from {@code planner_constants.day_template} with the
+     * sanctioned table as the fallback. Resolved once at wiring time like the other calibration seams:
+     * for the single-user MVP a settings edit takes effect on the next boot, and the template enters
+     * the replan digest through the windows it resolves into (so once loaded, editing it does change
+     * the plan).
+     */
     @Bean
-    LearnedUnitCostCalculator learnedUnitCostCalculator() {
-        return new LearnedUnitCostCalculator();
+    DayTemplate dayTemplate(PlannerConstantsLoader loader) {
+        return loader.resolveDayTemplate();
     }
 
     @Bean
@@ -85,9 +92,17 @@ class PlannerConfig {
     }
 
     @Bean
-    AgendaGenerator agendaGenerator(PlannerConstraints plannerConstraints,
-                                    HumanizationSettings humanizationSettings) {
-        return new AgendaGenerator(plannerConstraints, humanizationSettings);
+    AgendaGenerator agendaGenerator(PlannerConstraints plannerConstraints) {
+        return new AgendaGenerator(plannerConstraints);
+    }
+
+    /**
+     * Lays the day's windows from the template (ADR-040): the structure that replaces the cursor sweep,
+     * and without which the day collapses against its first free hour.
+     */
+    @Bean
+    DayWindowResolver dayWindowResolver(DayTemplate dayTemplate) {
+        return new DayWindowResolver(dayTemplate);
     }
 
     @Bean
@@ -95,23 +110,16 @@ class PlannerConfig {
         return new ContextBatcher();
     }
 
-    @Bean
-    AgendaHumanizer agendaHumanizer() {
-        return new AgendaHumanizer();
-    }
-
     /**
-     * The humanized deterministic floor (H1): the single entry point that composes batching, placement
-     * and post-processing. Also the DEGRADED fallback the ADR-019 propose-then-validate orchestrator
-     * will invoke.
+     * The deterministic floor: batching plus window filling. Also the DEGRADED fallback the ADR-019
+     * propose-then-validate orchestrator invokes — a day laid and ordered, but neither grouped nor
+     * named (ADR-040 D6).
      */
     @Bean
     HumanizedAgendaFloor humanizedAgendaFloor(ContextBatcher contextBatcher,
                                               AgendaGenerator agendaGenerator,
-                                              AgendaHumanizer agendaHumanizer,
                                               HumanizationSettings humanizationSettings) {
-        return new HumanizedAgendaFloor(
-            contextBatcher, agendaGenerator, agendaHumanizer, humanizationSettings);
+        return new HumanizedAgendaFloor(contextBatcher, agendaGenerator, humanizationSettings);
     }
 
     @Bean

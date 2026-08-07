@@ -266,6 +266,24 @@ ALTER TABLE core_executable
 CREATE INDEX idx_core_executable_container ON core_executable (container_block_id);
 CREATE INDEX idx_core_executable_imputed_exec ON core_executable (imputed_block_id);
 
+-- Mirrors HyperBrain-Infra migration for ADR-040 D14 (the single schema change of that ADR):
+-- the template slot a TIME_BLOCK realises. Additive and nullable — empty for every block that does
+-- not come from the template (a USER block, a block born in Notion or in the calendar).
+--
+-- It exists because the hours stop identifying a block the moment a hard commitment displaces it off
+-- its original band: the slot still says WHICH window of the day it is. Derived from the template in
+-- sys_user.settings.planner_constants and NEVER from the block's name, its user or its membership —
+-- if it depended on the name, the calendar event would duplicate every time the LLM did its job well
+-- (the #15 bug). Read by the identity reconciliation (D7) and by the recurrence clone (D12).
+ALTER TABLE core_executable
+    ADD COLUMN template_slot_id TEXT;
+
+-- Partial: only planner-authored blocks ever carry a slot, and the two readers both look a slot up
+-- within one user's day.
+CREATE INDEX idx_core_executable_template_slot
+    ON core_executable (user_id, template_slot_id)
+    WHERE type = 'TIME_BLOCK' AND template_slot_id IS NOT NULL;
+
 -- Expiry sweep support (DR-08 over the executable model): open TIME_BLOCK rows by end_time.
 CREATE INDEX idx_core_executable_open_blocks
     ON core_executable (end_time)

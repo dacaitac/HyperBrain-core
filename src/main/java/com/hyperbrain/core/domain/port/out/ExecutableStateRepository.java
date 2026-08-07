@@ -1,8 +1,7 @@
 package com.hyperbrain.core.domain.port.out;
 
+import com.hyperbrain.core.domain.model.BlockWindow;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
-import com.hyperbrain.core.domain.model.FocusCandidate;
-import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 
@@ -15,44 +14,22 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Persistence port for the SYSTEM-owned focus, progress, containment and streak accounting of
- * {@code core_executable} (ADR-013, amended by ADR-039): {@code progress},
- * {@code system_generated}, {@code pending_reestimation}, {@code imputed_block_id}, the
- * containment columns ({@code container_block_id}, {@code container_planned_minutes},
- * {@code container_ord}), the hard-copied schedule of contained children and the streak pair
- * live outside the ADR-012 authority matrix, so the sync upsert never touches them and these
- * writes survive the ingestion transaction untouched.
+ * Persistence port for the SYSTEM-owned progress, containment and streak accounting of
+ * {@code core_executable}: {@code progress}, {@code system_generated}, the containment columns
+ * ({@code container_block_id}, {@code container_planned_minutes}, {@code container_ord}), the
+ * hard-copied schedule of contained children and the streak pair live outside the ADR-012 authority
+ * matrix, so the sync upsert never touches them and these writes survive the ingestion transaction
+ * untouched.
+ *
+ * <p>The focus accounting this port used to carry — the executing focus a switch had to cut, the
+ * instant snapshot subtask, the re-estimation flag and the imputation of completed subtasks to a
+ * block — is gone with the register itself (ADR-040 D13).
  */
 public interface ExecutableStateRepository {
 
     /**
-     * Finds the user's controllable {@code IN_PROGRESS} executables currently accounted by an
-     * executing block — the executing focus a switch must cut (DR-05). {@code TIME_BLOCK} rows
-     * are never candidates: a block in {@code IN_PROGRESS} is focus accounting, not a focus
-     * that cuts (ADR-039).
-     *
-     * @param userId      owning user
-     * @param excludingId the executable taking the focus; never a cut candidate
-     * @return the cut candidates with their original effort labels
-     */
-    List<FocusCandidate> findActiveFocus(UUID userId, UUID excludingId);
-
-    /**
-     * Finds the user's controllable {@code IN_PROGRESS} executables that pre-date the block
-     * model entirely (no block rows at all, legacy or new) and are not already awaiting
-     * re-estimation ({@code pending_reestimation = false}). Legacy fallback of DR-05:
-     * consulted only when {@link #findActiveFocus} returns nothing; their snapshot window is
-     * the punctual {@code [now, now]}.
-     *
-     * @param userId      owning user
-     * @param excludingId the executable taking the focus
-     * @return the legacy cut candidates
-     */
-    List<FocusCandidate> findLegacyInProgress(UUID userId, UUID excludingId);
-
-    /**
-     * Tells whether an executable is a system-generated focus snapshot. Missing rows report
-     * false (a CREATE ingestion is never a snapshot echo).
+     * Tells whether an executable is a system-generated row. Missing rows report false (a CREATE
+     * ingestion is never an echo of one).
      *
      * @param executableId the executable
      * @return true only for persisted {@code system_generated} rows
@@ -71,30 +48,6 @@ public interface ExecutableStateRepository {
     SubtaskCounts countUserSubtasks(UUID parentId, UUID excludingId);
 
     /**
-     * Persists a focus snapshot as a completed {@code system_generated} subtask, including its
-     * frozen execution-profile labels (DR-06).
-     *
-     * @param snapshot the snapshot to insert
-     */
-    void insertSystemSnapshot(SnapshotSubtask snapshot);
-
-    /**
-     * Flags a cut task {@code pending_reestimation} without touching its effort values (DR-06).
-     *
-     * @param executableId the cut task
-     */
-    void flagPendingReestimation(UUID executableId);
-
-    /**
-     * Clears the {@code pending_reestimation} flag once a human source supplies fresh effort
-     * values (DR-06 confirmation). Conditional: a no-op unless the flag was set.
-     *
-     * @param executableId the task being confirmed
-     * @return true if the flag was cleared by this call
-     */
-    boolean clearPendingReestimation(UUID executableId);
-
-    /**
      * Writes the materialized progress of a parent (DR-07).
      *
      * @param executableId the parent
@@ -105,44 +58,13 @@ public interface ExecutableStateRepository {
     /**
      * Stamps {@code last_completed_at} on an executable observed closing ({@code DONE} or
      * {@code FAILED}, ADR-039): the sync pipeline does not write that column, so this is the
-     * completion clock the settlement imputation and the intraday-replan guard read. No-op
-     * when the row does not exist yet (a row arriving closed on CREATE is persisted after the
-     * rules run).
+     * completion clock the intraday-replan guard reads. No-op when the row does not exist yet (a row
+     * arriving closed on CREATE is persisted after the rules run).
      *
      * @param executableId the closed executable
      * @param completedAt  observed closure instant
      */
     void markCompleted(UUID executableId, OffsetDateTime completedAt);
-
-    /**
-     * Eagerly imputes one completed subtask to the executing block covering its completion
-     * (DR-07), via {@code imputed_block_id} (ADR-039 successor column).
-     *
-     * @param subtaskId the completed subtask
-     * @param blockId   the covering executing {@code TIME_BLOCK} executable
-     */
-    void imputeToBlock(UUID subtaskId, UUID blockId);
-
-    /**
-     * Clears the imputation of a subtask that was un-completed: the block record must not
-     * credit work that was taken back.
-     *
-     * @param subtaskId the reverted subtask
-     */
-    void clearImputation(UUID subtaskId);
-
-    /**
-     * Settlement sweep of DR-08: imputes to a block every user subtask — of the block's FOCUS
-     * anchor or of any of its contained members — that closed as {@code DONE} inside the block
-     * window and is not yet imputed. {@code FAILED} closures are never imputed (ADR-039
-     * matrix: a sanctioned miss earns no execution credit).
-     *
-     * @param blockId     the {@code TIME_BLOCK} executable being settled
-     * @param windowStart block window start
-     * @param windowEnd   block window end (settlement instant or {@code end_time})
-     * @return how many subtasks were imputed by this sweep
-     */
-    int imputeCompletedSubtasks(UUID blockId, OffsetDateTime windowStart, OffsetDateTime windowEnd);
 
     /**
      * Inserts or updates the full attribute set of a {@code core_executable} row plus its
@@ -238,6 +160,80 @@ public interface ExecutableStateRepository {
      * @param targetId the freshly persisted clone
      */
     void copyStreaks(UUID sourceId, UUID targetId);
+
+    /**
+     * Reads a set of executables as snapshots, for callers that need their type and current schedule
+     * before deciding what to write — the published containment operation among them (ADR-040 D11).
+     * Ids with no row are simply absent from the result.
+     *
+     * @param ids the executables to read; never null, may be empty
+     * @return the snapshots found, in no guaranteed order; never null
+     */
+    List<ExecutableSnapshot> findAllById(Collection<UUID> ids);
+
+    /**
+     * Reads the executables a block currently holds through {@code container_block_id}, ordered by
+     * their {@code container_ord}. The release half of ADR-040 D10 walks exactly this set: every member
+     * is let go, with its own event, <b>before</b> the block row is deleted.
+     *
+     * @param blockId the {@code TIME_BLOCK} container; never null
+     * @return its members, in container order; never null, may be empty
+     */
+    List<ExecutableSnapshot> findContainedBy(UUID blockId);
+
+    /**
+     * Deletes a planner-authored {@code TIME_BLOCK} the plan withdrew, with every guard <b>inside the
+     * predicate</b> (ADR-040 D10): planner origin, still {@code PLANNED}, and no history hanging off it
+     * — no frozen duration, no completion clock, no member still contained and nothing imputed to it.
+     *
+     * <p>Guards in the predicate rather than in a prior read is what makes the withdrawal race-safe:
+     * there is no window between checking and deleting. A call that deletes nothing is a notice, not a
+     * failure.
+     *
+     * @param blockId the block to delete
+     * @return true when the row was actually deleted
+     */
+    boolean deleteWithdrawnBlock(UUID blockId);
+
+    // ── ADR-040 D12: the recurrence clone is born with a block of its own day ─
+
+    /**
+     * Reads a {@code TIME_BLOCK} executable as a window.
+     *
+     * @param blockId the block; never null
+     * @return its window, or empty when the id is not a block
+     */
+    Optional<BlockWindow> findBlockWindow(UUID blockId);
+
+    /**
+     * Finds the block that realises a given template slot on a given local day — the reuse half of
+     * ADR-040 D12. Without it, every recurring occurrence would fabricate a block of its own and the
+     * day would be a wall again.
+     *
+     * @param userId         the owning user; never null
+     * @param templateSlotId the slot to look for; never null
+     * @param dayStart       the day's start instant (inclusive); never null
+     * @param dayEnd         the day's end instant (exclusive); never null
+     * @return the block that already holds that band of that day, or empty
+     */
+    Optional<UUID> findBlockOnDayBySlot(UUID userId, String templateSlotId, OffsetDateTime dayStart,
+                                        OffsetDateTime dayEnd);
+
+    /**
+     * Inserts a planner-authored {@code TIME_BLOCK} executable. Used when a recurrence clone lands on a
+     * day that has no block for its band yet.
+     *
+     * @param block the window to persist; never null
+     */
+    void insertBlock(BlockWindow block);
+
+    /**
+     * Reads the user's timezone, so a local day can be bounded without leaving this module.
+     *
+     * @param userId the owning user; never null
+     * @return the user's zone; never null
+     */
+    ZoneId findUserZone(UUID userId);
 
     // ── ADR-040 D4: the day-close sweep of what expired ───────────────────────
 

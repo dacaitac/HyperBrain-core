@@ -1,5 +1,6 @@
 package com.hyperbrain.planner.domain.service;
 
+import com.hyperbrain.planner.domain.model.DayWindow;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
@@ -24,10 +25,10 @@ import java.util.UUID;
  * <em>exactly</em> the state that changes the plan and <em>nothing volatile</em> that would defeat
  * deduplication.
  *
- * <p><b>Included</b> — every determinant of the deterministic floor's output: the ranked executables
- * with their rank and remaining-effort inputs, the hard walls (existing blocks + read-only AGENDA
- * windows), the WIG portfolio, the resolved energy (F3 margin / F6 quota), the {@code dataComplete}
- * flag, and the planning-window bounds. The window bounds are the derived <b>temporal frontier</b>:
+ * <p><b>Included</b> — every determinant of the floor's output: the day's laid windows (and through
+ * them the template, whose edits must change the plan — ADR-040 D14), the ranked executables with their
+ * rank and effort inputs, the hard walls, the WIG portfolio, the resolved energy, the
+ * {@code dataComplete} flag, and the planning-window bounds. The window bounds are the derived <b>temporal frontier</b>:
  * for a full-day run the lower bound is {@code wake} (stable across the day), for a replan it is
  * {@code max(wake, T)} — the «nuevo borde temporal» that legitimately makes a later replan a new plan.
  *
@@ -64,6 +65,7 @@ public class AgendaInputHasher {
             .append(state.windowEnd().truncatedTo(ChronoUnit.MINUTES)).append(FIELD)
             .append(state.dataComplete()).append(RECORD);
         appendEnergy(canonical, state.energyProfile());
+        appendWindows(canonical, state);
         appendRanked(canonical, state);
         appendWalls(canonical, walls);
         appendWig(canonical, state);
@@ -92,16 +94,43 @@ public class AgendaInputHasher {
         return digest(canonical);
     }
 
+    /**
+     * The day's laid windows — and, through them, the day template (ADR-040 D14, which makes this
+     * non-negotiable: if the template did not enter the digest, editing a setting would not change the
+     * plan). Hashing the resolved windows rather than the template itself is the stronger reading of
+     * "hash of the input": a template edit, a different wake instant and a new hard commitment that
+     * clips a band all move the plan, and all three move this.
+     */
+    private void appendWindows(StringBuilder canonical, PlannerDayState state) {
+        for (DayWindow window : state.windows()) {
+            new Joiner(canonical, "S")
+                .add(window.slotId())
+                .add(window.slot().purpose())
+                .add(window.start().truncatedTo(ChronoUnit.MINUTES))
+                .add(window.end().truncatedTo(ChronoUnit.MINUTES))
+                .end();
+        }
+    }
+
     private void appendEnergy(StringBuilder canonical, EnergyProfile energy) {
         canonical.append("E").append(FIELD)
             .append(energy.tier()).append(FIELD)
-            .append(energy.chaosMarginFraction()).append(FIELD)
             .append(energy.highLoadQuota()).append(RECORD);
     }
 
+    /**
+     * The ranked candidates, in the order the read port supplied them (priority-score descending) —
+     * rank order is a determinant, so it is never re-sorted here.
+     *
+     * <p><b>The due instant is deliberately absent.</b> Since the window model, an executable's hour is
+     * a SYSTEM-owned copy of the window that holds it (DR-10): it is the plan's own <em>output</em>.
+     * Folding it into the digest made every materialization change the next digest, so a redelivery of
+     * an identical job claimed a fresh slot and planned the day all over again — the exact failure mode
+     * the claim exists to prevent. Nothing is lost: the day-scoped admission (ADR-040 D3) is applied
+     * upstream, so an executable's <em>presence in this list</em> already carries the whole of what its
+     * date decides, and the date no longer dictates where inside the day it lands (ADR-026 D4).
+     */
     private void appendRanked(StringBuilder canonical, PlannerDayState state) {
-        // Rank order is a determinant, so the ranked list is hashed in the order the read port
-        // supplied (priority-score desc) — never sorted here.
         for (SchedulableExecutable e : state.rankedExecutables()) {
             new Joiner(canonical, "R")
                 .add(e.id())
@@ -109,11 +138,8 @@ public class AgendaInputHasher {
                 .add(e.rankingScore())
                 .add(e.inProgress())
                 .add(e.energyDrain())
-                .add(e.learnedUnitCost())
                 .add(e.pendingSubtasks())
                 .add(e.estimatedMinutes())
-                .add(e.settledActualMinutes())
-                .add(e.dueInstant())
                 .add(e.cycleId())
                 .end();
         }

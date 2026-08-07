@@ -3,7 +3,9 @@ package com.hyperbrain.core.application.rule;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
+import com.hyperbrain.core.domain.model.ContainedSchedule;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
+import com.hyperbrain.core.domain.model.ContainmentPolicy;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
@@ -19,7 +21,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 
 /*
@@ -52,14 +53,19 @@ import java.util.UUID;
  * container cycle carries no signal (children keep their own cycle) — copying a null cycle
  * would destroy alignment data on every daily plan. {@code TIME_BLOCK} rows never receive
  * copies: a container owns its own window.
+ *
+ * <p><b>Where the criterion lives (ADR-040 D11).</b> What the child must end up carrying is
+ * {@link ContainmentPolicy#assertedSchedule} — a pure policy with two callers: this chain link,
+ * and the containment operation core publishes for the Planner. This class contributes the
+ * ingestion-specific parts only: the re-assertion Sync Note on a human move, and the container-side
+ * fan-out.
  */
 @Component
 public class ContainmentCopyRule implements DomainRule {
 
     private static final Logger log = LoggerFactory.getLogger(ContainmentCopyRule.class);
 
-    private static final String TIME_BLOCK = "TIME_BLOCK";
-    private static final Set<String> EVENT_TYPES = Set.of("ACTIVITY", "AGENDA", "LEARNING_SESSION");
+    private static final String TIME_BLOCK = ContainmentPolicy.TIME_BLOCK;
 
     private final ExecutableStateRepository stateRepo;
     private final OutboxRepository outboxRepo;
@@ -96,18 +102,17 @@ public class ContainmentCopyRule implements DomainRule {
             return merged;
         }
         ContainerSchedule container = authority.get();
-        OffsetDateTime assertedStart = container.startTime();
-        OffsetDateTime assertedEnd =
-            EVENT_TYPES.contains(merged.type()) ? container.endTime() : null;
-        UUID assertedCycle = container.cycleId() != null ? container.cycleId() : merged.cycleId();
-        if (sameInstant(merged.startTime(), assertedStart)
-            && sameInstant(merged.endTime(), assertedEnd)
-            && Objects.equals(merged.cycleId(), assertedCycle)) {
+        ContainedSchedule asserted0 =
+            ContainmentPolicy.assertedSchedule(container, merged.type(), merged.cycleId());
+        if (sameInstant(merged.startTime(), asserted0.startTime())
+            && sameInstant(merged.endTime(), asserted0.endTime())
+            && Objects.equals(merged.cycleId(), asserted0.cycleId())) {
             return merged;
         }
         boolean humanMove = isHumanSource(origin) && previous != null
             && scheduleMoved(previous, merged);
-        ExecutableSnapshot asserted = withSchedule(merged, assertedStart, assertedEnd, assertedCycle);
+        ExecutableSnapshot asserted = withSchedule(
+            merged, asserted0.startTime(), asserted0.endTime(), asserted0.cycleId());
         if (humanMove) {
             stageReassertion(asserted.id(), container.containerName());
             log.info("Contained executable {}: inbound {} edit of date/cycle re-asserted to "

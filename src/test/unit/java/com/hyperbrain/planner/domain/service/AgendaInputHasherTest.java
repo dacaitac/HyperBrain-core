@@ -90,9 +90,9 @@ class AgendaInputHasherTest {
     @DisplayName("a changed energy tier changes the hash")
     void distinct_when_energy_changes() {
         PlannerDayState neutral = state(WINDOW_START, List.of(task(TASK, 0.9)),
-            new EnergyProfile(EnergyTier.NEUTRAL, 0.15, 3, "neutral"), List.of());
+            new EnergyProfile(EnergyTier.NEUTRAL, 3, "neutral"), List.of());
         PlannerDayState low = state(WINDOW_START, List.of(task(TASK, 0.9)),
-            new EnergyProfile(EnergyTier.LOW, 0.15, 3, "low"), List.of());
+            new EnergyProfile(EnergyTier.LOW, 3, "low"), List.of());
 
         assertThat(h(low)).isNotEqualTo(h(neutral));
     }
@@ -118,10 +118,8 @@ class AgendaInputHasherTest {
     @Test
     @DisplayName("nullable executable fields are handled without collision")
     void nullable_fields_do_not_collide() {
-        SchedulableExecutable sparse = new SchedulableExecutable(
-            TASK, ExecutableType.TASK, null, false, null, null, 0, null, 0, null, null);
-        SchedulableExecutable rich = new SchedulableExecutable(
-            TASK, ExecutableType.TASK, 0.5, false, 4, null, 0, 60, 0, null, null);
+        SchedulableExecutable sparse = new SchedulableExecutable(TASK, ExecutableType.TASK, null, false, null, 0, null, null, null);
+        SchedulableExecutable rich = new SchedulableExecutable(TASK, ExecutableType.TASK, 0.5, false, 4, 0, 60, null, null);
 
         PlannerDayState sparseState = state(WINDOW_START, List.of(sparse));
         PlannerDayState richState = state(WINDOW_START, List.of(rich));
@@ -136,11 +134,35 @@ class AgendaInputHasherTest {
     void distinct_when_wig_changes() {
         MciWig wig = new MciWig(UUID.fromString("22222222-2222-2222-2222-222222222222"),
             null, 0.4, 0.5, false, LocalDate.of(2026, 8, 1), false, 0);
-        PlannerDayState withWig = new PlannerDayState(WINDOW_START, WINDOW_END,
+        PlannerDayState withWig = new PlannerDayState(WINDOW_START, WINDOW_END, List.of(), java.util.Map.of(),
             List.of(task(TASK, 0.9)), List.of(wig), List.of(), neutralEnergy(), true);
         PlannerDayState withoutWig = state(WINDOW_START, List.of(task(TASK, 0.9)));
 
         assertThat(h(withWig)).isNotEqualTo(h(withoutWig));
+    }
+
+    @Test
+    @DisplayName("the day's windows are part of the digest — a template edit has to change the plan")
+    void distinct_when_the_windows_change() {
+        // Given: the same candidates laid against two different shapes of the day.
+        PlannerDayState morning = new PlannerDayState(WINDOW_START, WINDOW_END,
+            List.of(window("GOAL", 9, 11)), java.util.Map.of(), List.of(task(TASK, 0.9)), List.of(),
+            List.of(), neutralEnergy(), true);
+        PlannerDayState afternoon = new PlannerDayState(WINDOW_START, WINDOW_END,
+            List.of(window("GOAL", 14, 16)), java.util.Map.of(), List.of(task(TASK, 0.9)), List.of(),
+            List.of(), neutralEnergy(), true);
+
+        // Then: without this, editing the template in settings would leave the plan untouched, which
+        // ADR-040 D14 rules out explicitly.
+        assertThat(h(morning)).isNotEqualTo(h(afternoon));
+    }
+
+    private static com.hyperbrain.planner.domain.model.DayWindow window(String slotId, int startHour,
+                                                                       int endHour) {
+        return new com.hyperbrain.planner.domain.model.DayWindow(
+            new com.hyperbrain.planner.domain.model.TemplateSlot(slotId, startHour * 60, endHour * 60,
+                com.hyperbrain.planner.domain.model.SlotPurpose.GOAL),
+            WINDOW_START.withHour(startHour), WINDOW_START.withHour(endHour));
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -151,12 +173,11 @@ class AgendaInputHasherTest {
     }
 
     private static EnergyProfile neutralEnergy() {
-        return new EnergyProfile(EnergyTier.NEUTRAL, 0.15, 3, "neutral");
+        return new EnergyProfile(EnergyTier.NEUTRAL, 3, "neutral");
     }
 
     private static SchedulableExecutable task(UUID id, double priority) {
-        return new SchedulableExecutable(
-            id, ExecutableType.TASK, priority, false, 3, null, 0, 60, 0, null, null);
+        return new SchedulableExecutable(id, ExecutableType.TASK, priority, false, 3, 0, 60, null, null);
     }
 
     private static PlannerDayState state(OffsetDateTime windowStart,
@@ -168,6 +189,8 @@ class AgendaInputHasherTest {
                                          List<SchedulableExecutable> ranked,
                                          EnergyProfile energy,
                                          List<OccupiedInterval> occupied) {
-        return new PlannerDayState(windowStart, WINDOW_END, ranked, List.of(), occupied, energy, true);
+        return new PlannerDayState(
+            windowStart, WINDOW_END, List.of(), java.util.Map.of(), ranked, List.of(), occupied,
+            energy, true);
     }
 }

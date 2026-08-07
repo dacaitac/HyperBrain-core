@@ -29,8 +29,9 @@ class EmptyAgendaProposedEventTest {
         assertThat(event.zoneId()).isEqualTo("America/Bogota");
         assertThat(event.energyCriterion()).isEqualTo("NEUTRAL");
         assertThat(event.referenceInstant()).isEqualTo(T);
-        assertThat(EmptyAgendaProposedEvent.AGGREGATE_TYPE)
-            .isEqualTo(AgendaBlockPlannedEvent.AGGREGATE_TYPE);
+        // Kept verbatim through the pruning of the planner's delivery channel, so a notice already in
+        // the outbox at the moment of the cut still routes to its new propagator.
+        assertThat(EmptyAgendaProposedEvent.AGGREGATE_TYPE).isEqualTo("AGENDA_BLOCK");
         assertThat(EmptyAgendaProposedEvent.EVENT_TYPE).isEqualTo("EmptyAgendaProposedEvent");
     }
 

@@ -1,38 +1,26 @@
 package com.hyperbrain.planner.domain.model;
 
 /**
- * The resolved load parameters for one day (ADR-016 — the eje de energía). The Planner reads last
- * night's {@code sleep_score}, maps it through {@link EnergyThresholds} onto an {@link EnergyTier},
- * and lands here:
+ * The resolved energy reading for one day (ADR-016 — the eje de energía). The Planner reads last
+ * night's {@code sleep_score} and maps it through {@link EnergyThresholds} onto an {@link EnergyTier}.
  *
- * <ul>
- *   <li>{@code chaosMarginFraction} (F3) — the fraction of the planning window held back as slack
- *       for the unexpected;</li>
- *   <li>{@code highLoadQuota} (F6) — how many high {@code energy_drain} blocks the day admits.</li>
- * </ul>
+ * <p><b>The sleep signal survives; its use as a planning restriction does not.</b> The chaos margin
+ * this record used to carry held back a quarter to a third of the day as slack, and it was implemented
+ * as a cut to the day's tail: with a 30% margin over a 06:00–22:00 day the placement limit fell to
+ * 17:12, so the afternoon was dead by side effect rather than by decision. ADR-040 D1 retires it. What
+ * remains is the reading itself, which is context for the intelligent layer, and the goal reservation
+ * budget.
  *
- * <p>{@code criterion} is the human-readable {@code Sleep Score → margin → quota} chain the agenda
- * must surface (legibilidad obligatoria, Triángulo de Control): the day is never trimmed silently.
- *
- * @param tier                the resolved energy band
- * @param chaosMarginFraction F3 — chaos margin in {@code [0, 1]}
- * @param highLoadQuota       F6 — the maximum count of high-load blocks; never negative
- * @param criterion           the readable trimming criterion surfaced to the user; never null
+ * @param tier          the resolved energy band
+ * @param highLoadQuota how many goal reservations the day admits (F1); never negative
+ * @param criterion     the readable {@code Sleep Score → tier} chain the agenda surfaces (legibilidad
+ *                      obligatoria, Triángulo de Control): the day is never shaped silently; never null
  */
-public record EnergyProfile(
-    EnergyTier tier,
-    double chaosMarginFraction,
-    int highLoadQuota,
-    String criterion
-) {
+public record EnergyProfile(EnergyTier tier, int highLoadQuota, String criterion) {
 
     public EnergyProfile {
         if (tier == null) {
             throw new IllegalArgumentException("tier must not be null");
-        }
-        if (chaosMarginFraction < 0.0 || chaosMarginFraction > 1.0) {
-            throw new IllegalArgumentException(
-                "chaosMarginFraction must be in [0, 1]: " + chaosMarginFraction);
         }
         if (highLoadQuota < 0) {
             throw new IllegalArgumentException("highLoadQuota must be non-negative: " + highLoadQuota);

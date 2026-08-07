@@ -15,9 +15,13 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 @DisplayName("RecurrenceCloneRule (DR-04)")
 class RecurrenceCloneRuleTest {
@@ -252,5 +256,86 @@ class RecurrenceCloneRuleTest {
             .startTime(DUE)
             .endTime(END)
             .build();
+    }
+
+    // ── ADR-040 D12: the clone is born with a block of its own day ────────────
+
+    @Test
+    @DisplayName("the clone joins the block already holding its band on its own day, rather than making one")
+    void the_clone_reuses_a_block_of_the_same_slot_on_its_day() {
+        // Given: the original sat in a goal block today; the clone falls ten days out, and that day
+        // already has a block for the same band.
+        java.util.UUID sourceBlock = java.util.UUID.randomUUID();
+        java.util.UUID targetBlock = java.util.UUID.randomUUID();
+        ExecutableSnapshot previous = contained("TODO", sourceBlock);
+        ExecutableSnapshot merged = contained("DONE", sourceBlock);
+        when(stateRepo.findBlockWindow(sourceBlock)).thenReturn(java.util.Optional.of(
+            new com.hyperbrain.core.domain.model.BlockWindow(sourceBlock, merged.userId(),
+                "Deep work", "reason", DUE, DUE.plusHours(2), "GOAL_MORNING")));
+        when(stateRepo.findUserZone(merged.userId())).thenReturn(ZoneOffset.UTC);
+        when(stateRepo.findBlockOnDayBySlot(eq(merged.userId()), eq("GOAL_MORNING"), any(), any()))
+            .thenReturn(java.util.Optional.of(targetBlock));
+
+        // When
+        rule.apply(previous, merged, ExternalSystem.NOTION);
+
+        // Then: no new block is fabricated — without reuse every occurrence would open its own and the
+        // day would be a wall again.
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(stateRepo).upsertExecutable(captor.capture());
+        assertThat(captor.getValue().containerBlockId()).isEqualTo(targetBlock);
+        verify(stateRepo, never()).insertBlock(any());
+    }
+
+    @Test
+    @DisplayName("with no block for its band on that day, the clone opens one carried forward — never the expired one")
+    void the_clone_opens_a_block_of_its_own_day() {
+        // Given
+        java.util.UUID sourceBlock = java.util.UUID.randomUUID();
+        ExecutableSnapshot previous = contained("TODO", sourceBlock);
+        ExecutableSnapshot merged = contained("DONE", sourceBlock);
+        when(stateRepo.findBlockWindow(sourceBlock)).thenReturn(java.util.Optional.of(
+            new com.hyperbrain.core.domain.model.BlockWindow(sourceBlock, merged.userId(),
+                "Deep work", "reason", DUE, DUE.plusHours(2), "GOAL_MORNING")));
+        when(stateRepo.findUserZone(merged.userId())).thenReturn(ZoneOffset.UTC);
+        when(stateRepo.findBlockOnDayBySlot(eq(merged.userId()), eq("GOAL_MORNING"), any(), any()))
+            .thenReturn(java.util.Optional.empty());
+
+        // When
+        rule.apply(previous, merged, ExternalSystem.NOTION);
+
+        // Then: the new block belongs to the clone's day, so the hard copy stamps a date that agrees
+        // with it. Inheriting the expired block instead is the corruption that reasserted itself.
+        ArgumentCaptor<com.hyperbrain.core.domain.model.BlockWindow> block =
+            ArgumentCaptor.forClass(com.hyperbrain.core.domain.model.BlockWindow.class);
+        verify(stateRepo).insertBlock(block.capture());
+        assertThat(block.getValue().start()).isEqualTo(DUE.plusDays(10));
+        assertThat(block.getValue().templateSlotId()).isEqualTo("GOAL_MORNING");
+        assertThat(block.getValue().blockId()).isNotEqualTo(sourceBlock);
+    }
+
+    @Test
+    @DisplayName("a clone of work nobody had placed stays unplaced: the planner picks it up on its day")
+    void an_uncontained_original_yields_an_uncontained_clone() {
+        // When
+        rule.apply(habit("TODO"), habit("DONE"), ExternalSystem.NOTION);
+
+        // Then
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(stateRepo).upsertExecutable(captor.capture());
+        assertThat(captor.getValue().containerBlockId()).isNull();
+        verify(stateRepo, never()).insertBlock(any());
+    }
+
+    private ExecutableSnapshot contained(String status, java.util.UUID blockId) {
+        ExecutableSnapshot base = habit(status);
+        return new ExecutableSnapshot(
+            base.id(), base.userId(), base.parentId(), base.cycleId(),
+            base.name(), base.description(), base.type(), base.status(),
+            base.priorityScore(), base.urgencyScore(), base.effortScore(),
+            base.isImportant(), base.frequency(),
+            base.startTime(), base.endTime(), base.sourceCalendar(),
+            base.energyDrain(), base.mentalLoad(), base.impact(),
+            base.systemGenerated(), blockId);
     }
 }

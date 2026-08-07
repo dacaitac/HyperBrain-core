@@ -7,7 +7,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.within;
 
 @DisplayName("EnergyResolver (#6a, sleep_score -> F3 margin / F6 quota)")
 class EnergyResolverTest {
@@ -15,34 +14,31 @@ class EnergyResolverTest {
     private final EnergyResolver resolver = new EnergyResolver(EnergyThresholds.DEFAULT);
 
     @Test
-    @DisplayName("no fresh score: NEUTRAL default (margin 25%, quota 3) with a readable criterion")
+    @DisplayName("no fresh score: NEUTRAL default with a readable criterion")
     void no_score_defaults_to_neutral() {
         EnergyProfile profile = resolver.resolve(null);
 
         assertThat(profile.tier()).isEqualTo(EnergyTier.NEUTRAL);
-        assertThat(profile.chaosMarginFraction()).isCloseTo(0.25, within(1e-9));
         assertThat(profile.highLoadQuota()).isEqualTo(3);
-        assertThat(profile.criterion()).contains("neutral").contains("25%").contains("quota 3");
+        assertThat(profile.criterion()).contains("neutral").contains("goal budget 3");
     }
 
     @Test
-    @DisplayName("F2: low score widens the margin to 35% (decoupled) and tightens the quota to 2")
-    void low_score_widens_margin() {
+    @DisplayName("a low score tightens the goal budget to 2")
+    void a_low_score_tightens_the_budget() {
         EnergyProfile profile = resolver.resolve(45);
 
         assertThat(profile.tier()).isEqualTo(EnergyTier.LOW);
-        assertThat(profile.chaosMarginFraction()).isCloseTo(0.35, within(1e-9));
         assertThat(profile.highLoadQuota()).isEqualTo(2);
-        assertThat(profile.criterion()).contains("Sleep Score 45").contains("35%").contains("2");
+        assertThat(profile.criterion()).contains("Sleep Score 45").contains("LOW").contains("2");
     }
 
     @Test
-    @DisplayName("F2: high score keeps the margin at 25% (decoupled, not 20%) and quota at 3")
-    void high_score_keeps_margin_decoupled() {
+    @DisplayName("a high score keeps the goal budget at 3")
+    void a_high_score_keeps_the_budget() {
         EnergyProfile profile = resolver.resolve(90);
 
         assertThat(profile.tier()).isEqualTo(EnergyTier.HIGH);
-        assertThat(profile.chaosMarginFraction()).isCloseTo(0.25, within(1e-9));
         assertThat(profile.highLoadQuota()).isEqualTo(3);
     }
 

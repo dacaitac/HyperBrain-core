@@ -7,13 +7,17 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * Payload of {@code SubtaskCompletedEvent} (events-v1.yaml v1.5.0, DR-07).
+ * Payload of {@code SubtaskCompletedEvent} (DR-07).
+ *
+ * <p>The block a completed subtask was imputed to is no longer carried: the imputation went with the
+ * focus register (ADR-040 D13), which existed to say how much of the work done had been planned — a
+ * question that lost its consumer along with the rest of that series. Removing the field rather than
+ * leaving it forever null is deliberate: a field that can only be null is a lie about what the event
+ * knows.
  *
  * @param subtaskId          the completed user subtask
  * @param parentId           its parent executable
  * @param completedAt        observed completion instant
- * @param imputedTimeBlockId open block of the parent covering the completion; null means
- *                           unplanned work
  * @param parentProgress     recomputed materialized progress of the parent; null when the
  *                           parent has no user subtasks
  */
@@ -22,7 +26,6 @@ public record SubtaskCompletedPayload(
     UUID subtaskId,
     UUID parentId,
     OffsetDateTime completedAt,
-    UUID imputedTimeBlockId,
     Double parentProgress
 ) {
 }

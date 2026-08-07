@@ -8,34 +8,15 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Persistence port for {@code TIME_BLOCK} executables (ADR-039, successor of the legacy
- * {@code core_time_block} repository). Settlement is idempotent and race-safe: the focus-switch
- * rule and the expiry scheduler may compete for the same block, which {@link #lockOpenExpired}
- * ({@code FOR UPDATE SKIP LOCKED}) and the conditional {@link #settle} resolve without double
- * settlement.
+ * Persistence port for the lifecycle of {@code TIME_BLOCK} executables (ADR-039). Closing an elapsed
+ * block is idempotent and race-safe: {@link #lockOpenExpired} ({@code FOR UPDATE SKIP LOCKED}) and the
+ * conditional {@link #settle} mean a block closes exactly once even if two runs overlap.
+ *
+ * <p>The two reads the focus register needed — finding the block currently accounting for a task, and
+ * opening one on the fly — are gone with it (ADR-040 D13). Blocks are authored by the planner now, and
+ * by the recurrence clone; nothing opens one as a side effect of a task starting.
  */
 public interface TimeBlockExecutableRepository {
-
-    /**
-     * Finds the executing block accounting for a task, if any: an {@code IN_PROGRESS}
-     * {@code TIME_BLOCK} that either rides under the task as its FOCUS child
-     * ({@code parent_id}) or currently contains it ({@code container_block_id}). By
-     * construction (DR-05) a task holds at most one; if data breaks that, the most recently
-     * started one is returned.
-     *
-     * @param taskId the task
-     * @return its executing block, or empty
-     */
-    Optional<TimeBlockExecutable> findActiveBlockFor(UUID taskId);
-
-    /**
-     * Inserts a new {@code TIME_BLOCK} executable row. FOCUS blocks carry the accounted task
-     * as {@code parent_id} and are excluded from every mirror by {@code origin}.
-     *
-     * @param block the block to persist
-     * @param name  the block's display name ({@code core_executable.name} is NOT NULL)
-     */
-    void insert(TimeBlockExecutable block, String name);
 
     /**
      * Locks and returns the open blocks whose {@code end_time} already passed, skipping rows
@@ -48,17 +29,21 @@ public interface TimeBlockExecutableRepository {
     List<TimeBlockExecutable> lockOpenExpired(OffsetDateTime now);
 
     /**
-     * Settles a block, freezing its outcome: writes the terminal status ({@code DONE} on a
-     * focus switch, {@code FAILED} on expiry), {@code actual_duration_minutes} and stamps
-     * {@code last_completed_at}. Conditional on the block still being open, so a lost race is
-     * reported instead of overwriting a previous settlement.
+     * Closes a block: writes its terminal status and stamps {@code last_completed_at}, the clock the
+     * intraday-replan guard reads. Conditional on the block still being open, so a lost race is
+     * reported instead of overwriting a closure that already happened.
      *
-     * @param blockId               the block to settle
+     * <p>{@code actualDurationMinutes} survives as a parameter but nothing passes a value any more:
+     * freezing the minutes really spent was the focus register's job, and the series it produced had
+     * no consumer left once time estimation was retired (ADR-040 D13). The column stays for the
+     * history production already holds.
+     *
+     * @param blockId               the block to close
      * @param finalStatus           {@link TimeBlockExecutable#STATUS_DONE} or
      *                              {@link TimeBlockExecutable#STATUS_FAILED}
-     * @param actualDurationMinutes gross executed minutes; null when nothing was executed
-     * @param settledAt             settlement instant
-     * @return true if this call settled the block; false if it was no longer open
+     * @param actualDurationMinutes legacy executed minutes; always null on the live path
+     * @param settledAt             closure instant
+     * @return true if this call closed the block; false if it was no longer open
      */
     boolean settle(UUID blockId, String finalStatus, Integer actualDurationMinutes,
                    OffsetDateTime settledAt);

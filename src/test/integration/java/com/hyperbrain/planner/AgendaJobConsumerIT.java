@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.application.AgendaDeliveryService;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,6 +60,7 @@ class AgendaJobConsumerIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM planner_agenda_materialization");
         jdbcTemplate.update("DELETE FROM processed_message");
@@ -76,6 +78,11 @@ class AgendaJobConsumerIT {
             "UPDATE sys_user SET timezone = 'UTC', settings = ?::jsonb WHERE id = ?",
             SLEEP_WINDOW_SETTINGS, USER);
         drainQueue(IA_JOBS_QUEUE);
+        // The consumer is a live SQS listener, so a job the previous test enqueued may still be in
+        // flight when this one starts wiping the tables — it would then materialize a block onto a
+        // clean slate. Draining the queue does not cover a message already received, so wait until the
+        // day is genuinely empty before treating it as the precondition.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isZero());
     }
 
     @Test
@@ -94,7 +101,7 @@ class AgendaJobConsumerIT {
 
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
         assertThat(materializationRows()).isEqualTo(1);
-        // Delivery to iOS rides the existing outbox path (AgendaBlockPlannedEvent staged).
+        // Delivery rides the standard executable path: the block announces itself.
         await().atMost(TIMEOUT).untilAsserted(() ->
             assertThat(agendaBlockOutboxCount()).isEqualTo(1));
     }
@@ -170,7 +177,7 @@ class AgendaJobConsumerIT {
 
     private int countPlannedBlocks() {
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE status = 'PLANNED' AND origin = 'PLANNER'",
+            "SELECT count(*) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             Integer.class);
         return count == null ? 0 : count;
     }
@@ -189,7 +196,8 @@ class AgendaJobConsumerIT {
 
     private int agendaBlockOutboxCount() {
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE event_type = 'AgendaBlockPlannedEvent'",
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableCreatedEvent' "
+                + "AND aggregate_id IN (SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK')",
             Integer.class);
         return count == null ? 0 : count;
     }

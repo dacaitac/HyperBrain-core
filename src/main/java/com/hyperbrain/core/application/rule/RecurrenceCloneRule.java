@@ -1,6 +1,7 @@
 package com.hyperbrain.core.application.rule;
 
 import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
+import com.hyperbrain.core.domain.model.BlockWindow;
 import com.hyperbrain.core.domain.model.CompletionState;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
@@ -10,7 +11,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -39,6 +43,16 @@ import java.util.UUID;
  * mirror the new recurrence to their respective satellites. The event deliberately uses
  * {@code SYSTEM} origin so the Notion propagator's loop guard does not block it (RF-17): the
  * original task change arrived from Notion (or Apple), but the clone is a SYSTEM derivation.
+ *
+ * <p><b>The clone is born with a block of its own day (ADR-040 D12).</b> Until now it was born with
+ * none, deliberately: inheriting the original's block let the hard copy re-stamp that block's window
+ * over the {@code +frequency} date, a corruption that reasserted itself on every ingestion. This does
+ * not revert that fix, it completes it — the clone does <b>not</b> inherit the expired block; it gets
+ * one that belongs to the day it is due, so the hard copy stamps the right date. If a block already
+ * holds the same template band on that day it joins it, because without that rule every recurring
+ * occurrence would fabricate a block of its own and the day would be a wall again. Sameness is the
+ * <em>slot</em>: the name is the intelligent layer's to change and the membership changes daily, while
+ * the slot is the very key that already identifies a block across regenerations.
  *
  * <p>Guards: skipped when the executable is system-generated ({@code systemGenerated = true}),
  * when {@code frequency} is null or non-positive, when its type is exempt (see below), or when the
@@ -84,7 +98,7 @@ public class RecurrenceCloneRule implements DomainRule {
                 merged.id(), merged.type(), merged.status(), merged.frequency());
             return merged;
         }
-        ExecutableSnapshot clone = buildClone(merged);
+        ExecutableSnapshot clone = withContainer(buildClone(merged), containerForClone(merged));
         stateRepo.upsertExecutable(clone);
         stateRepo.copyStreaks(merged.id(), clone.id());
         appendCreatedEvent(clone);
@@ -92,6 +106,60 @@ public class RecurrenceCloneRule implements DomainRule {
             merged.id(), merged.status(), clone.id(), merged.frequency().longValue(),
             clone.startTime());
         return merged;
+    }
+
+    /**
+     * The block the clone is born inside, or null when the original was not contained (a task nobody
+     * had placed stays unplaced — the planner will pick it up on its day).
+     *
+     * <p>Reuse first: a block already holding the same band on the clone's day takes it. Otherwise the
+     * original's window is carried forward by the same number of days the clone itself moved, so the
+     * new block belongs to the clone's day by construction and the hard copy stamps a date that agrees
+     * with it. A block with no slot is not carried forward: it cannot be matched to a band, and
+     * inventing one would put the clone under a window it never belonged to.
+     */
+    private UUID containerForClone(ExecutableSnapshot original) {
+        UUID containerId = original.containerBlockId();
+        if (containerId == null || original.startTime() == null) {
+            return null;
+        }
+        Optional<BlockWindow> source = stateRepo.findBlockWindow(containerId);
+        if (source.isEmpty() || source.get().templateSlotId() == null) {
+            return null;
+        }
+        BlockWindow block = source.get();
+        long days = original.frequency().longValue();
+        ZoneId zone = stateRepo.findUserZone(original.userId());
+        LocalDate cloneDay = original.startTime().plusDays(days).atZoneSameInstant(zone).toLocalDate();
+
+        Optional<UUID> existing = stateRepo.findBlockOnDayBySlot(
+            original.userId(), block.templateSlotId(),
+            cloneDay.atStartOfDay(zone).toOffsetDateTime(),
+            cloneDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime());
+        if (existing.isPresent()) {
+            log.info("Clone of {} joins the block already holding {} on {}",
+                original.id(), block.templateSlotId(), cloneDay);
+            return existing.get();
+        }
+        BlockWindow carried = block.shiftedBy(UUID.randomUUID(), days);
+        stateRepo.insertBlock(carried);
+        log.info("Clone of {} opens block {} for {} on {}",
+            original.id(), carried.blockId(), block.templateSlotId(), cloneDay);
+        return carried.blockId();
+    }
+
+    private static ExecutableSnapshot withContainer(ExecutableSnapshot clone, UUID containerId) {
+        if (containerId == null) {
+            return clone;
+        }
+        return new ExecutableSnapshot(
+            clone.id(), clone.userId(), clone.parentId(), clone.cycleId(),
+            clone.name(), clone.description(), clone.type(), clone.status(),
+            clone.priorityScore(), clone.urgencyScore(), clone.effortScore(),
+            clone.isImportant(), clone.frequency(),
+            clone.startTime(), clone.endTime(), clone.sourceCalendar(),
+            clone.energyDrain(), clone.mentalLoad(), clone.impact(),
+            clone.systemGenerated(), containerId);
     }
 
     private static boolean hasFrequency(ExecutableSnapshot s) {
@@ -131,12 +199,11 @@ public class RecurrenceCloneRule implements DomainRule {
             source.mentalLoad(),
             source.impact(),
             false,
-            // The clone is born un-contained (container_block_id = null): TIME_BLOCK blocks are
-            // ephemeral per-day containers that settle, they never persist across occurrences, and
-            // block (re)assignment is a plan-time concern. Inheriting the source's block would let
-            // ContainmentCopyRule re-assert today's block window over the clone's +frequency slot on
-            // the next ingestion — a self-reasserting date corruption. Detached, it keeps its shifted
-            // slot until the planner places it (core#59).
+            // Built detached; the caller then puts it inside a block OF ITS OWN DAY (ADR-040 D12).
+            // What must never happen is inheriting the ORIGINAL's block: the hard copy would re-assert
+            // that block's window over the +frequency date on the next ingestion, a corruption that
+            // reasserts itself. A block belonging to the clone's own day has the opposite effect — the
+            // copy stamps exactly the date the clone already carries.
             null);
     }
 

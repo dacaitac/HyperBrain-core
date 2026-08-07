@@ -8,6 +8,7 @@ import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
+import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
@@ -53,6 +54,9 @@ class AgendaGenerationServiceTest {
     void setUp() {
         service = spy(new AgendaGenerationService(
             mock(PlannerStateRepository.class),
+            mock(PlannerBlockMaterializer.class),
+            new DayWindowResolver(com.hyperbrain.planner.domain.model.DayTemplate.DEFAULT),
+            mock(MovedCommitmentRescuer.class),
             mock(SleepFrontierCalculator.class),
             mock(EnergyResolver.class),
             mock(PlanningWindowResolver.class),

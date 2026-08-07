@@ -6,13 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
-import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
+import com.hyperbrain.planner.domain.model.DayWindow;
 import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlanningWindow;
 import com.hyperbrain.planner.domain.model.PlannerDayState;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
@@ -24,6 +25,7 @@ import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
+import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
@@ -40,7 +42,9 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -72,6 +76,9 @@ public class AgendaGenerationService {
     private static final String SOURCE_SYSTEM = "SYSTEM";
 
     private final PlannerStateRepository repository;
+    private final PlannerBlockMaterializer blockMaterializer;
+    private final DayWindowResolver dayWindowResolver;
+    private final MovedCommitmentRescuer commitmentRescuer;
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final EnergyResolver energyResolver;
     private final PlanningWindowResolver planningWindowResolver;
@@ -86,6 +93,9 @@ public class AgendaGenerationService {
 
     AgendaGenerationService(
         PlannerStateRepository repository,
+        PlannerBlockMaterializer blockMaterializer,
+        DayWindowResolver dayWindowResolver,
+        MovedCommitmentRescuer commitmentRescuer,
         SleepFrontierCalculator sleepFrontierCalculator,
         EnergyResolver energyResolver,
         PlanningWindowResolver planningWindowResolver,
@@ -98,6 +108,9 @@ public class AgendaGenerationService {
         ObjectMapper objectMapper,
         ObjectProvider<AgendaProposer> agendaProposerProvider) {
         this.repository = repository;
+        this.blockMaterializer = blockMaterializer;
+        this.dayWindowResolver = dayWindowResolver;
+        this.commitmentRescuer = commitmentRescuer;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
         this.planningWindowResolver = planningWindowResolver;
@@ -296,15 +309,15 @@ public class AgendaGenerationService {
 
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
-        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd)
+        // Admission (ADR-040 D3): the day takes what is dated FOR it, plus the dateless bag it draws
+        // from. Nothing else — an overdue item is not dragged forward here, because the day-close sweep
+        // (D4) is what re-dates it; pulling the past into today as well would double-count it and undo
+        // the sweep's work. A future-dated item waits for its own day.
+        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd, window.lowerBound())
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
-            // A dated executable is schedulable once its due day has arrived: on its due day, or — when
-            // already overdue — from today onward (an overdue task must be replanned, not dropped from
-            // every day). A future-dated one waits for its day. The multi-day replan's cross-day
-            // exclusion keeps it on a single day (the first that schedules it), never duplicated.
             .filter(e -> e.dueInstant() == null
-                      || !e.dueInstant().atZoneSameInstant(zone).toLocalDate().isAfter(targetDay))
+                      || e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
             .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
         List<OccupiedInterval> occupied = new ArrayList<>(repository.loadOccupiedIntervals(
@@ -322,15 +335,26 @@ public class AgendaGenerationService {
         // read-only AGENDA windows and the TIME_BLOCK executables that hold time (USER blocks, and the
         // ones already closed as DONE / FAILED). See withoutRegenerable for why the subtraction is inert
         // until the two sides read the same block model.
-        List<OccupiedInterval> planningWalls = withoutRegenerable(userId, targetDay, zone, occupied);
+        // The plan that already exists for this day, bounded to what this run may still touch: a block
+        // that already started is not regenerable, so it is neither re-placed nor un-walled (D8).
+        List<PlannerBlockIdentity.PersistedBlock> existingPlan =
+            repository.loadRegenerableBlocks(userId, targetDay, zone, window.lowerBound());
+        List<OccupiedInterval> planningWalls = withoutRegenerable(existingPlan, occupied);
 
         // The fallback window (07:00–23:00) is always a valid planning frontier; the
         // observed flag only distinguishes learned vs. default, not usable vs. unusable.
         boolean dataComplete = true;
 
+        // The day's windows are laid before anything is put in them (ADR-040): against the template,
+        // displaced by the REAL wake instant, and clipped by the same walls the generator plans around.
+        // The floor decides what goes in each window; it never decides where a window sits.
+        List<DayWindow> windows = dayWindowResolver.resolve(
+            targetDay, zone, window.frontierStart(), window.lowerBound(), window.frontierEnd(),
+            planningWalls);
+
         PlannerDayState state = new PlannerDayState(
-            window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, planningWalls, energy,
-            dataComplete);
+            window.lowerBound(), window.frontierEnd(), windows, membershipBySlot(existingPlan), ranked,
+            wigPortfolio, planningWalls, energy, dataComplete);
         return new PreparedDay(state, window, planningWalls, energy.criterion());
     }
 
@@ -437,16 +461,22 @@ public class AgendaGenerationService {
             }
         }
 
-        // Identity-stable reconciliation (#15): a regeneration keeps a surviving block's id (so its
-        // Apple EKEvent is UPDATED, not duplicated), inserts genuinely new blocks, and reports the
-        // blocks that dropped out so their EKEvents are deleted — all in the same transaction as the
-        // write-back staging, so the plan and its delivery are atomic.
-        List<UUID> removedBlockIds =
-            repository.reconcilePlannedBlocks(userId, targetDay, zone, validated.accepted());
+        // Identity, withdrawal and containment all live in the materializer, where ADR-040 D10's
+        // order-of-operations invariant is readable in one place.
+        // The day's readable criterion rides on each block's own note now: the private delivery
+        // channel that used to carry it in an event payload is gone, and a block is an executable
+        // whose description its mirrors already show.
+        List<UUID> removedBlockIds = blockMaterializer.materialize(
+            userId, targetDay, zone, validated.accepted(), window.lowerBound(),
+            agenda.energyCriterion());
 
-        if (!validated.accepted().isEmpty() || !removedBlockIds.isEmpty()) {
-            stageAgendaBlockDelivery(
-                userId, targetDay, zone, agenda.energyCriterion(), removedBlockIds, now);
+        // ADR-040 D9, middle tier. Only on a replan, and only for a commitment an interruption has
+        // already run over: activities and study sessions keep their day and lose only their hour.
+        // They are never members of a window — they carry a calendar window of their own — so this is
+        // the single place the planner writes onto something the user created in his own calendar.
+        if (fromNow) {
+            commitmentRescuer.rescue(userId, targetDay, zone, window.lowerBound(),
+                window.frontierEnd(), occupiedIncluding(occupied, validated.accepted()));
         }
 
         if (fromNow) {
@@ -461,25 +491,29 @@ public class AgendaGenerationService {
             agenda.energyCriterion(), agenda.degraded());
     }
 
+    /** The day's walls plus the blocks this run just materialized — the real occupancy from here on. */
+    private static List<OccupiedInterval> occupiedIncluding(List<OccupiedInterval> walls,
+                                                            List<AgendaBlock> accepted) {
+        List<OccupiedInterval> occupancy = new ArrayList<>(walls);
+        accepted.forEach(block -> occupancy.add(
+            new OccupiedInterval(block.executableId(), block.start(), block.end(), false)));
+        return occupancy;
+    }
+
     /**
-     * Stages the morning write-back in the same transaction as the persisted blocks (Transactional
-     * Outbox): the day is either planned <em>and</em> queued for delivery to iOS, or neither. The
-     * {@code SYSTEM} origin keeps the event eligible for outbound propagation (the drain suppresses
-     * only the target's own origin), so the {@code AgendaBlockPropagator} routes it to Apple.
+     * What each template slot's block already holds, keyed by slot — the shape the generator needs to
+     * conserve a plan instead of rebuilding it. A block with no slot contributes nothing: it cannot be
+     * matched to a window, and guessing would re-seat work under a band it never belonged to.
      */
-    private void stageAgendaBlockDelivery(UUID userId, LocalDate targetDay, ZoneId zone,
-                                          String energyCriterion, List<UUID> removedBlockIds,
-                                          OffsetDateTime now) {
-        AgendaBlockPlannedEvent event = new AgendaBlockPlannedEvent(
-            userId, targetDay, zone.getId(), energyCriterion, removedBlockIds);
-        outboxRepository.append(new OutboxEvent(
-            UUID.randomUUID(),
-            AgendaBlockPlannedEvent.AGGREGATE_TYPE,
-            userId.toString(),
-            AgendaBlockPlannedEvent.EVENT_TYPE,
-            serialize(event),
-            SOURCE_SYSTEM,
-            now));
+    private static Map<String, List<UUID>> membershipBySlot(
+        List<PlannerBlockIdentity.PersistedBlock> existingPlan) {
+        Map<String, List<UUID>> bySlot = new LinkedHashMap<>();
+        for (PlannerBlockIdentity.PersistedBlock block : existingPlan) {
+            if (block.templateSlotId() != null && !block.members().isEmpty()) {
+                bySlot.put(block.templateSlotId(), List.copyOf(block.members()));
+            }
+        }
+        return bySlot;
     }
 
     /**
@@ -515,21 +549,6 @@ public class AgendaGenerationService {
         }
     }
 
-    private String serialize(AgendaBlockPlannedEvent event) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("user_id", event.userId().toString());
-        node.put("target_day", event.targetDay().toString());
-        node.put("zone_id", event.zoneId());
-        node.put("energy_criterion", event.energyCriterion());
-        ArrayNode removed = node.putArray("removed_block_ids");
-        event.removedBlockIds().forEach(id -> removed.add(id.toString()));
-        try {
-            return objectMapper.writeValueAsString(node);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("Failed to serialize AgendaBlockPlannedEvent", ex);
-        }
-    }
-
     /**
      * The protected meal-anchor walls for the target day (H1 rule 2), resolved from the humanized
      * settings against the user's zone. Windows outside the frontier are harmless — nothing is placed
@@ -542,47 +561,34 @@ public class AgendaGenerationService {
     }
 
     /**
-     * The occupancy minus the run's own regenerable blocks (same-day {@code PLANNER}/{@code PLANNED}).
-     * A prior materialization persists those blocks and they are re-read as occupied walls; both the
-     * generator and the idempotency hash must exclude them — the generator so a replan can re-place its
-     * own tasks instead of walling itself out, and the hash so a redelivery of the same input digests
-     * identically (folding in the run's own output would re-materialize on every redelivery). Existing
-     * Every other wall is preserved: the read-only AGENDA windows and the {@code TIME_BLOCK}
-     * executables that hold time — {@code USER} blocks and blocks already closed ({@code DONE},
-     * {@code FAILED}) among them; {@code FOCUS}-origin rows never wall in the first place.
+     * The occupancy minus the run's own regenerable blocks (the day's planner-authored, still-planned
+     * {@code TIME_BLOCK} executables). A prior materialization persists those blocks and they are
+     * re-read as occupied walls; both the generator and the idempotency hash must exclude them — the
+     * generator so a replan can re-place its own work instead of walling itself out, and the hash so a
+     * redelivery of the same input digests identically (folding in the run's own output would
+     * re-materialize on every redelivery). Every other wall stands: the read-only AGENDA windows and
+     * the {@code TIME_BLOCK} executables that genuinely hold time — {@code USER} blocks and blocks
+     * already closed among them.
      *
-     * <p><b>Inert by construction until the window model lands (ADR-040 step 3).</b> The two sides of
-     * this subtraction read <em>different</em> block models, so their keys can never meet: the
-     * regenerable set comes from the frozen {@code core_time_block} table and is keyed by each
-     * <b>member's</b> executable id, while the walls now come from {@code core_executable} and are
-     * keyed by the <b>block's own</b> id (ADR-039 — the block IS the executable). A TIME_BLOCK
-     * executable is never a member of a frozen planner block, so no wall is ever subtracted here today.
-     * That is harmless only because the Planner's switches are off <em>and</em> it still writes the
-     * frozen table; the migrated production blocks that already live in {@code core_executable} with
-     * {@code origin = 'PLANNER'} do wall, and this method cannot free them. <b>Both sides must move in
-     * the same commit</b> when step 3 makes the Planner write {@code TIME_BLOCK} executables —
-     * re-pointing the write path without re-pointing this subtraction re-opens the bug it exists to
-     * prevent (a replan walls itself out of today and pushes everything to tomorrow).
+     * <p><b>Both sides of this subtraction now read the same model, and that is the point.</b> Between
+     * ADR-040's step 1 and this one the subtraction was inert by construction: the walls came from
+     * {@code core_executable} keyed by the block's own id, while the regenerable set still came from
+     * the frozen table keyed by each member's id — two key spaces that designate different entities and
+     * can never meet. Re-pointing the write path without re-pointing this read would have re-opened the
+     * exact bug it exists to prevent: a replan walls itself out of today and pushes the whole day onto
+     * tomorrow. The subtraction is by <b>block id</b>, which is now the only key either side speaks.
      */
-    private List<OccupiedInterval> withoutRegenerable(UUID userId, LocalDate targetDay, ZoneId zone,
-                                                      List<OccupiedInterval> occupied) {
-        // Keyed by every member (ADR-027 D1), not only the anchor: the occupancy read exposes a block
-        // through its anchor today, but a themed container must drop its whole membership from the
-        // walls so a replan can re-place any of its executables.
-        Set<String> regenerable = repository.loadPlannedBlocksForDay(userId, targetDay, zone).stream()
-            .flatMap(block -> block.members().stream()
-                .map(member -> wallKey(member.executableId(), block.start(), block.end())))
+    private static List<OccupiedInterval> withoutRegenerable(
+        List<PlannerBlockIdentity.PersistedBlock> existingPlan, List<OccupiedInterval> occupied) {
+        Set<UUID> regenerable = existingPlan.stream()
+            .map(PlannerBlockIdentity.PersistedBlock::blockId)
             .collect(Collectors.toSet());
         if (regenerable.isEmpty()) {
             return occupied;
         }
         return occupied.stream()
-            .filter(wall -> !regenerable.contains(wallKey(wall.executableId(), wall.start(), wall.end())))
+            .filter(wall -> !regenerable.contains(wall.executableId()))
             .toList();
-    }
-
-    private static String wallKey(UUID executableId, OffsetDateTime start, OffsetDateTime end) {
-        return executableId + "|" + start + "|" + end;
     }
 
     private static Set<UUID> readOnlyAgendaIds(List<OccupiedInterval> occupied) {
