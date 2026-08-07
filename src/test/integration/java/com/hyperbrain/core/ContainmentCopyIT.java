@@ -77,6 +77,41 @@ class ContainmentCopyIT {
     }
 
     @Test
+    @DisplayName("core#63 pull symmetry: findContainerSchedule falls back to the PERSISTED parent when the merge omits the relation")
+    void find_schedule_falls_back_to_persisted_parent() {
+        // A dated parent and a subtask under it (parent_id persisted).
+        UUID parent = insertDatedParent("Parent", BLOCK_START, BLOCK_END, cycleId);
+        UUID subtask = insertTask("Subtask", parent, null, null);
+
+        // The merge carries no in-flight container nor parent (partial edit / Apple ingestion).
+        Optional<ContainerSchedule> schedule = stateRepo.findContainerSchedule(subtask, null, null);
+
+        assertThat(schedule).isPresent();
+        assertThat(schedule.get().containerId()).isEqualTo(parent);
+        assertThat(schedule.get().startTime()).isEqualTo(BLOCK_START);
+        assertThat(schedule.get().cycleId()).isEqualTo(cycleId);
+    }
+
+    @Test
+    @DisplayName("core#63 pull: editing a subtask without re-sending Parent Task re-takes the parent's date + cycle")
+    void editing_subtask_without_parent_relation_re_takes_parent_schedule() {
+        UUID parent = insertDatedParent("Parent", BLOCK_START, BLOCK_END, cycleId);
+        UUID subtask = insertTask("Subtask", parent, null, null);
+
+        // The partial edit's merged snapshot omits the parent relation and carries a stale date/cycle.
+        ExecutableSnapshot previous = subtaskSnapshot(subtask, parent, null, null);
+        ExecutableSnapshot merged =
+            subtaskSnapshot(subtask, null, BLOCK_START.plusDays(3), null);
+
+        ExecutableSnapshot result = processor.process(previous, merged, ExternalSystem.NOTION);
+
+        // The hard-copy re-takes the parent's schedule despite the missing relation (DR-01 clears end).
+        assertThat(result.startTime()).isEqualTo(BLOCK_START);
+        assertThat(result.endTime()).isNull();
+        assertThat(result.cycleId()).isEqualTo(cycleId);
+    }
+
+    @Test
     @DisplayName("copyScheduleToContained hard-copies date + cycle transitively (subtask → task → block), idempotent by value")
     void copy_is_transitive_and_idempotent() {
         UUID block = insertBlock();
@@ -165,6 +200,23 @@ class ContainmentCopyIT {
             VALUES (?, ?, ?, ?, ?, ?, 'TODO', false)
             """, id, userId, parentId, containerId, name, type != null ? type : "TASK");
         return id;
+    }
+
+    private UUID insertDatedParent(String name, OffsetDateTime start, OffsetDateTime end, UUID cycle) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, cycle_id, name, type, status, start_time, end_time, system_generated)
+            VALUES (?, ?, ?, ?, 'TASK', 'TODO', ?, ?, false)
+            """, id, userId, cycle, name, start, end);
+        return id;
+    }
+
+    private ExecutableSnapshot subtaskSnapshot(UUID id, UUID parentId, OffsetDateTime start,
+                                               UUID cycle) {
+        return new ExecutableSnapshot(id, userId, parentId, cycle, "Subtask", null,
+            "TASK", "TODO", null, null, null, false, null, start, null, null,
+            null, null, null, false, null);
     }
 
     private ExecutableSnapshot blockSnapshot(UUID id, OffsetDateTime start, OffsetDateTime end) {

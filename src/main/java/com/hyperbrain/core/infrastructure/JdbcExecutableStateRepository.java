@@ -169,17 +169,21 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         """;
 
     /**
-     * The child's scheduling authority (ADR-039): the merged in-flight container wins, then the
-     * persisted {@code container_block_id}, then the merged parent. On CREATE the child row does
-     * not exist yet, so the merged container/parent decide alone.
+     * The child's scheduling authority (ADR-039): the in-flight merged links win (container, then
+     * parent), then the persisted ones (container, then parent). The persisted parent fallback is
+     * what makes the pull symmetric with the push (COPY_SCHEDULE_SQL walks parent_id from the DB):
+     * a subtask whose partial edit (or an Apple ingestion) carries no parent relation still resolves
+     * its persisted parent and re-takes its date+cycle. On CREATE the child row does not exist yet,
+     * so the merged links decide alone.
      */
     private static final String FIND_CONTAINER_SCHEDULE_SQL = """
         SELECT c.id, c.name, c.start_time, c.end_time, c.cycle_id
         FROM core_executable c
         WHERE c.id = COALESCE(
             ?::uuid,
+            ?::uuid,
             (SELECT child.container_block_id FROM core_executable child WHERE child.id = ?),
-            ?::uuid)
+            (SELECT child.parent_id FROM core_executable child WHERE child.id = ?))
         """;
 
     /**
@@ -368,7 +372,7 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
                 toOffset(rs.getTimestamp("start_time")),
                 toOffset(rs.getTimestamp("end_time")),
                 rs.getObject("cycle_id", UUID.class)),
-            mergedContainerId, executableId, mergedParentId);
+            mergedContainerId, mergedParentId, executableId, executableId);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
     }
 
