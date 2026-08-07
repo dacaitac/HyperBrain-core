@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
-import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.DayWindow;
 import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
@@ -464,8 +463,12 @@ public class AgendaGenerationService {
 
         // Identity, withdrawal and containment all live in the materializer, where ADR-040 D10's
         // order-of-operations invariant is readable in one place.
+        // The day's readable criterion rides on each block's own note now: the private delivery
+        // channel that used to carry it in an event payload is gone, and a block is an executable
+        // whose description its mirrors already show.
         List<UUID> removedBlockIds = blockMaterializer.materialize(
-            userId, targetDay, zone, validated.accepted(), window.lowerBound());
+            userId, targetDay, zone, validated.accepted(), window.lowerBound(),
+            agenda.energyCriterion());
 
         // ADR-040 D9, middle tier. Only on a replan, and only for a commitment an interruption has
         // already run over: activities and study sessions keep their day and lose only their hour.
@@ -474,11 +477,6 @@ public class AgendaGenerationService {
         if (fromNow) {
             commitmentRescuer.rescue(userId, targetDay, zone, window.lowerBound(),
                 window.frontierEnd(), occupiedIncluding(occupied, validated.accepted()));
-        }
-
-        if (!validated.accepted().isEmpty() || !removedBlockIds.isEmpty()) {
-            stageAgendaBlockDelivery(
-                userId, targetDay, zone, agenda.energyCriterion(), removedBlockIds, now);
         }
 
         if (fromNow) {
@@ -519,27 +517,6 @@ public class AgendaGenerationService {
     }
 
     /**
-     * Stages the morning write-back in the same transaction as the persisted blocks (Transactional
-     * Outbox): the day is either planned <em>and</em> queued for delivery to iOS, or neither. The
-     * {@code SYSTEM} origin keeps the event eligible for outbound propagation (the drain suppresses
-     * only the target's own origin), so the {@code AgendaBlockPropagator} routes it to Apple.
-     */
-    private void stageAgendaBlockDelivery(UUID userId, LocalDate targetDay, ZoneId zone,
-                                          String energyCriterion, List<UUID> removedBlockIds,
-                                          OffsetDateTime now) {
-        AgendaBlockPlannedEvent event = new AgendaBlockPlannedEvent(
-            userId, targetDay, zone.getId(), energyCriterion, removedBlockIds);
-        outboxRepository.append(new OutboxEvent(
-            UUID.randomUUID(),
-            AgendaBlockPlannedEvent.AGGREGATE_TYPE,
-            userId.toString(),
-            AgendaBlockPlannedEvent.EVENT_TYPE,
-            serialize(event),
-            SOURCE_SYSTEM,
-            now));
-    }
-
-    /**
      * Stages the empty-day next-day proposal in the same transaction as the idempotency claim
      * (Transactional Outbox). The {@code SYSTEM} origin keeps it eligible for outbound propagation, so
      * the {@code AgendaBlockPropagator} emits the notice reminder to Apple on drain.
@@ -569,21 +546,6 @@ public class AgendaGenerationService {
             return objectMapper.writeValueAsString(node);
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("Failed to serialize EmptyAgendaProposedEvent", ex);
-        }
-    }
-
-    private String serialize(AgendaBlockPlannedEvent event) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("user_id", event.userId().toString());
-        node.put("target_day", event.targetDay().toString());
-        node.put("zone_id", event.zoneId());
-        node.put("energy_criterion", event.energyCriterion());
-        ArrayNode removed = node.putArray("removed_block_ids");
-        event.removedBlockIds().forEach(id -> removed.add(id.toString()));
-        try {
-            return objectMapper.writeValueAsString(node);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("Failed to serialize AgendaBlockPlannedEvent", ex);
         }
     }
 

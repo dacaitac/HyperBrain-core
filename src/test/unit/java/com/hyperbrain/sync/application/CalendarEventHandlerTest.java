@@ -11,7 +11,8 @@ import com.hyperbrain.sync.domain.model.Operation;
 import com.hyperbrain.sync.domain.model.SentinelEvent;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
-import com.hyperbrain.sync.domain.port.out.PlannerBlockDeletionPort;
+import com.hyperbrain.core.domain.model.ReleaseCause;
+import com.hyperbrain.core.domain.port.in.ExecutableContainmentService;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
@@ -40,7 +41,7 @@ class CalendarEventHandlerTest {
     private SyncMappingRepository syncMappingRepo;
     private OutboxRepository outboxRepo;
     private OnIngestionPriorityReflector priorityReflector;
-    private PlannerBlockDeletionPort plannerBlockDeletionPort;
+    private ExecutableContainmentService containment;
     private CalendarEventHandler handler;
 
     private static final UUID USER_ID =
@@ -53,11 +54,11 @@ class CalendarEventHandlerTest {
         syncMappingRepo = mock(SyncMappingRepository.class);
         outboxRepo = mock(OutboxRepository.class);
         priorityReflector = mock(OnIngestionPriorityReflector.class);
-        plannerBlockDeletionPort = mock(PlannerBlockDeletionPort.class);
+        containment = mock(ExecutableContainmentService.class);
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
         handler = new CalendarEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
             outboxRepo, new EndTimeInvariantRule()::apply, priorityReflector, parser,
-            plannerBlockDeletionPort, USER_ID);
+            containment, USER_ID);
     }
 
     @Test
@@ -139,74 +140,26 @@ class CalendarEventHandlerTest {
         verify(executableRepo).deleteById(localId);
         verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-5");
         verify(outboxRepo).append(any(OutboxEvent.class));
-        verifyNoInteractions(plannerBlockDeletionPort);
     }
 
     @Test
-    @DisplayName("DELETED of a planner block (stale mapping): deletes the block and stages the Notion echo (ADR-038)")
-    void deleted_planner_block_removes_block() {
+    @DisplayName("DELETED lets whatever the row held go — with its hour — BEFORE deleting it (ADR-040 D10)")
+    void deleted_releases_members_before_deleting() {
         UUID blockId = UUID.randomUUID();
-        OffsetDateTime mappedLongAgo = OffsetDateTime.now().minusHours(1);
-        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-7"))
-            .thenReturn(Optional.of(syncMapping("EKEvent-7", blockId, "x", mappedLongAgo)));
-        when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
-        when(plannerBlockDeletionPort.deletePlannedBlock(blockId)).thenReturn(true);
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-D10"))
+            .thenReturn(Optional.of(syncMapping("EKEvent-D10", blockId, "x")));
+        when(executableRepo.findById(blockId)).thenReturn(Optional.of(executable(blockId)));
 
-        handler.handle(calendarEvent("EKEvent-7", Operation.DELETED, null));
+        handler.handle(calendarEvent("EKEvent-D10", Operation.DELETED, null));
 
-        verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
-        verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-7");
-        verify(executableRepo, never()).deleteById(any());
-        // ADR-038: the deletion is echoed as a TimeBlockChangedEvent (APPLE origin) so the
-        // Notion mirror archives the block's page while the Apple loop stays protected.
-        org.mockito.ArgumentCaptor<OutboxEvent> staged =
-            org.mockito.ArgumentCaptor.forClass(OutboxEvent.class);
-        verify(outboxRepo).append(staged.capture());
-        assertThat(staged.getValue().eventType()).isEqualTo("TimeBlockChangedEvent");
-        assertThat(staged.getValue().sourceSystem()).isEqualTo("APPLE");
-        assertThat(staged.getValue().payload()).contains("\"operation\":\"DELETED\"");
-    }
-
-    @Test
-    @DisplayName("DELETED of a freshly mapped block: still deletes it (no id-mutation guard)")
-    void deleted_freshly_mapped_block_is_removed() {
-        UUID blockId = UUID.randomUUID();
-        OffsetDateTime mappedJustNow = OffsetDateTime.now().minusMinutes(1);
-        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-8"))
-            .thenReturn(Optional.of(syncMapping("EKEvent-8", blockId, "x", mappedJustNow)));
-        when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
-        when(plannerBlockDeletionPort.deletePlannedBlock(blockId)).thenReturn(true);
-
-        handler.handle(calendarEvent("EKEvent-8", Operation.DELETED, null));
-
-        verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
-        verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-8");
-        verify(executableRepo, never()).deleteById(any());
-    }
-
-    @Test
-    @DisplayName("ADR-026 D6 invariant: a block-backed CALENDAR_EVENT resolves ONLY to core_time_block, "
-        + "never to core_executable (its start_time is never touched)")
-    void d6_block_event_resolves_only_to_time_block_never_executable() {
-        // A block's EKEvent maps to a core_time_block (not an executable): findById returns empty, so
-        // the handler must route the delete to the planner-block path and leave core_executable —
-        // where the authorial start_time lives — completely untouched. This is the slot-authority
-        // invariant of ADR-026 D6: the SYSTEM slot lives in its own aggregate and can never regress
-        // onto core_executable.start_time by construction (separate rows, separate sync_mapping).
-        UUID blockId = UUID.randomUUID();
-        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-D6"))
-            .thenReturn(Optional.of(syncMapping("EKEvent-D6", blockId, "x")));
-        when(executableRepo.findById(blockId)).thenReturn(Optional.empty());
-        when(plannerBlockDeletionPort.deletePlannedBlock(blockId)).thenReturn(true);
-
-        handler.handle(calendarEvent("EKEvent-D6", Operation.DELETED, null));
-
-        // Resolved only through the block port…
-        verify(plannerBlockDeletionPort).deletePlannedBlock(blockId);
-        // …and core_executable is never mutated: no delete, no upsert of any start_time.
-        verify(executableRepo, never()).deleteById(any());
-        verify(executableRepo, never()).upsert(any());
-        verifyNoInteractions(snapshotRepo);
+        // Letting the database detach members on cascade would mutate rows with no domain pass and no
+        // event, leaving the mirrors holding the hour of a block that no longer exists.
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(containment, executableRepo);
+        order.verify(containment).releaseMembers(
+            org.mockito.ArgumentMatchers.eq(blockId),
+            org.mockito.ArgumentMatchers.eq(ReleaseCause.USER_DETACH),
+            any());
+        order.verify(executableRepo).deleteById(blockId);
     }
 
     @Test
@@ -217,7 +170,7 @@ class CalendarEventHandlerTest {
 
         handler.handle(calendarEvent("EKEvent-9", Operation.DELETED, null));
 
-        verifyNoInteractions(executableRepo, plannerBlockDeletionPort, outboxRepo);
+        verifyNoInteractions(executableRepo, containment, outboxRepo);
         verify(syncMappingRepo, never()).deleteByExternalSystemAndId(any(), any());
     }
 

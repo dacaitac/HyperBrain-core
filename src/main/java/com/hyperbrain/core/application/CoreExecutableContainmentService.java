@@ -153,7 +153,7 @@ public class CoreExecutableContainmentService implements ExecutableContainmentSe
                 + "member(s) first)", blockId, released.size());
             return false;
         }
-        outboxRepo.append(ExecutableOutboxEvents.deleted(blockId));
+        outboxRepo.append(ExecutableOutboxEvents.deleted(blockId, ContainmentPolicy.TIME_BLOCK));
         log.info("Block {} withdrawn from the plan after releasing {} member(s)",
             blockId, released.size());
         return true;

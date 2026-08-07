@@ -9,10 +9,15 @@ package com.hyperbrain.shared.messaging;
 public enum SyncedEntityType {
     EXECUTABLE,
     CYCLE,
-    /** A planned agenda block delivered to Apple as a reminder (HU-01b morning write-back). */
-    AGENDA_BLOCK,
-    /** A single {@code core_time_block} change (settlement or ADR-038 non-planner edit). */
-    TIME_BLOCK,
+    /**
+     * A notice about the day itself rather than about an entity — today, only the empty-day proposal.
+     * It has no executable to ride on, which is why it keeps a classification of its own.
+     *
+     * <p>The block classifications that used to sit here are gone: since a block became an executable
+     * it is delivered through {@link #EXECUTABLE} like everything else, and a second classification
+     * for the same rows only bought a second route writing the same calendar event twice.
+     */
+    AGENDA_NOTICE,
     OTHER;
 
     /**
@@ -28,8 +33,7 @@ public enum SyncedEntityType {
         return switch (aggregateType) {
             case "CORE_EXECUTABLE", "TASK", "SYNC_APPLE" -> EXECUTABLE;
             case "CORE_CYCLE" -> CYCLE;
-            case "AGENDA_BLOCK" -> AGENDA_BLOCK;
-            case "CORE_TIME_BLOCK" -> TIME_BLOCK;
+            case "AGENDA_BLOCK" -> AGENDA_NOTICE;
             default -> OTHER;
         };
     }

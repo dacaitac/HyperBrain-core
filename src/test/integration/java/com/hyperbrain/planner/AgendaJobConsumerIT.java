@@ -96,7 +96,7 @@ class AgendaJobConsumerIT {
 
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
         assertThat(materializationRows()).isEqualTo(1);
-        // Delivery to iOS rides the existing outbox path (AgendaBlockPlannedEvent staged).
+        // Delivery rides the standard executable path: the block announces itself.
         await().atMost(TIMEOUT).untilAsserted(() ->
             assertThat(agendaBlockOutboxCount()).isEqualTo(1));
     }
@@ -191,7 +191,8 @@ class AgendaJobConsumerIT {
 
     private int agendaBlockOutboxCount() {
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE event_type = 'AgendaBlockPlannedEvent'",
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableCreatedEvent' "
+                + "AND aggregate_id IN (SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK')",
             Integer.class);
         return count == null ? 0 : count;
     }

@@ -1,11 +1,13 @@
 package com.hyperbrain.planner.application;
 
+import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.domain.model.ContainmentRequest;
 import com.hyperbrain.core.domain.port.in.ExecutableContainmentService;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlannerBlockRow;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -17,6 +19,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /*
@@ -59,13 +62,29 @@ public class PlannerBlockMaterializer {
     /** The label a block with no template slot and no theme carries until the LLM names it (D6). */
     public static final String DEFAULT_BLOCK_NAME = "Focus window";
 
+    /** Heading of the member list a block carries in its note, so the calendar event says what it holds. */
+    public static final String MEMBERS_NOTE_HEADING = "In this block:";
+
+    /**
+     * The fixed line every block's note carries (ADR-040 D18, mitigation 1). Containment reuses Notion's
+     * Parent/Sub-task relation, and that relation reads as "this is PART OF that" — a block is not the
+     * parent of a task, it is where the task happens. Deleting one there looks like it should take its
+     * contents with it. It does not, and the regression test that proves it is what lets this line be
+     * written without lying.
+     */
+    public static final String DELETION_NOTE =
+        "Deleting this block does not delete its tasks — they are simply released from it.";
+
     private final PlannerStateRepository repository;
     private final ExecutableContainmentService containment;
+    private final OutboxRepository outboxRepository;
 
     public PlannerBlockMaterializer(PlannerStateRepository repository,
-                                    ExecutableContainmentService containment) {
+                                    ExecutableContainmentService containment,
+                                    OutboxRepository outboxRepository) {
         this.repository = repository;
         this.containment = containment;
+        this.outboxRepository = outboxRepository;
     }
 
     /**
@@ -82,9 +101,12 @@ public class PlannerBlockMaterializer {
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public List<UUID> materialize(UUID userId, LocalDate targetDay, ZoneId zone,
-                                  List<AgendaBlock> accepted, OffsetDateTime notBefore) {
+                                  List<AgendaBlock> accepted, OffsetDateTime notBefore,
+                                  String energyCriterion) {
         PlannerBlockIdentity.Reconciliation reconciliation = PlannerBlockIdentity.reconcile(
             accepted, repository.loadRegenerableBlocks(userId, targetDay, zone, notBefore));
+        Map<UUID, String> memberNames = repository.loadExecutableTitles(
+            accepted.stream().flatMap(block -> block.members().stream()).toList());
 
         List<UUID> withdrawn = new ArrayList<>();
         for (UUID blockId : reconciliation.removedBlockIds()) {
@@ -97,8 +119,16 @@ public class PlannerBlockMaterializer {
         for (PlannerBlockIdentity.IdentifiedBlock identified : reconciliation.identified()) {
             AgendaBlock block = identified.block();
             if (repository.upsertBlock(new PlannerBlockRow(
-                identified.blockId(), userId, blockName(block), block.reason(),
+                identified.blockId(), userId, blockName(block),
+                blockNote(block, memberNames, energyCriterion),
                 block.start(), block.end(), block.templateSlotId()))) {
+                // A block is an executable, so it reaches Apple and Notion through the standard
+                // propagators — the type routing already sends it to the calendar. Announcing it only
+                // when it genuinely moved is what keeps a replan that changed two blocks from
+                // announcing thirty (ADR-040 D17).
+                outboxRepository.append(identified.continued()
+                    ? ExecutableOutboxEvents.updated(identified.blockId())
+                    : ExecutableOutboxEvents.created(identified.blockId()));
                 moved++;
             }
             containment.contain(identified.blockId(), containmentRequests(block));
@@ -123,6 +153,47 @@ public class PlannerBlockMaterializer {
             return block.theme();
         }
         return block.templateSlotId() != null ? block.templateSlotId() : DEFAULT_BLOCK_NAME;
+    }
+
+    /**
+     * The block's note: what it holds, why it is there, how the day's load was sized, and the standing
+     * warning about deleting it.
+     *
+     * <p>This body used to be built inside the private delivery channel, and it is the reason that
+     * channel could not simply be deleted: without it the calendar event loses its content and a block
+     * stops being readable. It now lives on the block's own {@code description}, which is what the
+     * standard propagators mirror — so one text serves the calendar and Notion alike instead of one
+     * channel each.
+     *
+     * <p>The member list lives <b>here, on the container</b>, never on the members' own titles: EventKit
+     * exposes no subtasks, so the grouping cannot nest, and writing the theme onto an executable would
+     * pollute the mirror and churn the merge of its canonical title.
+     */
+    private static String blockNote(AgendaBlock block, Map<UUID, String> memberNames,
+                                    String energyCriterion) {
+        StringBuilder body = new StringBuilder();
+        List<UUID> members = block.members();
+        if (members.size() > 1) {
+            body.append(MEMBERS_NOTE_HEADING);
+            for (UUID member : members) {
+                body.append("\n• ").append(memberNames.getOrDefault(member, "(untitled)"));
+            }
+        }
+        appendParagraph(body, block.reason());
+        appendParagraph(body, energyCriterion);
+        appendParagraph(body, DELETION_NOTE);
+        return body.length() == 0 ? null : body.toString();
+    }
+
+    /** Appends a blank-line-separated paragraph, skipping blanks so the note never opens with padding. */
+    private static void appendParagraph(StringBuilder body, String paragraph) {
+        if (paragraph == null || paragraph.isBlank()) {
+            return;
+        }
+        if (body.length() > 0) {
+            body.append("\n\n");
+        }
+        body.append(paragraph.trim());
     }
 
     /** The block's membership as core's containment operation expects it, in presentation order. */

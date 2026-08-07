@@ -96,9 +96,10 @@ class UserCommandConsumerIT {
         // Then one PLANNED/PLANNER block materializes at or after the replan instant
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
         assertThat(earliestBlockStart()).isAfterOrEqualTo(NOON);
-        // And the write-back rides the existing outbox path (AgendaBlockPlannedEvent staged)
+        // And the write-back rides the standard executable path: the block announces itself
         Integer staged = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE event_type = 'AgendaBlockPlannedEvent'",
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableCreatedEvent' "
+                + "AND aggregate_id IN (SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK')",
             Integer.class);
         assertThat(staged).isEqualTo(1);
 

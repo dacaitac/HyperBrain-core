@@ -177,7 +177,7 @@ class PlannerBlockMembershipIT {
 
         // A replan fired at 12:00 wants nothing at all. The morning block began at 09:00.
         List<UUID> withdrawn = transactionTemplate.execute(status ->
-            materializer.materialize(USER, DAY, ZONE, List.of(), at(12)));
+            materializer.materialize(USER, DAY, ZONE, List.of(), at(12), "criterion"));
 
         // It stands, untouched, and keeps holding its member: a morning already lived is not a draft.
         assertThat(withdrawn).isEmpty();
@@ -204,7 +204,7 @@ class PlannerBlockMembershipIT {
     private List<UUID> materialize(List<AgendaBlock> blocks) {
         return transactionTemplate.execute(status ->
             materializer.materialize(
-                USER, DAY, ZONE, blocks, DAY.atStartOfDay(ZONE).toOffsetDateTime()));
+                USER, DAY, ZONE, blocks, DAY.atStartOfDay(ZONE).toOffsetDateTime(), "criterion"));
     }
 
     private static AgendaBlock window(UUID anchor, List<UUID> additionalMembers, int startHour,

@@ -82,7 +82,10 @@ class AgendaProposalCycleIT {
         List<String> reasons = jdbcTemplate.queryForList(
             "SELECT reason FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             String.class);
-        assertThat(reasons).hasSize(2).allMatch(COACH_NOTE::equals);
+        // The note is now one paragraph of the block's whole note — which also carries what the block
+        // holds, the day's criterion and the standing deletion warning, all of which used to be
+        // assembled inside the planner's own delivery channel and now live on the block itself.
+        assertThat(reasons).isNotEmpty().allMatch(reason -> reason.contains(COACH_NOTE));
     }
 
     @Test
@@ -98,7 +101,7 @@ class AgendaProposalCycleIT {
             "SELECT reason FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             String.class);
         // The floor still planned both tasks; none carries the (never-applied) coach note.
-        assertThat(reasons).hasSize(2).noneMatch(COACH_NOTE::equals);
+        assertThat(reasons).isNotEmpty().noneMatch(reason -> reason.contains(COACH_NOTE));
     }
 
     @Test

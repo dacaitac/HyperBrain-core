@@ -1,6 +1,8 @@
 package com.hyperbrain.sync.application;
 
+import com.hyperbrain.core.domain.model.ReleaseCause;
 import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.core.domain.port.in.ExecutableContainmentService;
 import com.hyperbrain.prioritizer.application.OnIngestionPriorityReflector;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.shared.outbox.OutboxEvent;
@@ -13,7 +15,6 @@ import com.hyperbrain.sync.domain.model.SentinelEvent;
 import com.hyperbrain.sync.domain.model.SyncMapping;
 import com.hyperbrain.sync.domain.port.in.IEventHandler;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
-import com.hyperbrain.sync.domain.port.out.PlannerBlockDeletionPort;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
 import com.hyperbrain.sync.domain.service.SourceAwareMerge;
@@ -54,7 +55,7 @@ public class CalendarEventHandler implements IEventHandler {
     private final DomainChangeProcessor domainChangeProcessor;
     private final OnIngestionPriorityReflector priorityReflector;
     private final PayloadParser payloadParser;
-    private final PlannerBlockDeletionPort plannerBlockDeletionPort;
+    private final ExecutableContainmentService containment;
     private final UUID defaultUserId;
 
     public CalendarEventHandler(
@@ -65,7 +66,7 @@ public class CalendarEventHandler implements IEventHandler {
         DomainChangeProcessor domainChangeProcessor,
         OnIngestionPriorityReflector priorityReflector,
         PayloadParser payloadParser,
-        PlannerBlockDeletionPort plannerBlockDeletionPort,
+        ExecutableContainmentService containment,
         @Value("${app.sync.default-user-id}") UUID defaultUserId
     ) {
         this.executableRepo = executableRepo;
@@ -75,7 +76,7 @@ public class CalendarEventHandler implements IEventHandler {
         this.domainChangeProcessor = domainChangeProcessor;
         this.priorityReflector = priorityReflector;
         this.payloadParser = payloadParser;
-        this.plannerBlockDeletionPort = plannerBlockDeletionPort;
+        this.containment = containment;
         this.defaultUserId = defaultUserId;
     }
 
@@ -132,10 +133,9 @@ public class CalendarEventHandler implements IEventHandler {
     }
 
     /**
-     * Applies an inbound calendar-event delete. The mapping's {@code local_id} is either a
-     * {@code core_executable} (an ACTIVITY/AGENDA event) or a {@code core_time_block} (a morning-agenda
-     * block written to Apple by {@code AgendaBlockPropagator}, #13). Executables are resolved first;
-     * anything else is routed to the planner-block delete path.
+     * Applies an inbound calendar-event delete. Since ADR-039 the mapping's {@code local_id} is always
+     * a {@code core_executable} — an activity, an agenda entry, or a block, which is now an executable
+     * like any other — so there is a single delete path and no second one to route to.
      *
      * <p>An inbound delete is always propagated, regardless of the mapping's age. An earlier version
      * skipped very recent mappings on the theory that an EKEvent's {@code eventIdentifier} could mutate
@@ -156,35 +156,32 @@ public class CalendarEventHandler implements IEventHandler {
 
         UUID localId = existing.get().localId();
 
-        if (executableRepo.findById(localId).isPresent()) {
-            executableRepo.deleteById(localId);
-            syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
-            outboxRepo.append(buildOutboxEvent(event, localId, "CalendarEventDeletedEvent"));
-            log.info("CALENDAR_EVENT {} deleted (executable {})", event.entityId(), localId);
+        if (executableRepo.findById(localId).isEmpty()) {
+            log.warn("CALENDAR_EVENT {} DELETE maps to local {}, which no longer exists; no-op",
+                event.entityId(), localId);
             return;
         }
 
-        deletePlannerBlock(event, localId);
+        // Let anything the row was holding go BEFORE deleting it (ADR-040 D10). Relying on the
+        // database to detach members on cascade mutates rows without passing through the domain and
+        // without emitting a single event, so the calendar and Notion keep the hour of a block that no
+        // longer exists — silent corruption of the mirrors that never self-corrects because nobody
+        // finds out. A user's gesture releases them WITH their hour intact: you deleted a block, you
+        // did not ask to lose the time you had set aside for what was in it.
+        containment.releaseMembers(localId, ReleaseCause.USER_DETACH, userZone());
+        executableRepo.deleteById(localId);
+        syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
+        outboxRepo.append(buildOutboxEvent(event, localId, "CalendarEventDeletedEvent"));
+        log.info("CALENDAR_EVENT {} deleted (executable {})", event.entityId(), localId);
     }
 
-    private void deletePlannerBlock(SentinelEvent event, UUID blockId) {
-        if (plannerBlockDeletionPort.deletePlannedBlock(blockId)) {
-            syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, event.entityId());
-            // ADR-038: the block's Notion mirror page must go too — the APPLE origin keeps the
-            // Apple write-back out of the loop while the Notion propagator archives the page.
-            outboxRepo.append(new OutboxEvent(
-                UUID.randomUUID(), "CORE_TIME_BLOCK", blockId.toString(),
-                "TimeBlockChangedEvent",
-                String.format(
-                    "{\"block_id\":\"%s\",\"user_id\":\"%s\",\"operation\":\"DELETED\","
-                        + "\"source_system\":\"APPLE\",\"occurred_at\":\"%s\"}",
-                    blockId, defaultUserId, OffsetDateTime.now()),
-                EXTERNAL_SYSTEM, OffsetDateTime.now()));
-            log.info("CALENDAR_EVENT {} deleted (planner block {})", event.entityId(), blockId);
-        } else {
-            log.warn("CALENDAR_EVENT {} DELETE mapped to local {}, which is neither an executable nor "
-                + "a deletable PLANNED block; no-op", event.entityId(), blockId);
-        }
+    /**
+     * The zone the released members' day is reasoned in. A user detach keeps each member's hour, so the
+     * zone never actually decides anything on this path — it is required by the operation's signature
+     * because the planner's withdrawal, the other caller, does demote the hour to midnight.
+     */
+    private java.time.ZoneId userZone() {
+        return java.time.ZoneOffset.UTC;
     }
 
     private SyncMapping buildSyncMapping(UUID localId, String externalId, String checksum) {

@@ -62,15 +62,24 @@ public final class ExecutableOutboxEvents {
 
     /**
      * Builds the deletion notification of an executable the system itself withdrew (a planner block
-     * dropped from the plan, ADR-040 D10), so both satellites remove their counterpart. Unlike the
-     * upsert notifications this one is <b>not</b> re-read by the propagators — by the time it drains,
-     * the row is gone — so it must be staged in the same transaction as the delete.
+     * dropped from the plan, ADR-040 D10), so both satellites remove their counterpart.
      *
-     * @param executableId the withdrawn executable
+     * <p><b>The type is carried in the payload, and it is load-bearing.</b> Unlike the upsert
+     * notifications, this one cannot be resolved by re-reading the row: by the time it drains the row
+     * is gone. Without the type the Apple propagator falls back to deleting a <em>reminder</em>, so a
+     * withdrawn block would ask Apple to remove a reminder holding a calendar event's identifier —
+     * a delete that silently does nothing and leaves the event orphaned in the calendar forever.
+     *
+     * @param executableId   the withdrawn executable
+     * @param executableType its {@code core_executable.type}, which decides the Apple entity to remove
      * @return the outbox row to append inside the caller's transaction
      */
-    public static OutboxEvent deleted(UUID executableId) {
-        return event(executableId, DELETED_EVENT);
+    public static OutboxEvent deleted(UUID executableId, String executableType) {
+        String payload = String.format(
+            "{\"local_id\":\"%s\",\"operation\":\"DELETED\",\"type\":\"%s\"}",
+            executableId, executableType);
+        return new OutboxEvent(UUID.randomUUID(), EXECUTABLE_AGGREGATE, executableId.toString(),
+            DELETED_EVENT, payload, SOURCE_SYSTEM, OffsetDateTime.now());
     }
 
     private static OutboxEvent event(UUID executableId, String eventType) {
@@ -81,9 +90,6 @@ public final class ExecutableOutboxEvents {
     }
 
     private static String operationOf(String eventType) {
-        if (CREATED_EVENT.equals(eventType)) {
-            return "CREATED";
-        }
-        return DELETED_EVENT.equals(eventType) ? "DELETED" : "UPDATED";
+        return CREATED_EVENT.equals(eventType) ? "CREATED" : "UPDATED";
     }
 }

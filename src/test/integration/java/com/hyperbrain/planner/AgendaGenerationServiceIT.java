@@ -290,10 +290,12 @@ class AgendaGenerationServiceIT {
             "SELECT count(*) FROM planner_blocks WHERE executable_id = ?", Integer.class, low);
         assertThat(lowBlocks).isZero();
 
-        // And the staged write-back carries the removed block id so its Apple EKEvent is deleted.
+        // And the withdrawal is announced as a deletion of the block executable, carrying its type so
+        // Apple removes the calendar event rather than looking for a reminder that never existed.
         String payload = jdbcTemplate.queryForObject(
-            "SELECT payload FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", String.class);
-        assertThat(payload).contains(lowBlockFirst.toString());
+            "SELECT payload FROM outbox_events WHERE event_type = 'ExecutableDeletedEvent'",
+            String.class);
+        assertThat(payload).contains(lowBlockFirst.toString()).contains("TIME_BLOCK");
     }
 
     @Test
@@ -314,11 +316,11 @@ class AgendaGenerationServiceIT {
         assertThat(jdbcTemplate.queryForObject(
             "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, added))
             .isEqualTo(highBlockFirst);
-        // Nothing was removed, so the staged event carries an empty removed list.
-        Integer removedCount = jdbcTemplate.queryForObject(
-            "SELECT jsonb_array_length(payload -> 'removed_block_ids') FROM outbox_events "
-                + "WHERE aggregate_type = 'AGENDA_BLOCK'", Integer.class);
-        assertThat(removedCount).isZero();
+        // Nothing was withdrawn, so nothing announces a deletion.
+        Integer deletions = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableDeletedEvent'",
+            Integer.class);
+        assertThat(deletions).isZero();
     }
 
     @Test
@@ -347,19 +349,24 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("write-back staging: a planned day stages one AgendaBlockPlannedEvent on the outbox")
+    @DisplayName("write-back staging: a planned day announces each block as an executable change")
     void planned_day_stages_agenda_block_event() {
         insertTask("High", 0.9, 60);
 
         service.generate(USER, DAY, UTC, NOON, false);
 
         Integer events = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK' "
-                + "AND event_type = 'AgendaBlockPlannedEvent'", Integer.class);
+            "SELECT count(*) FROM outbox_events WHERE aggregate_type = 'CORE_EXECUTABLE' "
+                + "AND event_type = 'ExecutableCreatedEvent' AND aggregate_id IN "
+                + "(SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK')", Integer.class);
         assertThat(events).isEqualTo(1);
+        // The block is announced under its OWN id now, not under the user's: it is an executable like
+        // any other, and its mirrors are reached by the standard propagators.
         String aggregateId = jdbcTemplate.queryForObject(
-            "SELECT aggregate_id FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", String.class);
-        assertThat(aggregateId).isEqualTo(USER.toString());
+            "SELECT id::text FROM core_executable WHERE type = 'TIME_BLOCK'", String.class);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE aggregate_id = ?", Integer.class, aggregateId))
+            .isPositive();
     }
 
     @Test
