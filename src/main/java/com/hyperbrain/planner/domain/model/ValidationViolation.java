@@ -21,7 +21,6 @@ public record ValidationViolation(UUID executableId, Wall wall) {
         /** Overlapped a read-only AGENDA window (ADR-009). */
         OVERLAPS_READ_ONLY_AGENDA,
         /** A high-load block beyond the F6 quota (the WIG is exempt). */
-        HIGH_LOAD_QUOTA_EXCEEDED,
         /** Scheduled a read-only AGENDA executable as if it were work (ADR-009). */
         SCHEDULES_READ_ONLY_AGENDA
     }
