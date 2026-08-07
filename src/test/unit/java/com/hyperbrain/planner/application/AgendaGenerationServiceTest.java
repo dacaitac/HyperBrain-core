@@ -56,6 +56,7 @@ class AgendaGenerationServiceTest {
             mock(PlannerStateRepository.class),
             mock(PlannerBlockMaterializer.class),
             new DayWindowResolver(com.hyperbrain.planner.domain.model.DayTemplate.DEFAULT),
+            mock(MovedCommitmentRescuer.class),
             mock(SleepFrontierCalculator.class),
             mock(EnergyResolver.class),
             mock(PlanningWindowResolver.class),

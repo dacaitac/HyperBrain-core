@@ -4,6 +4,7 @@ import com.hyperbrain.planner.domain.model.ExecutableType;
 import com.hyperbrain.planner.domain.model.LearnedUnitCost;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.MciWig;
+import com.hyperbrain.planner.domain.model.MovableCommitment;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
@@ -377,6 +378,26 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         """;
 
     /**
+     * The day's movable commitments (ADR-040 D9): open activities and study sessions whose window sits
+     * on the target day. Both bounds are required — a row without a real window is not something whose
+     * hour can be moved.
+     */
+    private static final String MOVABLE_COMMITMENTS_SQL = """
+        SELECT e.id, e.start_time, e.end_time
+        FROM core_executable e
+        WHERE e.user_id = ?
+          AND e.type IN ('ACTIVITY', 'LEARNING_SESSION')
+          AND e.status IN ('TODO', 'IN_PROGRESS')
+          AND e.system_generated = false
+          AND e.start_time IS NOT NULL
+          AND e.end_time   IS NOT NULL
+          AND e.end_time > e.start_time
+          AND e.start_time >= ?
+          AND e.start_time <  ?
+        ORDER BY e.start_time, e.id
+        """;
+
+    /**
      * Inserts or re-times a planner block under the id the reconciliation assigned it — on the deployed
      * model, where a block is a {@code core_executable} of type {@code TIME_BLOCK} (ADR-039). A fresh
      * surrogate inserts; a continued id updates in place, so the block keeps its {@code sync_mapping}
@@ -606,6 +627,15 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 true),
             userId, dayEnd, dayStart));
         return intervals;
+    }
+
+    @Override
+    public List<MovableCommitment> loadMovableCommitments(UUID userId, OffsetDateTime dayStart,
+                                                          OffsetDateTime dayEnd) {
+        return jdbcTemplate.query(MOVABLE_COMMITMENTS_SQL, (rs, rowNum) -> new MovableCommitment(
+            rs.getObject("id", UUID.class),
+            rs.getObject("start_time", OffsetDateTime.class),
+            rs.getObject("end_time", OffsetDateTime.class)), userId, dayStart, dayEnd);
     }
 
     @Override

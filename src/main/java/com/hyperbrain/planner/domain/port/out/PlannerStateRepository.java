@@ -1,6 +1,7 @@
 package com.hyperbrain.planner.domain.port.out;
 
 import com.hyperbrain.planner.domain.model.MciWig;
+import com.hyperbrain.planner.domain.model.MovableCommitment;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
@@ -118,6 +119,20 @@ public interface PlannerStateRepository {
      */
     List<OccupiedInterval> loadOccupiedIntervals(UUID userId, OffsetDateTime dayStart,
                                                  OffsetDateTime dayEnd);
+
+    /**
+     * Reads the day's movable commitments: the open {@code ACTIVITY} and {@code LEARNING_SESSION} rows
+     * whose window falls on the target day (ADR-040 D9, middle tier). They are never window members —
+     * they carry a calendar window of their own — but the planner may move them in hour inside their
+     * day.
+     *
+     * @param userId   the owning user; never null
+     * @param dayStart the day's start instant (inclusive); never null
+     * @param dayEnd   the day's end instant (exclusive); never null
+     * @return the day's movable commitments, earliest first; never null, may be empty
+     */
+    List<MovableCommitment> loadMovableCommitments(UUID userId, OffsetDateTime dayStart,
+                                                   OffsetDateTime dayEnd);
 
     /**
      * Re-reads the day's <b>regenerable</b> blocks — the {@code TIME_BLOCK} executables of

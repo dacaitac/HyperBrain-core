@@ -79,6 +79,7 @@ public class AgendaGenerationService {
     private final PlannerStateRepository repository;
     private final PlannerBlockMaterializer blockMaterializer;
     private final DayWindowResolver dayWindowResolver;
+    private final MovedCommitmentRescuer commitmentRescuer;
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final EnergyResolver energyResolver;
     private final PlanningWindowResolver planningWindowResolver;
@@ -95,6 +96,7 @@ public class AgendaGenerationService {
         PlannerStateRepository repository,
         PlannerBlockMaterializer blockMaterializer,
         DayWindowResolver dayWindowResolver,
+        MovedCommitmentRescuer commitmentRescuer,
         SleepFrontierCalculator sleepFrontierCalculator,
         EnergyResolver energyResolver,
         PlanningWindowResolver planningWindowResolver,
@@ -109,6 +111,7 @@ public class AgendaGenerationService {
         this.repository = repository;
         this.blockMaterializer = blockMaterializer;
         this.dayWindowResolver = dayWindowResolver;
+        this.commitmentRescuer = commitmentRescuer;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
         this.planningWindowResolver = planningWindowResolver;
@@ -464,6 +467,15 @@ public class AgendaGenerationService {
         List<UUID> removedBlockIds = blockMaterializer.materialize(
             userId, targetDay, zone, validated.accepted(), window.lowerBound());
 
+        // ADR-040 D9, middle tier. Only on a replan, and only for a commitment an interruption has
+        // already run over: activities and study sessions keep their day and lose only their hour.
+        // They are never members of a window — they carry a calendar window of their own — so this is
+        // the single place the planner writes onto something the user created in his own calendar.
+        if (fromNow) {
+            commitmentRescuer.rescue(userId, targetDay, zone, window.lowerBound(),
+                window.frontierEnd(), occupiedIncluding(occupied, validated.accepted()));
+        }
+
         if (!validated.accepted().isEmpty() || !removedBlockIds.isEmpty()) {
             stageAgendaBlockDelivery(
                 userId, targetDay, zone, agenda.energyCriterion(), removedBlockIds, now);
@@ -479,6 +491,15 @@ public class AgendaGenerationService {
 
         return new Agenda(validated.accepted(), agenda.excluded(), agenda.paused(),
             agenda.energyCriterion(), agenda.degraded());
+    }
+
+    /** The day's walls plus the blocks this run just materialized — the real occupancy from here on. */
+    private static List<OccupiedInterval> occupiedIncluding(List<OccupiedInterval> walls,
+                                                            List<AgendaBlock> accepted) {
+        List<OccupiedInterval> occupancy = new ArrayList<>(walls);
+        accepted.forEach(block -> occupancy.add(
+            new OccupiedInterval(block.executableId(), block.start(), block.end(), false)));
+        return occupancy;
     }
 
     /**
