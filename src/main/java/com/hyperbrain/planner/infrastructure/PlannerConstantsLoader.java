@@ -32,9 +32,9 @@ import java.util.List;
  * {@code sleepHistoryDays}, {@code sleepFreshnessHours}, {@code wigBlockMinutes},
  * {@code pacePrecisionEpsilon}, {@code maxRequiredPace}, {@code hysteresisMargin},
  * {@code degradedStreakThreshold}, {@code degradedUrgentCount}, {@code highLoadDrainFloor},
- * {@code lowCeiling}, {@code highFloor}, {@code lowMargin}, {@code neutralMargin}, {@code highMargin},
- * {@code lowQuota}, {@code neutralQuota}, {@code highQuota}, and the {@code day_template} object
- * (ADR-040 D14).
+ * {@code lowCeiling}, {@code highFloor}, {@code lowQuota}, {@code neutralQuota}, {@code highQuota},
+ * and the {@code day_template} object (ADR-040 D14). Keys of retired mechanisms that linger in a
+ * deployed settings blob are simply ignored, which is what makes their removal deploy-safe.
  */
 @Component
 class PlannerConstantsLoader {
@@ -101,9 +101,6 @@ class PlannerConstantsLoader {
             return new EnergyThresholds(
                 intOr(node, "lowCeiling", d.lowCeiling()),
                 intOr(node, "highFloor", d.highFloor()),
-                doubleOr(node, "lowMargin", d.lowMargin()),
-                doubleOr(node, "neutralMargin", d.neutralMargin()),
-                doubleOr(node, "highMargin", d.highMargin()),
                 intOr(node, "lowQuota", d.lowQuota()),
                 intOr(node, "neutralQuota", d.neutralQuota()),
                 intOr(node, "highQuota", d.highQuota()));

@@ -90,9 +90,9 @@ class AgendaInputHasherTest {
     @DisplayName("a changed energy tier changes the hash")
     void distinct_when_energy_changes() {
         PlannerDayState neutral = state(WINDOW_START, List.of(task(TASK, 0.9)),
-            new EnergyProfile(EnergyTier.NEUTRAL, 0.15, 3, "neutral"), List.of());
+            new EnergyProfile(EnergyTier.NEUTRAL, 3, "neutral"), List.of());
         PlannerDayState low = state(WINDOW_START, List.of(task(TASK, 0.9)),
-            new EnergyProfile(EnergyTier.LOW, 0.15, 3, "low"), List.of());
+            new EnergyProfile(EnergyTier.LOW, 3, "low"), List.of());
 
         assertThat(h(low)).isNotEqualTo(h(neutral));
     }
@@ -118,10 +118,8 @@ class AgendaInputHasherTest {
     @Test
     @DisplayName("nullable executable fields are handled without collision")
     void nullable_fields_do_not_collide() {
-        SchedulableExecutable sparse = new SchedulableExecutable(
-            TASK, ExecutableType.TASK, null, false, null, null, 0, null, 0, null, null);
-        SchedulableExecutable rich = new SchedulableExecutable(
-            TASK, ExecutableType.TASK, 0.5, false, 4, null, 0, 60, 0, null, null);
+        SchedulableExecutable sparse = new SchedulableExecutable(TASK, ExecutableType.TASK, null, false, null, 0, null, null, null);
+        SchedulableExecutable rich = new SchedulableExecutable(TASK, ExecutableType.TASK, 0.5, false, 4, 0, 60, null, null);
 
         PlannerDayState sparseState = state(WINDOW_START, List.of(sparse));
         PlannerDayState richState = state(WINDOW_START, List.of(rich));
@@ -175,12 +173,11 @@ class AgendaInputHasherTest {
     }
 
     private static EnergyProfile neutralEnergy() {
-        return new EnergyProfile(EnergyTier.NEUTRAL, 0.15, 3, "neutral");
+        return new EnergyProfile(EnergyTier.NEUTRAL, 3, "neutral");
     }
 
     private static SchedulableExecutable task(UUID id, double priority) {
-        return new SchedulableExecutable(
-            id, ExecutableType.TASK, priority, false, 3, null, 0, 60, 0, null, null);
+        return new SchedulableExecutable(id, ExecutableType.TASK, priority, false, 3, 0, 60, null, null);
     }
 
     private static PlannerDayState state(OffsetDateTime windowStart,

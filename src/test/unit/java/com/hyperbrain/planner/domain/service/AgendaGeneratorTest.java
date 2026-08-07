@@ -31,7 +31,7 @@ class AgendaGeneratorTest {
     private static final ZoneId UTC = ZoneOffset.UTC;
     private static final LocalDate DAY = LocalDate.of(2026, 8, 7);
     private static final EnergyProfile NEUTRAL =
-        new EnergyProfile(EnergyTier.NEUTRAL, 0.0, 3, "neutral");
+        new EnergyProfile(EnergyTier.NEUTRAL, 3, "neutral");
 
     private final AgendaGenerator generator = new AgendaGenerator();
 
@@ -98,8 +98,7 @@ class AgendaGeneratorTest {
         // Given
         UUID leadMeasure = UUID.randomUUID();
         List<SchedulableExecutable> ranked = List.of(
-            new SchedulableExecutable(leadMeasure, ExecutableType.LEAD_MEASURE, 0.5, false,
-                null, null, 0, 30, 0, null, null),
+            new SchedulableExecutable(leadMeasure, ExecutableType.LEAD_MEASURE, 0.5, false, null, 0, 30, null, null),
             task(0.9));
         List<DayWindow> windows = List.of(
             window("WORK", 7, 8, SlotPurpose.WORK),
@@ -185,8 +184,7 @@ class AgendaGeneratorTest {
     @DisplayName("a read-only agenda item is never scheduled; it is the floor the day is laid against")
     void a_read_only_agenda_item_is_never_scheduled() {
         // Given
-        SchedulableExecutable agendaItem = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.AGENDA, 0.99, false, null, null, 0, 60, 0, null, null);
+        SchedulableExecutable agendaItem = new SchedulableExecutable(UUID.randomUUID(), ExecutableType.AGENDA, 0.99, false, null, 0, 60, null, null);
 
         // When
         Agenda agenda = generator.generate(
@@ -204,11 +202,8 @@ class AgendaGeneratorTest {
     @DisplayName("an activity is never put inside a window: it already is a block of time")
     void a_calendar_event_type_is_never_contained() {
         // Given
-        SchedulableExecutable activity = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.ACTIVITY, 0.99, false, null, null, 0, 60, 0, null, null);
-        SchedulableExecutable session = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.LEARNING_SESSION, 0.98, false, null, null, 0, 60, 0,
-            null, null);
+        SchedulableExecutable activity = new SchedulableExecutable(UUID.randomUUID(), ExecutableType.ACTIVITY, 0.99, false, null, 0, 60, null, null);
+        SchedulableExecutable session = new SchedulableExecutable(UUID.randomUUID(), ExecutableType.LEARNING_SESSION, 0.98, false, null, 0, 60, null, null);
 
         // When
         Agenda agenda = generator.generate(
@@ -239,8 +234,7 @@ class AgendaGeneratorTest {
     @DisplayName("an in-progress executable left without a window is reported as paused, never dropped silently")
     void in_progress_work_without_a_window_is_paused() {
         // Given
-        SchedulableExecutable running = new SchedulableExecutable(
-            UUID.randomUUID(), ExecutableType.TASK, 0.9, true, null, null, 0, 60, 0, null, null);
+        SchedulableExecutable running = new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, 0.9, true, null, 0, 60, null, null);
 
         // When
         Agenda agenda = generator.generate(state(List.of(), List.of(running)));
@@ -289,13 +283,11 @@ class AgendaGeneratorTest {
     }
 
     private static SchedulableExecutable task(double priority) {
-        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false,
-            null, null, 0, 60, 0, null, null);
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null, 0, 60, null, null);
     }
 
     private static SchedulableExecutable drainingTask(double priority) {
-        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false,
-            5, null, 0, 60, 0, null, null);
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, 5, 0, 60, null, null);
     }
 
     private static MciWig wig(UUID leadMeasureId) {

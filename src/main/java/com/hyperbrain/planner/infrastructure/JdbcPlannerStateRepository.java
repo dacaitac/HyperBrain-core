@@ -1,7 +1,6 @@
 package com.hyperbrain.planner.infrastructure;
 
 import com.hyperbrain.planner.domain.model.ExecutableType;
-import com.hyperbrain.planner.domain.model.LearnedUnitCost;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.MovableCommitment;
@@ -14,9 +13,7 @@ import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
 import com.hyperbrain.planner.domain.model.SleepWindow;
-import com.hyperbrain.planner.domain.port.out.LearnedCostRepository;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
-import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -46,16 +43,10 @@ import java.util.UUID;
  * {@code sys_user.settings} as {@code {"wake": "HH:mm", "bedtime": "HH:mm"}}; a hard default is used
  * when settings do not carry it.
  *
- * <p><b>Remaining effort.</b> For tasks with user subtasks the adapter resolves {@code cu} via the
- * {@link LearnedUnitCostCalculator} over the settled-block history ({@link LearnedCostRepository}), so
- * the with-subtasks branch reuses the exact spike-#63 estimator rather than re-deriving it.
- *
- * <p><b>Which block model each statement reads.</b> The reads that decide the shape of the day — the
- * occupancy walls and the two goal-selector signals — run against the deployed model, where a block is
- * a {@code core_executable} of type {@code TIME_BLOCK} (ADR-039). The write path and the two derived
- * columns that feed the learned unit-cost estimator still address the frozen {@code core_time_block}
- * table: they are replaced, not re-pointed, by the window model and by the retirement of the focus
- * register, and moving them now would be work thrown away.
+ * <p><b>Which block model this reads and writes.</b> All of it: a block is a {@code core_executable}
+ * of type {@code TIME_BLOCK} (ADR-039). The frozen {@code core_time_block} table is not touched — the
+ * last two reads that still addressed it, the executed-minutes sum and the reschedule seed, died with
+ * the mechanisms they fed.
  */
 @Repository
 class JdbcPlannerStateRepository implements PlannerStateRepository {
@@ -175,11 +166,6 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                (SELECT count(*) FROM core_executable sub
                 WHERE sub.parent_id = e.id
                   AND sub.system_generated = false)              AS total_subtasks,
-               -- Deliberately left on the frozen table: ADR-040 retires the learned unit-cost
-               -- estimator, so this column dies with the focus register instead of being re-pointed.
-               COALESCE((SELECT sum(b.actual_duration_minutes) FROM core_time_block b
-                WHERE b.executable_id = e.id
-                  AND b.actual_duration_minutes IS NOT NULL), 0) AS settled_actual,
                COALESCE(e.end_time, e.start_time)                AS due_instant
         FROM core_executable e
         LEFT JOIN core_execution_profile p ON p.executable_id = e.id
@@ -491,17 +477,10 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         "SELECT id, name FROM core_executable WHERE id IN (%s)";
 
     private final JdbcTemplate jdbcTemplate;
-    private final LearnedCostRepository learnedCostRepository;
-    private final LearnedUnitCostCalculator learnedUnitCostCalculator;
     private final PlannerConstraints constraints;
 
-    JdbcPlannerStateRepository(JdbcTemplate jdbcTemplate,
-                               LearnedCostRepository learnedCostRepository,
-                               LearnedUnitCostCalculator learnedUnitCostCalculator,
-                               PlannerConstraints constraints) {
+    JdbcPlannerStateRepository(JdbcTemplate jdbcTemplate, PlannerConstraints constraints) {
         this.jdbcTemplate = jdbcTemplate;
-        this.learnedCostRepository = learnedCostRepository;
-        this.learnedUnitCostCalculator = learnedUnitCostCalculator;
         this.constraints = constraints;
     }
 
@@ -537,23 +516,17 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     public List<SchedulableExecutable> loadRankedExecutables(UUID userId, OffsetDateTime dayStart,
                                                              OffsetDateTime dayEnd,
                                                              OffsetDateTime notBefore) {
-        return jdbcTemplate.query(RANKED_EXECUTABLES_SQL, (rs, rowNum) -> {
-            UUID id = rs.getObject("id", UUID.class);
-            int totalSubtasks = rs.getInt("total_subtasks");
-            Double learnedCu = totalSubtasks > 0 ? resolveCu(id) : null;
-            return new SchedulableExecutable(
-                id,
+        return jdbcTemplate.query(RANKED_EXECUTABLES_SQL, (rs, rowNum) -> new SchedulableExecutable(
+                rs.getObject("id", UUID.class),
                 ExecutableType.valueOf(rs.getString("type")),
                 rs.getObject("priority_score", Double.class),
                 rs.getBoolean("in_progress"),
                 rs.getObject("energy_drain", Integer.class),
-                learnedCu,
                 rs.getInt("pending_subtasks"),
                 rs.getObject("estimated_minutes", Integer.class),
-                rs.getInt("settled_actual"),
                 rs.getObject("due_instant", OffsetDateTime.class),
-                rs.getObject("cycle_id", UUID.class));
-        }, userId, dayStart, dayEnd, notBefore);
+                rs.getObject("cycle_id", UUID.class)),
+            userId, dayStart, dayEnd, notBefore);
     }
 
     @Override
@@ -741,11 +714,6 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         }
     }
 
-    private Double resolveCu(UUID taskId) {
-        LearnedUnitCost cost = learnedUnitCostCalculator.calculate(
-            learnedCostRepository.loadCostInputs(taskId));
-        return cost.cu();
-    }
 
     private SleepWindow loadFallbackWindow(UUID userId) {
         return jdbcTemplate.query(SLEEP_WINDOW_SETTINGS_SQL, rs -> {

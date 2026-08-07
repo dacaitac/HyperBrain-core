@@ -9,14 +9,9 @@ import java.util.UUID;
  * it never recomputes the Prioritizer). Carries exactly what the deterministic floor needs to size
  * and classify a block, keeping the domain services free of persistence.
  *
- * <p><b>Remaining-effort inputs (ADR-013 D4).</b> The generator sizes each block by the remaining
- * effort, choosing the branch by {@code learnedUnitCost}:
- * <ul>
- *   <li><b>with subtasks:</b> {@code pendingSubtasks × cu} — used when {@code learnedUnitCost} is
- *       present (the {@code LearnedUnitCostCalculator} already resolved it, cold-start or learned);</li>
- *   <li><b>without subtasks:</b> {@code max(estimatedMinutes − settledActualMinutes, 0)} — used when
- *       {@code learnedUnitCost} is null (no subtasks to multiply).</li>
- * </ul>
+  * <p>The learned unit cost and the executed-minutes total this used to carry are gone with the cost
+ * estimator (ADR-040): with time estimation retired there is nothing to estimate, and a series nobody
+ * reads is machinery that runs to produce dead data.
  *
  * @param id                   the {@code core_executable}; never null
  * @param type                 the executable kind; never null
@@ -26,13 +21,9 @@ import java.util.UUID;
  *                             when it ends up with no open block)
  * @param energyDrain          {@code core_execution_profile.energy_drain} on the 1–5 scale; null when
  *                             unprofiled (treated as not high-load)
- * @param learnedUnitCost      the per-subtask learned cost (cu); present only when the task has
- *                             subtasks — selects the with-subtasks effort branch
  * @param pendingSubtasks      count of pending user subtasks; used with {@code learnedUnitCost}
  * @param estimatedMinutes     {@code core_execution_profile.estimated_minutes}; used by the
  *                             without-subtasks branch; null when unestimated
- * @param settledActualMinutes Σ {@code actual_duration_minutes} of the task's settled blocks; the
- *                             work already spent, subtracted in the without-subtasks branch
  * @param dueInstant           the executable's due timestamp ({@code COALESCE(end_time, start_time)});
  *                             when non-null it scopes WHICH day the executable is schedulable (the
  *                             admission rule in {@code AgendaGenerationService}, ADR-040 D3: today's
@@ -51,10 +42,8 @@ public record SchedulableExecutable(
     Double priorityScore,
     boolean inProgress,
     Integer energyDrain,
-    Double learnedUnitCost,
     int pendingSubtasks,
     Integer estimatedMinutes,
-    int settledActualMinutes,
     OffsetDateTime dueInstant,
     UUID cycleId
 ) {
@@ -68,9 +57,6 @@ public record SchedulableExecutable(
         }
         if (pendingSubtasks < 0) {
             throw new IllegalArgumentException("pendingSubtasks must be non-negative: " + pendingSubtasks);
-        }
-        if (settledActualMinutes < 0) {
-            throw new IllegalArgumentException("settledActualMinutes must be non-negative: " + settledActualMinutes);
         }
         // dueInstant nullable: no validation needed
     }

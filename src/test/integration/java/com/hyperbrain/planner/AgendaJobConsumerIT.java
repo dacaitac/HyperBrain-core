@@ -78,6 +78,11 @@ class AgendaJobConsumerIT {
             "UPDATE sys_user SET timezone = 'UTC', settings = ?::jsonb WHERE id = ?",
             SLEEP_WINDOW_SETTINGS, USER);
         drainQueue(IA_JOBS_QUEUE);
+        // The consumer is a live SQS listener, so a job the previous test enqueued may still be in
+        // flight when this one starts wiping the tables — it would then materialize a block onto a
+        // clean slate. Draining the queue does not cover a message already received, so wait until the
+        // day is genuinely empty before treating it as the precondition.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isZero());
     }
 
     @Test

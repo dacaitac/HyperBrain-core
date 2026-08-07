@@ -10,7 +10,6 @@ import java.sql.Timestamp;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -30,24 +29,6 @@ class JdbcTimeBlockExecutableRepository implements TimeBlockExecutableRepository
      * The executing block accounting for a task: its FOCUS child ({@code parent_id}) or its
      * current container ({@code container_block_id}) while that container runs.
      */
-    private static final String FIND_ACTIVE_FOR_SQL = """
-        SELECT %s
-        FROM core_executable b
-        WHERE b.type = 'TIME_BLOCK'
-          AND b.status = 'IN_PROGRESS'
-          AND (b.parent_id = ?
-               OR b.id = (SELECT container_block_id FROM core_executable WHERE id = ?))
-        ORDER BY b.start_time DESC
-        LIMIT 1
-        """.formatted(COLUMNS);
-
-    private static final String INSERT_SQL = """
-        INSERT INTO core_executable
-            (id, user_id, parent_id, name, type, status, origin,
-             start_time, end_time, actual_duration_minutes, last_completed_at,
-             system_generated, created_at)
-        VALUES (?, ?, ?, ?, 'TIME_BLOCK', ?, ?, ?, ?, ?, ?, false, now())
-        """;
 
     private static final String LOCK_OPEN_EXPIRED_SQL = """
         SELECT %s
@@ -81,22 +62,6 @@ class JdbcTimeBlockExecutableRepository implements TimeBlockExecutableRepository
 
     JdbcTimeBlockExecutableRepository(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
-    }
-
-    @Override
-    public Optional<TimeBlockExecutable> findActiveBlockFor(UUID taskId) {
-        List<TimeBlockExecutable> rows =
-            jdbcTemplate.query(FIND_ACTIVE_FOR_SQL, ROW_MAPPER, taskId, taskId);
-        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
-    }
-
-    @Override
-    public void insert(TimeBlockExecutable block, String name) {
-        jdbcTemplate.update(INSERT_SQL,
-            block.id(), block.userId(), block.anchorTaskId(), name,
-            block.status(), block.origin(),
-            toTimestamp(block.startTime()), toTimestamp(block.endTime()),
-            block.actualDurationMinutes(), toTimestamp(block.lastCompletedAt()));
     }
 
     @Override

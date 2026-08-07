@@ -1,7 +1,7 @@
 package com.hyperbrain.core;
 
 import com.hyperbrain.core.application.OverdueSweepService;
-import com.hyperbrain.core.application.TimeBlockSettlementService;
+import com.hyperbrain.core.application.TimeBlockExpiryService;
 import com.hyperbrain.core.domain.model.OverdueSweepReport;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -41,7 +41,7 @@ class OverdueSweepIT {
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private OverdueSweepService sweepService;
-    @Autowired private TimeBlockSettlementService settlementService;
+    @Autowired private TimeBlockExpiryService expiryService;
 
     private UUID userId;
     private UUID cycleId;
@@ -227,7 +227,7 @@ class OverdueSweepIT {
         UUID block = insert("Block", "TIME_BLOCK", "PLANNED",
             YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
 
-        int settled = settlementService.expireDueBlocks(YESTERDAY_AFTERNOON.plusHours(3));
+        int settled = expiryService.expireDueBlocks(YESTERDAY_AFTERNOON.plusHours(3));
 
         assertThat(settled).isEqualTo(1);
         assertThat(status(block)).isEqualTo("DONE");
@@ -239,19 +239,22 @@ class OverdueSweepIT {
     }
 
     @Test
-    @DisplayName("settling the same block twice notifies the satellites once")
-    void settling_twice_notifies_once() {
+    @DisplayName("closing the same elapsed block twice notifies the satellites once")
+    void closing_twice_notifies_once() {
         UUID block = insert("Block", "TIME_BLOCK", "PLANNED",
             YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
         OffsetDateTime after = YESTERDAY_AFTERNOON.plusHours(3);
 
-        settlementService.expireDueBlocks(after);
-        settlementService.expireDueBlocks(after);
+        expiryService.expireDueBlocks(after);
+        expiryService.expireDueBlocks(after);
 
+        // The conditional update is the guard: the second run finds the block already closed and
+        // announces nothing. The settlement event that used to ride alongside is gone with the focus
+        // register — it carried frozen minutes and an imputation that no longer exist.
         assertThat(updateEventsFor(block)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("""
             SELECT count(*) FROM outbox_events WHERE event_type = 'TimeBlockSettledEvent'
-            """, Integer.class)).isEqualTo(1);
+            """, Integer.class)).isZero();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

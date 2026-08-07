@@ -2,8 +2,6 @@ package com.hyperbrain.core.domain.port.out;
 
 import com.hyperbrain.core.domain.model.BlockWindow;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
-import com.hyperbrain.core.domain.model.FocusCandidate;
-import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 
@@ -16,44 +14,22 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Persistence port for the SYSTEM-owned focus, progress, containment and streak accounting of
- * {@code core_executable} (ADR-013, amended by ADR-039): {@code progress},
- * {@code system_generated}, {@code pending_reestimation}, {@code imputed_block_id}, the
- * containment columns ({@code container_block_id}, {@code container_planned_minutes},
- * {@code container_ord}), the hard-copied schedule of contained children and the streak pair
- * live outside the ADR-012 authority matrix, so the sync upsert never touches them and these
- * writes survive the ingestion transaction untouched.
+ * Persistence port for the SYSTEM-owned progress, containment and streak accounting of
+ * {@code core_executable}: {@code progress}, {@code system_generated}, the containment columns
+ * ({@code container_block_id}, {@code container_planned_minutes}, {@code container_ord}), the
+ * hard-copied schedule of contained children and the streak pair live outside the ADR-012 authority
+ * matrix, so the sync upsert never touches them and these writes survive the ingestion transaction
+ * untouched.
+ *
+ * <p>The focus accounting this port used to carry — the executing focus a switch had to cut, the
+ * instant snapshot subtask, the re-estimation flag and the imputation of completed subtasks to a
+ * block — is gone with the register itself (ADR-040 D13).
  */
 public interface ExecutableStateRepository {
 
     /**
-     * Finds the user's controllable {@code IN_PROGRESS} executables currently accounted by an
-     * executing block — the executing focus a switch must cut (DR-05). {@code TIME_BLOCK} rows
-     * are never candidates: a block in {@code IN_PROGRESS} is focus accounting, not a focus
-     * that cuts (ADR-039).
-     *
-     * @param userId      owning user
-     * @param excludingId the executable taking the focus; never a cut candidate
-     * @return the cut candidates with their original effort labels
-     */
-    List<FocusCandidate> findActiveFocus(UUID userId, UUID excludingId);
-
-    /**
-     * Finds the user's controllable {@code IN_PROGRESS} executables that pre-date the block
-     * model entirely (no block rows at all, legacy or new) and are not already awaiting
-     * re-estimation ({@code pending_reestimation = false}). Legacy fallback of DR-05:
-     * consulted only when {@link #findActiveFocus} returns nothing; their snapshot window is
-     * the punctual {@code [now, now]}.
-     *
-     * @param userId      owning user
-     * @param excludingId the executable taking the focus
-     * @return the legacy cut candidates
-     */
-    List<FocusCandidate> findLegacyInProgress(UUID userId, UUID excludingId);
-
-    /**
-     * Tells whether an executable is a system-generated focus snapshot. Missing rows report
-     * false (a CREATE ingestion is never a snapshot echo).
+     * Tells whether an executable is a system-generated row. Missing rows report false (a CREATE
+     * ingestion is never an echo of one).
      *
      * @param executableId the executable
      * @return true only for persisted {@code system_generated} rows
@@ -72,30 +48,6 @@ public interface ExecutableStateRepository {
     SubtaskCounts countUserSubtasks(UUID parentId, UUID excludingId);
 
     /**
-     * Persists a focus snapshot as a completed {@code system_generated} subtask, including its
-     * frozen execution-profile labels (DR-06).
-     *
-     * @param snapshot the snapshot to insert
-     */
-    void insertSystemSnapshot(SnapshotSubtask snapshot);
-
-    /**
-     * Flags a cut task {@code pending_reestimation} without touching its effort values (DR-06).
-     *
-     * @param executableId the cut task
-     */
-    void flagPendingReestimation(UUID executableId);
-
-    /**
-     * Clears the {@code pending_reestimation} flag once a human source supplies fresh effort
-     * values (DR-06 confirmation). Conditional: a no-op unless the flag was set.
-     *
-     * @param executableId the task being confirmed
-     * @return true if the flag was cleared by this call
-     */
-    boolean clearPendingReestimation(UUID executableId);
-
-    /**
      * Writes the materialized progress of a parent (DR-07).
      *
      * @param executableId the parent
@@ -106,44 +58,13 @@ public interface ExecutableStateRepository {
     /**
      * Stamps {@code last_completed_at} on an executable observed closing ({@code DONE} or
      * {@code FAILED}, ADR-039): the sync pipeline does not write that column, so this is the
-     * completion clock the settlement imputation and the intraday-replan guard read. No-op
-     * when the row does not exist yet (a row arriving closed on CREATE is persisted after the
-     * rules run).
+     * completion clock the intraday-replan guard reads. No-op when the row does not exist yet (a row
+     * arriving closed on CREATE is persisted after the rules run).
      *
      * @param executableId the closed executable
      * @param completedAt  observed closure instant
      */
     void markCompleted(UUID executableId, OffsetDateTime completedAt);
-
-    /**
-     * Eagerly imputes one completed subtask to the executing block covering its completion
-     * (DR-07), via {@code imputed_block_id} (ADR-039 successor column).
-     *
-     * @param subtaskId the completed subtask
-     * @param blockId   the covering executing {@code TIME_BLOCK} executable
-     */
-    void imputeToBlock(UUID subtaskId, UUID blockId);
-
-    /**
-     * Clears the imputation of a subtask that was un-completed: the block record must not
-     * credit work that was taken back.
-     *
-     * @param subtaskId the reverted subtask
-     */
-    void clearImputation(UUID subtaskId);
-
-    /**
-     * Settlement sweep of DR-08: imputes to a block every user subtask — of the block's FOCUS
-     * anchor or of any of its contained members — that closed as {@code DONE} inside the block
-     * window and is not yet imputed. {@code FAILED} closures are never imputed (ADR-039
-     * matrix: a sanctioned miss earns no execution credit).
-     *
-     * @param blockId     the {@code TIME_BLOCK} executable being settled
-     * @param windowStart block window start
-     * @param windowEnd   block window end (settlement instant or {@code end_time})
-     * @return how many subtasks were imputed by this sweep
-     */
-    int imputeCompletedSubtasks(UUID blockId, OffsetDateTime windowStart, OffsetDateTime windowEnd);
 
     /**
      * Inserts or updates the full attribute set of a {@code core_executable} row plus its

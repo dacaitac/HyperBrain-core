@@ -8,8 +8,6 @@ import com.hyperbrain.core.application.rule.DomainRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
 import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
 import com.hyperbrain.core.application.rule.ProgressRecalculationRule;
-import com.hyperbrain.core.application.rule.ReestimationConfirmationRule;
-import com.hyperbrain.core.application.rule.SingleFocusRule;
 import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
@@ -47,25 +45,26 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         CompletionReactivationRule completionReactivationRule,
         ContainmentEligibilityRule containmentEligibilityRule,
         ContainmentCopyRule containmentCopyRule,
-        SingleFocusRule singleFocusRule,
-        ReestimationConfirmationRule reestimationConfirmationRule,
         ProgressRecalculationRule progressRecalculationRule,
         CompletionOutcomeRule completionOutcomeRule,
         RecurrenceCloneRule recurrenceCloneRule
     ) {
-        // ADR-039 order notes: the containment-eligibility rule runs right before the hard-copy rule
-        // so an ineligible type (a calendar event / AGENDA) has its containment cleared before the
-        // copy could re-stamp a block window onto it. The hard-copy rule itself runs after DR-01 (so
-        // the child schedule it asserts is already end_time-normalized) and before the focus/progress
-        // rules; the completion-outcome rule (clock + streak) runs before DR-04 cloning so the clone
-        // copies the already-updated streak (never-miss-twice on any terminal).
+        // Order notes: the containment-eligibility rule runs right before the hard-copy rule so an
+        // ineligible type (a calendar event / AGENDA) has its containment cleared before the copy could
+        // re-stamp a block window onto it. The hard-copy rule itself runs after DR-01, so the child
+        // schedule it asserts is already end_time-normalized. The completion-outcome rule (clock +
+        // streak) runs before DR-04 cloning so the clone copies the already-updated streak
+        // (never-miss-twice on any terminal).
+        //
+        // The focus links that used to sit between them are gone (ADR-040 D13): marking focus no longer
+        // opens a block, cuts the task that was running, leaves an instant snapshot subtask or flags a
+        // re-estimation. The whole register produced a series nobody consumed once time estimation was
+        // retired — with nothing to estimate there is nothing to learn.
         this.rules = List.of(
             endTimeInvariantRule,
             completionReactivationRule,
             containmentEligibilityRule,
             containmentCopyRule,
-            singleFocusRule,
-            reestimationConfirmationRule,
             progressRecalculationRule,
             completionOutcomeRule,
             recurrenceCloneRule);

@@ -2,8 +2,6 @@ package com.hyperbrain.core.infrastructure;
 
 import com.hyperbrain.core.domain.model.BlockWindow;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
-import com.hyperbrain.core.domain.model.FocusCandidate;
-import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
@@ -30,47 +28,13 @@ import java.util.UUID;
 @Repository
 class JdbcExecutableStateRepository implements ExecutableStateRepository {
 
-    private static final String CANDIDATE_COLUMNS = """
-        e.id, e.user_id, e.name, e.effort_score, e.is_important,
-        p.energy_drain, p.mental_load, p.impact, p.estimated_minutes
-        """;
 
     /**
      * A task is "actively focused" when an executing block accounts for it: a FOCUS child
      * ({@code parent_id}) or its current container, in the new TIME_BLOCK model — or a legacy
      * {@code core_time_block} ACTIVE row (frozen table; pre-migration data).
      */
-    private static final String FIND_ACTIVE_FOCUS_SQL = """
-        SELECT %s
-        FROM core_executable e
-        LEFT JOIN core_execution_profile p ON p.executable_id = e.id
-        WHERE e.user_id = ?
-          AND e.id <> ?
-          AND e.status = 'IN_PROGRESS'
-          AND e.type NOT IN ('AGENDA', 'TIME_BLOCK')
-          AND e.system_generated = false
-          AND (EXISTS (SELECT 1 FROM core_executable b
-                       WHERE b.type = 'TIME_BLOCK' AND b.status = 'IN_PROGRESS'
-                         AND (b.parent_id = e.id OR b.id = e.container_block_id))
-               OR EXISTS (SELECT 1 FROM core_time_block lb
-                          WHERE lb.executable_id = e.id AND lb.status = 'ACTIVE'))
-        """.formatted(CANDIDATE_COLUMNS);
 
-    private static final String FIND_LEGACY_IN_PROGRESS_SQL = """
-        SELECT %s
-        FROM core_executable e
-        LEFT JOIN core_execution_profile p ON p.executable_id = e.id
-        WHERE e.user_id = ?
-          AND e.id <> ?
-          AND e.status = 'IN_PROGRESS'
-          AND e.type NOT IN ('AGENDA', 'TIME_BLOCK')
-          AND e.system_generated = false
-          AND e.pending_reestimation = false
-          AND NOT EXISTS (SELECT 1 FROM core_time_block lb WHERE lb.executable_id = e.id)
-          AND NOT EXISTS (SELECT 1 FROM core_executable b
-                          WHERE b.type = 'TIME_BLOCK'
-                            AND (b.parent_id = e.id OR b.id = e.container_block_id))
-        """.formatted(CANDIDATE_COLUMNS);
 
     private static final String IS_SYSTEM_GENERATED_SQL =
         "SELECT system_generated FROM core_executable WHERE id = ?";
@@ -83,30 +47,9 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
           AND type <> 'TIME_BLOCK' AND id <> ?
         """;
 
-    private static final String INSERT_SNAPSHOT_SQL = """
-        INSERT INTO core_executable
-            (id, user_id, parent_id, name, description, type, status,
-             effort_score, is_important, system_generated, start_time, last_completed_at)
-        VALUES (?, ?, ?, ?, ?, 'TASK', 'DONE', ?, ?, true, ?, ?)
-        """;
 
-    private static final String INSERT_SNAPSHOT_PROFILE_SQL = """
-        INSERT INTO core_execution_profile
-            (executable_id, estimated_minutes, energy_drain, mental_load, impact)
-        VALUES (?, ?, ?, ?, ?)
-        """;
 
-    private static final String FLAG_PENDING_REESTIMATION_SQL = """
-        UPDATE core_executable
-        SET pending_reestimation = true
-        WHERE id = ?
-        """;
 
-    private static final String CLEAR_PENDING_SQL = """
-        UPDATE core_executable
-        SET pending_reestimation = false
-        WHERE id = ? AND pending_reestimation = true
-        """;
 
     private static final String UPDATE_PROGRESS_SQL =
         "UPDATE core_executable SET progress = ? WHERE id = ?";
@@ -114,31 +57,13 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     private static final String MARK_COMPLETED_SQL =
         "UPDATE core_executable SET last_completed_at = ? WHERE id = ?";
 
-    private static final String IMPUTE_TO_BLOCK_SQL =
-        "UPDATE core_executable SET imputed_block_id = ? WHERE id = ?";
 
-    private static final String CLEAR_IMPUTATION_SQL =
-        "UPDATE core_executable SET imputed_block_id = NULL WHERE id = ?";
 
     /**
      * DR-08 settlement sweep over the executable block model (ADR-039): user subtasks of the
      * block's FOCUS anchor or of any contained member, closed as DONE inside the window and
      * not yet imputed. FAILED closures earn no credit (status filter).
      */
-    private static final String IMPUTE_COMPLETED_SQL = """
-        UPDATE core_executable
-        SET imputed_block_id = ?
-        WHERE status = 'DONE'
-          AND system_generated = false
-          AND type <> 'TIME_BLOCK'
-          AND imputed_block_id IS NULL
-          AND last_completed_at BETWEEN ? AND ?
-          AND parent_id IN (
-              SELECT m.id FROM core_executable m WHERE m.container_block_id = ?
-              UNION
-              SELECT b.parent_id FROM core_executable b
-              WHERE b.id = ? AND b.parent_id IS NOT NULL)
-        """;
 
     private static final String UPSERT_EXECUTABLE_SQL = """
         INSERT INTO core_executable
@@ -410,33 +335,13 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
             rs.getBoolean("system_generated"),
             rs.getObject("container_block_id", UUID.class));
 
-    private static final RowMapper<FocusCandidate> CANDIDATE_MAPPER = (rs, rowNum) ->
-        new FocusCandidate(
-            rs.getObject("id", UUID.class),
-            rs.getObject("user_id", UUID.class),
-            rs.getString("name"),
-            rs.getObject("effort_score", Double.class),
-            rs.getObject("is_important", Boolean.class),
-            rs.getObject("energy_drain", Integer.class),
-            rs.getObject("mental_load", Integer.class),
-            rs.getObject("impact", Integer.class),
-            rs.getObject("estimated_minutes", Integer.class));
-
     private final JdbcTemplate jdbcTemplate;
 
     JdbcExecutableStateRepository(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
     }
 
-    @Override
-    public List<FocusCandidate> findActiveFocus(UUID userId, UUID excludingId) {
-        return jdbcTemplate.query(FIND_ACTIVE_FOCUS_SQL, CANDIDATE_MAPPER, userId, excludingId);
-    }
 
-    @Override
-    public List<FocusCandidate> findLegacyInProgress(UUID userId, UUID excludingId) {
-        return jdbcTemplate.query(FIND_LEGACY_IN_PROGRESS_SQL, CANDIDATE_MAPPER, userId, excludingId);
-    }
 
     @Override
     public boolean isSystemGenerated(UUID executableId) {
@@ -452,25 +357,8 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
             parentId, excludingId);
     }
 
-    @Override
-    public void insertSystemSnapshot(SnapshotSubtask s) {
-        jdbcTemplate.update(INSERT_SNAPSHOT_SQL,
-            s.id(), s.userId(), s.parentId(), s.name(), s.description(),
-            s.effortScore(), Boolean.TRUE.equals(s.isImportant()),
-            toTimestamp(s.windowStart()), toTimestamp(s.completedAt()));
-        jdbcTemplate.update(INSERT_SNAPSHOT_PROFILE_SQL,
-            s.id(), s.estimatedMinutes(), s.energyDrain(), s.mentalLoad(), s.impact());
-    }
 
-    @Override
-    public void flagPendingReestimation(UUID executableId) {
-        jdbcTemplate.update(FLAG_PENDING_REESTIMATION_SQL, executableId);
-    }
 
-    @Override
-    public boolean clearPendingReestimation(UUID executableId) {
-        return jdbcTemplate.update(CLEAR_PENDING_SQL, executableId) > 0;
-    }
 
     @Override
     public void updateProgress(UUID executableId, Double progress) {
@@ -482,22 +370,8 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         jdbcTemplate.update(MARK_COMPLETED_SQL, toTimestamp(completedAt), executableId);
     }
 
-    @Override
-    public void imputeToBlock(UUID subtaskId, UUID blockId) {
-        jdbcTemplate.update(IMPUTE_TO_BLOCK_SQL, blockId, subtaskId);
-    }
 
-    @Override
-    public void clearImputation(UUID subtaskId) {
-        jdbcTemplate.update(CLEAR_IMPUTATION_SQL, subtaskId);
-    }
 
-    @Override
-    public int imputeCompletedSubtasks(UUID blockId,
-                                       OffsetDateTime windowStart, OffsetDateTime windowEnd) {
-        return jdbcTemplate.update(IMPUTE_COMPLETED_SQL,
-            blockId, toTimestamp(windowStart), toTimestamp(windowEnd), blockId, blockId);
-    }
 
     @Override
     public void upsertExecutable(ExecutableSnapshot s) {

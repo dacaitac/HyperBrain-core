@@ -13,7 +13,6 @@ import com.hyperbrain.planner.domain.service.ContextBatcher;
 import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
-import com.hyperbrain.planner.domain.service.LearnedUnitCostCalculator;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
@@ -56,11 +55,6 @@ class PlannerConfig {
     @Bean
     DayTemplate dayTemplate(PlannerConstantsLoader loader) {
         return loader.resolveDayTemplate();
-    }
-
-    @Bean
-    LearnedUnitCostCalculator learnedUnitCostCalculator() {
-        return new LearnedUnitCostCalculator();
     }
 
     @Bean

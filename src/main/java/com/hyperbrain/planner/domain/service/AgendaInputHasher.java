@@ -115,7 +115,6 @@ public class AgendaInputHasher {
     private void appendEnergy(StringBuilder canonical, EnergyProfile energy) {
         canonical.append("E").append(FIELD)
             .append(energy.tier()).append(FIELD)
-            .append(energy.chaosMarginFraction()).append(FIELD)
             .append(energy.highLoadQuota()).append(RECORD);
     }
 
@@ -139,7 +138,6 @@ public class AgendaInputHasher {
                 .add(e.rankingScore())
                 .add(e.inProgress())
                 .add(e.energyDrain())
-                .add(e.learnedUnitCost())
                 .add(e.pendingSubtasks())
                 .add(e.estimatedMinutes())
                 .add(e.cycleId())

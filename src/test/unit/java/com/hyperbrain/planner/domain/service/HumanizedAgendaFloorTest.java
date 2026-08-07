@@ -32,7 +32,7 @@ class HumanizedAgendaFloorTest {
 
     private static final LocalDate DAY = LocalDate.of(2026, 8, 7);
     private static final EnergyProfile NEUTRAL =
-        new EnergyProfile(EnergyTier.NEUTRAL, 0.0, 3, "neutral");
+        new EnergyProfile(EnergyTier.NEUTRAL, 3, "neutral");
 
     @Test
     @DisplayName("the degraded day comes out laid and ordered, but neither grouped nor named")
@@ -105,8 +105,7 @@ class HumanizedAgendaFloorTest {
     }
 
     private static SchedulableExecutable task(double priority, UUID cycleId) {
-        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false,
-            null, null, 0, 60, 0, null, cycleId);
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null, 0, 60, null, cycleId);
     }
 
     private static OffsetDateTime at(int hour) {

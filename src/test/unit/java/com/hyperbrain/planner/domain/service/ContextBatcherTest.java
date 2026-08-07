@@ -71,12 +71,10 @@ class ContextBatcherTest {
     }
 
     private static SchedulableExecutable exec(UUID cycleId, double priority) {
-        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null,
-            null, 0, 30, 0, null, cycleId);
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null, 0, 30, null, cycleId);
     }
 
     private static SchedulableExecutable typed(ExecutableType type, double priority) {
-        return new SchedulableExecutable(UUID.randomUUID(), type, priority, false, null,
-            null, 0, 30, 0, null, null);
+        return new SchedulableExecutable(UUID.randomUUID(), type, priority, false, null, 0, 30, null, null);
     }
 }
