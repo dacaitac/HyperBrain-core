@@ -2,12 +2,20 @@ package com.hyperbrain.planner.infrastructure;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.EnergyThresholds;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
+import com.hyperbrain.planner.domain.model.SlotPurpose;
+import com.hyperbrain.planner.domain.model.TemplateSlot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+
+import java.time.LocalTime;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Reads the planner's calibrable constants from {@code sys_user.settings.planner_constants} (JSONB, no
@@ -25,7 +33,8 @@ import org.springframework.stereotype.Component;
  * {@code pacePrecisionEpsilon}, {@code maxRequiredPace}, {@code hysteresisMargin},
  * {@code degradedStreakThreshold}, {@code degradedUrgentCount}, {@code highLoadDrainFloor},
  * {@code lowCeiling}, {@code highFloor}, {@code lowMargin}, {@code neutralMargin}, {@code highMargin},
- * {@code lowQuota}, {@code neutralQuota}, {@code highQuota}.
+ * {@code lowQuota}, {@code neutralQuota}, {@code highQuota}, and the {@code day_template} object
+ * (ADR-040 D14).
  */
 @Component
 class PlannerConstantsLoader {
@@ -102,6 +111,67 @@ class PlannerConstantsLoader {
             log.warn("Invalid energy thresholds override; falling back to defaults: {}", e.getMessage());
             return EnergyThresholds.DEFAULT;
         }
+    }
+
+    /**
+     * Resolves the day template from settings (ADR-040 D14 — the template lives in the user's settings,
+     * with no schema of its own). The expected shape under {@code planner_constants.day_template} is
+     * <pre>{@code
+     * {"wake_anchor": "07:00",
+     *  "slots": [{"id": "GOAL_MORNING", "start": "08:30", "end": "10:30", "purpose": "GOAL"}, ...]}
+     * }</pre>
+     * A missing, malformed or empty object degrades to the sanctioned {@link DayTemplate#DEFAULT} —
+     * never to an absent template, because a floor with no reference structure collapses the whole day
+     * against the first hour (ADR-040 D2).
+     *
+     * @return the resolved template; {@code DEFAULT} when settings carry none or carry an invalid one
+     */
+    DayTemplate resolveDayTemplate() {
+        JsonNode root = readNode();
+        JsonNode node = root == null ? null : root.get("day_template");
+        if (node == null || !node.isObject()) {
+            return DayTemplate.DEFAULT;
+        }
+        try {
+            return parseDayTemplate(node);
+        } catch (IllegalArgumentException | DateTimeParseException e) {
+            log.warn("Invalid day_template override; falling back to the sanctioned template: {}",
+                e.getMessage());
+            return DayTemplate.DEFAULT;
+        }
+    }
+
+    private static DayTemplate parseDayTemplate(JsonNode node) {
+        JsonNode slotsNode = node.get("slots");
+        if (slotsNode == null || !slotsNode.isArray() || slotsNode.isEmpty()) {
+            throw new IllegalArgumentException("day_template.slots must be a non-empty array");
+        }
+        List<TemplateSlot> slots = new ArrayList<>(slotsNode.size());
+        for (JsonNode slot : slotsNode) {
+            slots.add(new TemplateSlot(
+                text(slot, "id"),
+                minuteOfDay(text(slot, "start")),
+                minuteOfDay(text(slot, "end")),
+                SlotPurpose.valueOf(text(slot, "purpose"))));
+        }
+        JsonNode anchor = node.get("wake_anchor");
+        int wakeAnchor = anchor != null && anchor.isTextual()
+            ? minuteOfDay(anchor.asText())
+            : DayTemplate.DEFAULT.wakeAnchorMinute();
+        return new DayTemplate(wakeAnchor, slots);
+    }
+
+    private static String text(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        if (value == null || !value.isTextual() || value.asText().isBlank()) {
+            throw new IllegalArgumentException("day_template slot is missing '" + field + "'");
+        }
+        return value.asText();
+    }
+
+    private static int minuteOfDay(String hhmm) {
+        LocalTime time = LocalTime.parse(hhmm.strip());
+        return time.getHour() * 60 + time.getMinute();
     }
 
     private JsonNode readNode() {

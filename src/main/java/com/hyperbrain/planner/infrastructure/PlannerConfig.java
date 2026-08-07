@@ -1,6 +1,7 @@
 package com.hyperbrain.planner.infrastructure;
 
 import com.hyperbrain.planner.domain.model.AdherenceThresholds;
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.EnergyThresholds;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
@@ -43,6 +44,18 @@ class PlannerConfig {
     @Bean
     EnergyThresholds energyThresholds(PlannerConstantsLoader loader) {
         return loader.resolveThresholds();
+    }
+
+    /**
+     * The day template (ADR-040 D14), resolved from {@code planner_constants.day_template} with the
+     * sanctioned table as the fallback. Resolved once at wiring time like the other calibration seams:
+     * for the single-user MVP a settings edit takes effect on the next boot, and the template enters
+     * the replan digest through the windows it resolves into (so once loaded, editing it does change
+     * the plan).
+     */
+    @Bean
+    DayTemplate dayTemplate(PlannerConstantsLoader loader) {
+        return loader.resolveDayTemplate();
     }
 
     @Bean

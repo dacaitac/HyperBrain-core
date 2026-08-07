@@ -290,6 +290,26 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         FOR UPDATE OF e SKIP LOCKED
         """;
 
+    /** The snapshot projection {@link #SNAPSHOT_MAPPER} reads, shared by every snapshot query. */
+    private static final String SNAPSHOT_COLUMNS = """
+        SELECT e.id, e.user_id, e.parent_id, e.cycle_id, e.name, e.description, e.type, e.status,
+               e.priority_score, e.urgency_score, e.effort_score, e.is_important, e.frequency,
+               e.start_time, e.end_time, e.source_calendar, e.system_generated, e.container_block_id,
+               p.energy_drain, p.mental_load, p.impact
+        FROM core_executable e
+        LEFT JOIN core_execution_profile p ON p.executable_id = e.id
+        """;
+
+    /** Ids are bound as one comma-joined parameter, the same shape the overdue sweep already uses. */
+    private static final String FIND_ALL_BY_ID_SQL =
+        SNAPSHOT_COLUMNS + "WHERE e.id = ANY (string_to_array(?, ',')::uuid[])";
+
+    private static final String FIND_CONTAINED_BY_SQL =
+        SNAPSHOT_COLUMNS + """
+        WHERE e.container_block_id = ?
+        ORDER BY e.container_ord NULLS LAST, e.id
+        """;
+
     private static final String CLOSE_AS_FAILED_SQL = """
         UPDATE core_executable
         SET status = 'FAILED'
@@ -481,6 +501,20 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     @Override
     public void copyStreaks(UUID sourceId, UUID targetId) {
         jdbcTemplate.update(COPY_STREAKS_SQL, targetId, sourceId);
+    }
+
+    @Override
+    public List<ExecutableSnapshot> findAllById(Collection<UUID> ids) {
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        String joined = ids.stream().map(UUID::toString).collect(java.util.stream.Collectors.joining(","));
+        return jdbcTemplate.query(FIND_ALL_BY_ID_SQL, SNAPSHOT_MAPPER, joined);
+    }
+
+    @Override
+    public List<ExecutableSnapshot> findContainedBy(UUID blockId) {
+        return jdbcTemplate.query(FIND_CONTAINED_BY_SQL, SNAPSHOT_MAPPER, blockId);
     }
 
     @Override

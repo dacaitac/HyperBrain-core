@@ -33,6 +33,7 @@ public final class ExecutableOutboxEvents {
 
     private static final String CREATED_EVENT = "ExecutableCreatedEvent";
     private static final String UPDATED_EVENT = "ExecutableUpdatedEvent";
+    private static final String DELETED_EVENT = "ExecutableDeletedEvent";
 
     private ExecutableOutboxEvents() {
     }
@@ -59,10 +60,30 @@ public final class ExecutableOutboxEvents {
         return event(executableId, UPDATED_EVENT);
     }
 
+    /**
+     * Builds the deletion notification of an executable the system itself withdrew (a planner block
+     * dropped from the plan, ADR-040 D10), so both satellites remove their counterpart. Unlike the
+     * upsert notifications this one is <b>not</b> re-read by the propagators — by the time it drains,
+     * the row is gone — so it must be staged in the same transaction as the delete.
+     *
+     * @param executableId the withdrawn executable
+     * @return the outbox row to append inside the caller's transaction
+     */
+    public static OutboxEvent deleted(UUID executableId) {
+        return event(executableId, DELETED_EVENT);
+    }
+
     private static OutboxEvent event(UUID executableId, String eventType) {
         String payload = String.format("{\"local_id\":\"%s\",\"operation\":\"%s\"}",
-            executableId, eventType.equals(CREATED_EVENT) ? "CREATED" : "UPDATED");
+            executableId, operationOf(eventType));
         return new OutboxEvent(UUID.randomUUID(), EXECUTABLE_AGGREGATE, executableId.toString(),
             eventType, payload, SOURCE_SYSTEM, OffsetDateTime.now());
+    }
+
+    private static String operationOf(String eventType) {
+        if (CREATED_EVENT.equals(eventType)) {
+            return "CREATED";
+        }
+        return DELETED_EVENT.equals(eventType) ? "DELETED" : "UPDATED";
     }
 }

@@ -1,20 +1,21 @@
 package com.hyperbrain.core.application.rule;
 
+import com.hyperbrain.core.domain.model.ContainmentPolicy;
 import com.hyperbrain.shared.messaging.ExternalSystem;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.Set;
-
 /**
- * ADR-039 (Daniel, 2026-08-06) — containment eligibility: only the reminder-backed types
+ * DR-11 — containment eligibility, on the ingestion path: only the reminder-backed types
  * ({@code TASK}, {@code HABIT}, {@code LEAD_MEASURE}, {@code BUYING}) may be members of a
- * {@code TIME_BLOCK}. The calendar-event types ({@code ACTIVITY}, {@code LEARNING_SESSION}) and
- * the read-only {@code AGENDA} are <b>already</b> time blocks in themselves (they carry their own
- * EKEvent window), so they can never be contained. A merged state that arrives with a
- * {@code container_block_id} on such a type gets it cleared before it is persisted.
+ * {@code TIME_BLOCK}. A merged state that arrives with a {@code container_block_id} on any other
+ * type gets it cleared before it is persisted.
+ *
+ * <p>The rule itself lives in {@link ContainmentPolicy#containable} — a pure policy with two callers
+ * (ADR-040 D11): this chain link, and the containment operation core publishes for the Planner. This
+ * class is the ingestion-path caller and nothing else; it holds no criterion of its own.
  *
  * <p>Placed <b>before</b> {@link ContainmentCopyRule} in the chain (source-agnostic, covering both
  * the Notion and Apple ingestion paths at one point): clearing the ineligible containment here
@@ -27,14 +28,10 @@ public class ContainmentEligibilityRule implements DomainRule {
 
     private static final Logger log = LoggerFactory.getLogger(ContainmentEligibilityRule.class);
 
-    /** Types that are calendar events (or read-only agenda) and thus can never be contained. */
-    private static final Set<String> NON_CONTAINABLE_TYPES =
-        Set.of("ACTIVITY", "LEARNING_SESSION", "AGENDA");
-
     @Override
     public ExecutableSnapshot apply(ExecutableSnapshot previous, ExecutableSnapshot merged,
                                     ExternalSystem origin) {
-        if (merged.containerBlockId() == null || !NON_CONTAINABLE_TYPES.contains(merged.type())) {
+        if (merged.containerBlockId() == null || ContainmentPolicy.containable(merged.type())) {
             return merged;
         }
         log.info("Executable {} of type {} cannot be contained in a block (it is a calendar event); "

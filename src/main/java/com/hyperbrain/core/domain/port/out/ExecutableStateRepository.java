@@ -239,6 +239,26 @@ public interface ExecutableStateRepository {
      */
     void copyStreaks(UUID sourceId, UUID targetId);
 
+    /**
+     * Reads a set of executables as snapshots, for callers that need their type and current schedule
+     * before deciding what to write — the published containment operation among them (ADR-040 D11).
+     * Ids with no row are simply absent from the result.
+     *
+     * @param ids the executables to read; never null, may be empty
+     * @return the snapshots found, in no guaranteed order; never null
+     */
+    List<ExecutableSnapshot> findAllById(Collection<UUID> ids);
+
+    /**
+     * Reads the executables a block currently holds through {@code container_block_id}, ordered by
+     * their {@code container_ord}. The release half of ADR-040 D10 walks exactly this set: every member
+     * is let go, with its own event, <b>before</b> the block row is deleted.
+     *
+     * @param blockId the {@code TIME_BLOCK} container; never null
+     * @return its members, in container order; never null, may be empty
+     */
+    List<ExecutableSnapshot> findContainedBy(UUID blockId);
+
     // ── ADR-040 D4: the day-close sweep of what expired ───────────────────────
 
     /**
