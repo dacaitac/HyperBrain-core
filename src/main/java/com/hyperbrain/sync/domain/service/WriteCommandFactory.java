@@ -48,8 +48,8 @@ public final class WriteCommandFactory {
         "ACTIVITY", CommandType.CALENDAR_EVENT,
         "LEARNING_SESSION", CommandType.CALENDAR_EVENT,
         // ADR-039: after the TimeBlock collapse a block IS an executable; it write-backs as a
-        // time-boxed EKEvent on HyperBrain's calendar, exactly like ACTIVITY (start_time is always
-        // present on a block; source_calendar empty falls back to the HyperBrain calendar).
+        // time-boxed EKEvent (start_time is always present on a block). Its destination calendar is
+        // config-driven per type (core#64): "Trabajo" by default, resolved in calendarNameFor.
         "TIME_BLOCK", CommandType.CALENDAR_EVENT);
 
     private static final String STATUS_DONE = "DONE";
@@ -92,7 +92,26 @@ public final class WriteCommandFactory {
      */
     public static Optional<WriteCommand> forUpsert(
         UUID commandId, CoreExecutable executable, Operation operation, String entityId) {
-        return payloadFor(executable).map(payload -> new WriteCommand(
+        return forUpsert(commandId, executable, operation, entityId, Map.of());
+    }
+
+    /**
+     * Builds a CREATED/UPDATED command, routing calendar-event types to their configured
+     * destination calendar (core#64). {@code calendarNamesByType} maps an executable type to the
+     * named calendar its EKEvent must land on (ADR-009, configurable); a type absent from the map
+     * keeps the {@code source_calendar} default. Reminder types ignore the map.
+     *
+     * @param commandId           correlation id for the command
+     * @param executable          current state of the {@code core_executable} row
+     * @param operation           {@code CREATED} or {@code UPDATED}
+     * @param entityId            EventKit identifier for UPDATED; {@code null} for CREATED
+     * @param calendarNamesByType type → destination calendar name (never null; may be empty)
+     * @return the command, or empty if the executable must not be written to Apple
+     */
+    public static Optional<WriteCommand> forUpsert(
+        UUID commandId, CoreExecutable executable, Operation operation, String entityId,
+        Map<String, String> calendarNamesByType) {
+        return payloadFor(executable, calendarNamesByType).map(payload -> new WriteCommand(
             commandId, commandTypeOf(payload), operation, entityId, payload));
     }
 
@@ -120,7 +139,8 @@ public final class WriteCommandFactory {
         return commandTypeForExecutableType(executableType).isPresent();
     }
 
-    private static Optional<WritePayload> payloadFor(CoreExecutable executable) {
+    private static Optional<WritePayload> payloadFor(CoreExecutable executable,
+                                                     Map<String, String> calendarNamesByType) {
         Optional<CommandType> commandType = commandTypeForExecutableType(executable.type());
         if (commandType.isEmpty()) {
             return Optional.empty();
@@ -132,7 +152,7 @@ public final class WriteCommandFactory {
         if (executable.startTime() == null) {
             return Optional.empty();
         }
-        return Optional.of(calendarEventPayload(executable));
+        return Optional.of(calendarEventPayload(executable, calendarNamesByType));
     }
 
     private static ReminderPayload reminderPayload(CoreExecutable executable) {
@@ -162,7 +182,8 @@ public final class WriteCommandFactory {
         return executable.sourceCalendar() != null ? executable.sourceCalendar() : "";
     }
 
-    private static CalendarEventPayload calendarEventPayload(CoreExecutable executable) {
+    private static CalendarEventPayload calendarEventPayload(CoreExecutable executable,
+                                                             Map<String, String> calendarNamesByType) {
         // all_day is left false here: SentinelAPI derives it at the Apple boundary from whether
         // start/end fall on local midnight (no time-of-day ⇒ all-day), the same rule reminders use.
         return new CalendarEventPayload(
@@ -172,8 +193,23 @@ public final class WriteCommandFactory {
             false,
             executable.description(),
             "",
-            executable.sourceCalendar() != null ? executable.sourceCalendar() : "",
+            calendarNameFor(executable, calendarNamesByType),
             null);
+    }
+
+    /**
+     * Resolves the destination calendar name for a calendar-event executable (core#64): the
+     * configured per-type name (ACTIVITY/LEARNING_SESSION → "HyperBrain", TIME_BLOCK → "Trabajo")
+     * takes precedence; a type absent from the map keeps the {@code source_calendar} default so
+     * pre-existing behaviour is preserved.
+     */
+    private static String calendarNameFor(CoreExecutable executable,
+                                          Map<String, String> calendarNamesByType) {
+        String configured = calendarNamesByType.get(executable.type());
+        if (configured != null && !configured.isBlank()) {
+            return configured;
+        }
+        return executable.sourceCalendar() != null ? executable.sourceCalendar() : "";
     }
 
     private static CommandType commandTypeOf(WritePayload payload) {

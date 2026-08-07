@@ -8,9 +8,12 @@ import com.hyperbrain.sync.domain.model.ReminderPayload;
 import com.hyperbrain.sync.domain.model.WriteCommand;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -132,16 +135,16 @@ class WriteCommandFactoryTest {
     }
 
     @Test
-    @DisplayName("TIME_BLOCK maps to a CALENDAR_EVENT command on the HyperBrain calendar (ADR-039)")
+    @DisplayName("TIME_BLOCK maps to a CALENDAR_EVENT command (ADR-039); no config falls back to source_calendar")
     void time_block_maps_to_calendar_event_command() {
         // Given a settled block (start_time is always present on a block)
         CoreExecutable block = executable("TIME_BLOCK", "PLANNED", START, END, null);
 
-        // When
+        // When — no calendar-name config: the empty source_calendar travels (SentinelAPI default)
         Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
             COMMAND_ID, block, Operation.UPDATED, "EK-block-1");
 
-        // Then it is a time-boxed calendar event (empty source_calendar → HyperBrain default)
+        // Then it is a time-boxed calendar event
         assertThat(command).isPresent();
         assertThat(command.get().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
         assertThat(command.get()).usingRecursiveComparison().isEqualTo(new WriteCommand(
@@ -150,6 +153,43 @@ class WriteCommandFactoryTest {
         assertThat(WriteCommandFactory.isWritable("TIME_BLOCK")).isTrue();
         assertThat(WriteCommandFactory.commandTypeForExecutableType("TIME_BLOCK"))
             .contains(CommandType.CALENDAR_EVENT);
+    }
+
+    @ParameterizedTest(name = "{0} → calendar \"{1}\"")
+    @CsvSource({
+        "ACTIVITY, HyperBrain",
+        "LEARNING_SESSION, HyperBrain",
+        "TIME_BLOCK, Trabajo"})
+    @DisplayName("core#64: calendar-event types route to their configured destination calendar by type")
+    void calendar_event_types_route_by_configured_calendar(String type, String expectedCalendar) {
+        // Given the per-type calendar routing config and an executable carrying a different source_calendar
+        Map<String, String> calendarNames = Map.of(
+            "ACTIVITY", "HyperBrain", "LEARNING_SESSION", "HyperBrain", "TIME_BLOCK", "Trabajo");
+        CoreExecutable executable = executable(type, "TODO", START, END, "SomeOtherSource");
+
+        // When
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, executable, Operation.CREATED, null, calendarNames);
+
+        // Then the configured calendar wins over source_calendar
+        assertThat(command).isPresent();
+        assertThat(((CalendarEventPayload) command.get().payload()).calendarName())
+            .isEqualTo(expectedCalendar);
+    }
+
+    @Test
+    @DisplayName("core#64: reminder types ignore the calendar map (keep their list behaviour)")
+    void reminder_types_ignore_calendar_map() {
+        Map<String, String> calendarNames = Map.of("TASK", "ShouldBeIgnored");
+        CoreExecutable task = executable("TASK", "TODO", START, null, "Personal");
+
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, task, Operation.CREATED, null, calendarNames);
+
+        assertThat(command).isPresent();
+        assertThat(command.get().commandType()).isEqualTo(CommandType.REMINDER);
+        // The reminder keeps its source_calendar list, never the calendar-event map.
+        assertThat(((ReminderPayload) command.get().payload()).listName()).isEqualTo("Personal");
     }
 
     @Test

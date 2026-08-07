@@ -16,6 +16,8 @@ import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
+import com.hyperbrain.sync.domain.model.CalendarEventPayload;
+import com.hyperbrain.sync.infrastructure.AppleCalendarProperties;
 import com.hyperbrain.sync.infrastructure.WriteCommandWireMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -58,8 +60,12 @@ class AppleEventPropagatorTest {
         commandPublisher = mock(WriteCommandPublisher.class);
         WriteCommandWireMapper wireMapper =
             new WriteCommandWireMapper(new ObjectMapper().registerModule(new JavaTimeModule()));
+        AppleCalendarProperties calendarProperties = new AppleCalendarProperties();
+        calendarProperties.setCalendarNames(java.util.Map.of(
+            "ACTIVITY", "HyperBrain", "LEARNING_SESSION", "HyperBrain", "TIME_BLOCK", "Trabajo"));
         service = new AppleEventPropagator(
-            executableRepo, syncMappingRepo, commandLogRepo, commandPublisher, wireMapper);
+            executableRepo, syncMappingRepo, commandLogRepo, commandPublisher, wireMapper,
+            calendarProperties);
     }
 
     @Test
@@ -182,12 +188,14 @@ class AppleEventPropagatorTest {
         // When
         service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
 
-        // Then a CALENDAR_EVENT UPDATE against the block's EventKit id
+        // Then a CALENDAR_EVENT UPDATE against the block's EventKit id, on the "Trabajo" calendar
         ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
         verify(commandPublisher).publish(captor.capture(), eq("EK-block-1"));
         assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
         assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
         assertThat(captor.getValue().entityId()).isEqualTo("EK-block-1");
+        assertThat(((CalendarEventPayload) captor.getValue().payload()).calendarName())
+            .isEqualTo("Trabajo");
     }
 
     @Test

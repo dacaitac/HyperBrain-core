@@ -15,6 +15,7 @@ import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.port.out.WriteCommandPublisher;
 import com.hyperbrain.sync.domain.service.WriteCommandFactory;
+import com.hyperbrain.sync.infrastructure.AppleCalendarProperties;
 import com.hyperbrain.sync.infrastructure.WriteCommandWireMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,19 +77,22 @@ public class AppleEventPropagator implements IEventPropagator {
     private final WriteCommandLogRepository commandLogRepo;
     private final WriteCommandPublisher commandPublisher;
     private final WriteCommandWireMapper wireMapper;
+    private final AppleCalendarProperties calendarProperties;
 
     public AppleEventPropagator(
         CoreExecutableRepository executableRepo,
         SyncMappingRepository syncMappingRepo,
         WriteCommandLogRepository commandLogRepo,
         WriteCommandPublisher commandPublisher,
-        WriteCommandWireMapper wireMapper
+        WriteCommandWireMapper wireMapper,
+        AppleCalendarProperties calendarProperties
     ) {
         this.executableRepo = executableRepo;
         this.syncMappingRepo = syncMappingRepo;
         this.commandLogRepo = commandLogRepo;
         this.commandPublisher = commandPublisher;
         this.wireMapper = wireMapper;
+        this.calendarProperties = calendarProperties;
     }
 
     @Override
@@ -176,7 +180,8 @@ public class AppleEventPropagator implements IEventPropagator {
                     localId, inFlight.get().commandId(), event.id());
                 return;
             }
-            emit(WriteCommandFactory.forUpsert(commandId, executable.get(), Operation.CREATED, null),
+            emit(WriteCommandFactory.forUpsert(commandId, executable.get(), Operation.CREATED, null,
+                    calendarProperties.getCalendarNames()),
                 event, userId, localId, localId.toString());
             return;
         }
@@ -192,7 +197,7 @@ public class AppleEventPropagator implements IEventPropagator {
 
         String externalId = mapping.get().externalId();
         emit(WriteCommandFactory.forUpsert(deterministicCommandId(event.id()), executable.get(),
-                Operation.UPDATED, externalId),
+                Operation.UPDATED, externalId, calendarProperties.getCalendarNames()),
             event, userId, localId, externalId);
     }
 
@@ -212,7 +217,7 @@ public class AppleEventPropagator implements IEventPropagator {
         emit(Optional.of(deleteCommand), event, userId, localId, mapping.externalId());
 
         emit(WriteCommandFactory.forUpsert(deterministicCommandId(event.id(), "create"),
-                executable, Operation.CREATED, null),
+                executable, Operation.CREATED, null, calendarProperties.getCalendarNames()),
             event, userId, localId, localId.toString());
         log.info("Executable {} changed Apple kind {} -> {}; deleted entity {} and re-created",
             localId, oldKind, newKind, mapping.externalId());

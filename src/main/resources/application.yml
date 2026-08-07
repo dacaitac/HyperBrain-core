@@ -114,6 +114,15 @@ app:
     # Single-user MVP: every inbound Apple event is owned by this user.
     # Override via SYNC_DEFAULT_USER_ID env var in production.
     default-user-id: ${SYNC_DEFAULT_USER_ID:00000000-0000-0000-0000-000000000001}
+    # Apple write-back calendar routing by executable type (ADR-009 "configurable por usuario",
+    # core#64): SYSTEM-owned calendar events land on a named calendar instead of leaking the
+    # ingestion source_calendar. SentinelAPI resolve-or-creates the calendar by name. Reminder
+    # types (TASK/HABIT/LEAD_MEASURE/BUYING) are absent → they keep their list behaviour.
+    apple:
+      calendar-names:
+        ACTIVITY: HyperBrain
+        LEARNING_SESSION: HyperBrain
+        TIME_BLOCK: Trabajo
     # Notion write-back (HU-10). Disabled unless a token is provisioned (SOPS in Infra, CA-12);
     # the data source ids are the Tasks/Cycles collections verified in issue #15.
     notion:
