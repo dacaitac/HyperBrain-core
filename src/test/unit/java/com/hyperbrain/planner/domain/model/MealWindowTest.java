@@ -46,4 +46,45 @@ class MealWindowTest {
         assertThatThrownBy(() -> new MealWindow(" ", LocalTime.of(12, 0), LocalTime.of(13, 0)))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("resolves the plausible band to concrete instants in the user's zone")
+    void resolves_the_plausible_band() {
+        // Given: lunch 12:30-13:30, plausible anywhere between 11:30 and 14:30
+        MealWindow lunch = new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            LocalTime.of(11, 30), LocalTime.of(14, 30));
+
+        // When
+        RetimingBand band = lunch.toBand(LocalDate.of(2026, 7, 10), ZoneId.of("America/Bogota"));
+
+        // Then
+        assertThat(band.label()).isEqualTo("lunch");
+        assertThat(band.start())
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 11, 30, 0, 0, ZoneOffset.ofHours(-5)));
+        assertThat(band.end())
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 14, 30, 0, 0, ZoneOffset.ofHours(-5)));
+    }
+
+    @Test
+    @DisplayName("a meal configured without a band is rigid: its band is its own hour")
+    void a_meal_without_a_band_is_rigid() {
+        // Given: nothing was said about where else this meal could sit
+        MealWindow lunch = new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30));
+
+        // Then
+        assertThat(lunch.bandStart()).isEqualTo(lunch.start());
+        assertThat(lunch.bandEnd()).isEqualTo(lunch.end());
+    }
+
+    @Test
+    @DisplayName("rejects a band that does not enclose its own meal window")
+    void rejects_a_band_narrower_than_its_meal() {
+        // A band narrower than the anchor would forbid the very hour the meal is configured for.
+        assertThatThrownBy(() -> new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            LocalTime.of(13, 0), LocalTime.of(14, 30)))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            LocalTime.of(11, 30), LocalTime.of(13, 0)))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
 }

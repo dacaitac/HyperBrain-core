@@ -401,11 +401,14 @@ class AgendaGenerationServiceIT {
         int tomorrowBlocks = localDayCount(bogota, 2026, 7, 23);
         // Today gets the bulk (its full window lies ahead), tomorrow only the overflow.
         assertThat(todayBlocks).isGreaterThan(tomorrowBlocks);
-        // The first block opens at the local wake (07:00 Bogota), never in the pre-wake hours.
+        // The day opens with the morning, never in the pre-wake hours: at the local wake (07:00 Bogota)
+        // or just after it — breakfast is a protected anchor there, and work waits for it to end.
         OffsetDateTime firstStartLocal = jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE origin = 'PLANNER'", OffsetDateTime.class)
             .atZoneSameInstant(bogota).toOffsetDateTime();
-        assertThat(firstStartLocal.toLocalTime()).isEqualTo(java.time.LocalTime.of(7, 0));
+        assertThat(firstStartLocal.toLocalTime())
+            .isAfterOrEqualTo(java.time.LocalTime.of(7, 0))
+            .isBefore(java.time.LocalTime.of(9, 0));
         assertThat(firstStartLocal.toLocalDate()).isEqualTo(java.time.LocalDate.of(2026, 7, 22));
     }
 

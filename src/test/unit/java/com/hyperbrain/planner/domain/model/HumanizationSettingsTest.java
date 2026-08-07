@@ -13,12 +13,30 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class HumanizationSettingsTest {
 
     @Test
-    @DisplayName("the sanctioned defaults keep the two meal anchors and the batching band")
+    @DisplayName("the sanctioned defaults keep the three meal anchors and the batching band")
     void defaults_keep_the_meals_and_the_band() {
         // Then
         assertThat(HumanizationSettings.DEFAULT.mealWindows())
-            .extracting(MealWindow::label).containsExactly("lunch", "dinner");
+            .extracting(MealWindow::label).containsExactly("breakfast", "lunch", "dinner");
         assertThat(HumanizationSettings.DEFAULT.batchBandWidth()).isEqualTo(0.10);
+    }
+
+    @Test
+    @DisplayName("every default meal may float inside a plausible band wider than its own hour")
+    void every_default_meal_carries_a_plausible_band() {
+        // Then: the band strictly encloses the anchor, which is what lets a meal slide without ever
+        // landing at an hour nobody eats at (breakfast in the afternoon was a real day).
+        assertThat(HumanizationSettings.DEFAULT.mealWindows()).allSatisfy(meal -> {
+            assertThat(meal.bandStart()).isBefore(meal.start());
+            assertThat(meal.bandEnd()).isAfter(meal.end());
+        });
+        assertThat(HumanizationSettings.DEFAULT.mealWindows())
+            .filteredOn(meal -> meal.label().equals("breakfast"))
+            .singleElement()
+            .satisfies(breakfast -> {
+                assertThat(breakfast.bandStart()).isEqualTo(LocalTime.of(5, 30));
+                assertThat(breakfast.bandEnd()).isEqualTo(LocalTime.of(10, 0));
+            });
     }
 
     @Test

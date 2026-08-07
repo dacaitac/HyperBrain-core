@@ -31,7 +31,13 @@ import java.util.UUID;
  *   <li>{@code wigExecutableIds} — the WIG blocks (F1 lead measures): a hard floor the LLM can never
  *       DROP nor expel;</li>
  *   <li>{@code frontierStart}/{@code frontierEnd} — the sleep frontier {@code [wake, bedtime]}; no
- *       block may fall outside it.</li>
+ *       block may fall outside it;</li>
+ *   <li>{@code bands} — the stretch of the day each block may be <b>retimed within</b>
+ *       ({@link RetimingBand}): the band of the day it was born in, widened to a meal's plausible hours
+ *       when the band holds one. Retiming is the model's authority; leaving the band is not, because
+ *       the band is the shape of the day and a block that leaves it dissolves that shape — the
+ *       production case being «Casa» at seven in the morning. A block with no entry here comes from no
+ *       band and is unconfined.</li>
  * </ul>
  *
  * <p>{@code highLoadQuota} and {@code energyCriterion} are soft guidance surfaced to the model (the F6
@@ -48,6 +54,7 @@ import java.util.UUID;
  * @param highLoadQuota    the F6 high-load quota, soft guidance for the prompt; never negative
  * @param energyCriterion  the readable energy criterion; never blank
  * @param titles           executable id → display name (untrusted, delimited in the prompt); never null
+ * @param bands            block id → the band it may be retimed within; never null, may be partial
  */
 public record AgendaProposalContext(
     List<AgendaBlock> candidateBlocks,
@@ -58,7 +65,8 @@ public record AgendaProposalContext(
     Set<UUID> wigExecutableIds,
     int highLoadQuota,
     String energyCriterion,
-    Map<UUID, String> titles
+    Map<UUID, String> titles,
+    Map<UUID, RetimingBand> bands
 ) {
 
     public AgendaProposalContext {
@@ -80,6 +88,17 @@ public record AgendaProposalContext(
         occupiedWalls = occupiedWalls == null ? List.of() : List.copyOf(occupiedWalls);
         wigExecutableIds = wigExecutableIds == null ? Set.of() : Set.copyOf(wigExecutableIds);
         titles = titles == null ? Map.of() : Map.copyOf(titles);
+        bands = bands == null ? Map.of() : Map.copyOf(bands);
+    }
+
+    /**
+     * The band a block may be retimed within.
+     *
+     * @param blockId the run block id
+     * @return the block's band, or null when it comes from no band of the day (unconfined)
+     */
+    public RetimingBand band(UUID blockId) {
+        return bands.get(blockId);
     }
 
     /** @return the closed set of block ids for this run (the {@code blockId} enum the LLM must draw from) */

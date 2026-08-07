@@ -13,6 +13,7 @@ import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
+import com.hyperbrain.planner.domain.service.RetimingBandResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -67,6 +68,8 @@ class AgendaGenerationServiceTest {
             mock(PlannerStateRepository.class),
             mock(PlannerBlockMaterializer.class),
             new DayWindowResolver(com.hyperbrain.planner.domain.model.DayTemplate.DEFAULT),
+            new RetimingBandResolver(com.hyperbrain.planner.domain.model.DayTemplate.DEFAULT,
+                HumanizationSettings.DEFAULT),
             mock(MovedCommitmentRescuer.class),
             mock(SleepFrontierCalculator.class),
             mock(EnergyResolver.class),

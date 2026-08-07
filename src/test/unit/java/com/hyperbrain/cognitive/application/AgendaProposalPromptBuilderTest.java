@@ -7,6 +7,7 @@ import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties.Special
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.RetimingBand;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -51,7 +52,7 @@ class AgendaProposalPromptBuilderTest {
             UUID.randomUUID(), WAKE.plusMinutes(60), WAKE.plusMinutes(120), false);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"));
+            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -60,6 +61,34 @@ class AgendaProposalPromptBuilderTest {
             .contains(userBlock.start().toString())
             .contains(userBlock.end().toString());
         assertThat(prompt.system()).contains("OCCUPIED");
+    }
+
+    @Test
+    @DisplayName("each block's band reaches the model as geometry and as a stated rule")
+    void user_carries_the_retiming_band() {
+        // Same doctrine as the walls: state the rule the guard will judge by, and never trust it.
+        RetimingBand household = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(14));
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE.plusHours(12), WAKE.plusHours(13), false, false, "r")),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"),
+            Map.of(A, household));
+
+        LlmPrompt prompt = builder.build(context);
+
+        assertThat(prompt.user())
+            .contains("\"band\"")
+            .contains("Casa")
+            .contains(household.start().toString())
+            .contains(household.end().toString());
+        assertThat(prompt.system()).contains("BAND");
+    }
+
+    @Test
+    @DisplayName("a block with no band carries none: the prompt never states a rule the guard will not apply")
+    void a_block_without_a_band_carries_none() {
+        LlmPrompt prompt = builder.build(context("Write the report"));
+
+        assertThat(prompt.user()).doesNotContain("\"band\"");
     }
 
     @Test
@@ -171,6 +200,6 @@ class AgendaProposalPromptBuilderTest {
     private static AgendaProposalContext context(String title) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title));
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title), Map.of());
     }
 }

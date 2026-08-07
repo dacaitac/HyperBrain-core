@@ -10,6 +10,7 @@ import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties.Special
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.RetimingBand;
 import org.springframework.stereotype.Component;
 
 /**
@@ -88,6 +89,12 @@ public class AgendaProposalPromptBuilder {
         never expel them from the day, and never soften the pace the WIG requires.
         5. STRUCTURE: every decision's "block_id" MUST be one of the given candidate ids (never invent \
         an id), and you MUST return exactly one decision per candidate id (cover them all).
+        6. BAND: every block belongs to a named band of the user's day (its "band": the shape of his \
+        day — a morning goal band, a work band, an evening household band, a meal band). You may retime \
+        a block ANYWHERE INSIDE its band, and never outside it: a block moved out of its band is \
+        discarded with the whole proposal. A meal's band is already widened to the hours that meal can \
+        plausibly happen at, so lunch may slide within it — breakfast in the afternoon is exactly the \
+        kind of move this rule forbids.
 
         The day is already sized and capped to a realistic load — the blocks you are given all fit the \
         day. Your job is to HUMANIZE them (reorder, retime, group by context, add breathing room, write \
@@ -194,6 +201,7 @@ public class AgendaProposalPromptBuilder {
             node.put("end", block.end().toString());
             node.put("wig", block.wig());
             node.put("high_load", block.highLoad());
+            renderBand(node, context.band(block.executableId()));
         }
 
         renderWalls(root.putArray("agenda_walls"), context.agendaWalls());
@@ -222,6 +230,22 @@ public class AgendaProposalPromptBuilder {
             %s
             %s
             """.formatted(controlData, UNTRUSTED_OPEN, titles.toString().stripTrailing(), UNTRUSTED_CLOSE);
+    }
+
+    /**
+     * Renders the block's band beside its geometry — the bounds of the retiming the model is allowed,
+     * and the band's name so it can reason about what the stretch of day is for. Omitted for a block
+     * that belongs to no band: there is no rule to state about it, and inventing one would read as a
+     * constraint the guard does not enforce.
+     */
+    private static void renderBand(ObjectNode node, RetimingBand band) {
+        if (band == null) {
+            return;
+        }
+        ObjectNode target = node.putObject("band");
+        target.put("name", band.label());
+        target.put("earliest_start", band.start().toString());
+        target.put("latest_end", band.end().toString());
     }
 
     /** Renders one wall list as bare geometry — the only thing the model needs to plan around it. */

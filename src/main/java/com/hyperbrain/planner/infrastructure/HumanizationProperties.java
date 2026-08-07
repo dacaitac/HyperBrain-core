@@ -23,13 +23,25 @@ import java.util.List;
 public record HumanizationProperties(List<Meal> meals, double batchBandWidth) {
 
     /**
-     * One configured meal anchor.
+     * One configured meal anchor and the plausible band it may float within.
      *
-     * @param label the meal name (e.g. "lunch")
-     * @param start the local start time (e.g. {@code 12:30})
-     * @param end   the local end time (e.g. {@code 13:30})
+     * @param label     the meal name (e.g. "lunch")
+     * @param start     the local start time (e.g. {@code 12:30})
+     * @param end       the local end time (e.g. {@code 13:30})
+     * @param bandStart the earliest plausible hour for this meal (e.g. {@code 11:30}); absent means the
+     *                  meal may not float earlier than its own window
+     * @param bandEnd   the latest plausible hour for this meal (e.g. {@code 14:30}); absent means the
+     *                  meal may not float later than its own window
      */
-    public record Meal(String label, LocalTime start, LocalTime end) {
+    public record Meal(String label, LocalTime start, LocalTime end,
+                       LocalTime bandStart, LocalTime bandEnd) {
+
+        /** The band as the domain needs it: the configured hour, or the anchor's own edge when absent. */
+        MealWindow toWindow() {
+            return new MealWindow(label, start, end,
+                bandStart == null ? start : bandStart,
+                bandEnd == null ? end : bandEnd);
+        }
     }
 
     /**
@@ -41,7 +53,7 @@ public record HumanizationProperties(List<Meal> meals, double batchBandWidth) {
     public HumanizationSettings toSettings() {
         List<MealWindow> mealWindows = (meals == null || meals.isEmpty())
             ? HumanizationSettings.DEFAULT.mealWindows()
-            : meals.stream().map(m -> new MealWindow(m.label(), m.start(), m.end())).toList();
+            : meals.stream().map(Meal::toWindow).toList();
         double band = batchBandWidth > 0 ? batchBandWidth : HumanizationSettings.DEFAULT.batchBandWidth();
         return new HumanizationSettings(mealWindows, band);
     }
