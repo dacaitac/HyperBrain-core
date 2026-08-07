@@ -20,9 +20,10 @@ import java.util.UUID;
  *
  * <p>Write-back type mapping (single source of truth: {@link #APPLE_COMMAND_TYPES}):
  * {@code TASK}, {@code HABIT}, {@code LEAD_MEASURE}, {@code BUYING} → {@code REMINDER};
- * {@code ACTIVITY}, {@code LEARNING_SESSION} → {@code CALENDAR_EVENT}.
- * {@code AGENDA} is read-only by contract (ADR-009) and any other type has no Apple
- * counterpart — both are skipped.
+ * {@code ACTIVITY}, {@code LEARNING_SESSION}, {@code TIME_BLOCK} and {@code AGENDA} →
+ * {@code CALENDAR_EVENT}. {@code AGENDA} became bidirectional in core#65 (writable to its own
+ * "DanielC" Google calendar, no longer read-only); any type absent from the map has no Apple
+ * counterpart and is skipped. Calendar-event destinations are config-driven per type (core#64).
  *
  * <p>The reminder due date is the executable {@code start_time} (a reminder is due at its start;
  * {@code end_time} is cleared for reminder types upstream by DR-01). Whether a due/start is
@@ -50,7 +51,11 @@ public final class WriteCommandFactory {
         // ADR-039: after the TimeBlock collapse a block IS an executable; it write-backs as a
         // time-boxed EKEvent (start_time is always present on a block). Its destination calendar is
         // config-driven per type (core#64): "Trabajo" by default, resolved in calendarNameFor.
-        "TIME_BLOCK", CommandType.CALENDAR_EVENT);
+        "TIME_BLOCK", CommandType.CALENDAR_EVENT,
+        // core#65: AGENDA is now BIDIRECTIONAL — writable to its own named calendar ("DanielC",
+        // a Google calendar verified writable via EventKit), no longer read-only. It rides the same
+        // CALENDAR_EVENT path as ACTIVITY; the destination calendar is config-driven (core#64).
+        "AGENDA", CommandType.CALENDAR_EVENT);
 
     private static final String STATUS_DONE = "DONE";
 
@@ -72,8 +77,7 @@ public final class WriteCommandFactory {
      * Resolves the Apple entity kind an executable type writes back to.
      *
      * @param executableType the {@code core_executable.type} value (may be null)
-     * @return the command type, or empty when the type is read-only (AGENDA) or has no
-     *         Apple counterpart
+     * @return the command type, or empty when the type has no Apple counterpart
      */
     public static Optional<CommandType> commandTypeForExecutableType(String executableType) {
         return Optional.ofNullable(executableType).map(APPLE_COMMAND_TYPES::get);
@@ -81,8 +85,8 @@ public final class WriteCommandFactory {
 
     /**
      * Builds a CREATED/UPDATED command for an executable, or empty when the executable is not
-     * writable to Apple (AGENDA per ADR-009, unsupported type, or a calendar event without
-     * {@code startTime} — required by the EventKit contract).
+     * writable to Apple (an unsupported type, or a calendar event without {@code startTime} —
+     * required by the EventKit contract).
      *
      * @param commandId  correlation id for the command
      * @param executable current state of the {@code core_executable} row
@@ -128,12 +132,13 @@ public final class WriteCommandFactory {
     }
 
     /**
-     * Returns whether an executable type is eligible for write-back at all. {@code AGENDA} is
-     * read-only (ADR-009) and types without an Apple counterpart are simply not writable.
+     * Returns whether an executable type is eligible for write-back at all. Since core#65
+     * {@code AGENDA} is writable too (bidirectional to its "DanielC" calendar); only types with no
+     * Apple counterpart are non-writable.
      *
      * @param executableType the {@code core_executable.type} value
-     * @return true for the reminder types (TASK, HABIT, LEAD_MEASURE) and event types
-     *         (ACTIVITY, LEARNING_SESSION)
+     * @return true for the reminder types (TASK, HABIT, LEAD_MEASURE, BUYING) and the event types
+     *         (ACTIVITY, LEARNING_SESSION, TIME_BLOCK, AGENDA)
      */
     public static boolean isWritable(String executableType) {
         return commandTypeForExecutableType(executableType).isPresent();

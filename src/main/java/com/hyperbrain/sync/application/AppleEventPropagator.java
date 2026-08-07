@@ -37,8 +37,9 @@ import java.util.UUID;
  *   <li>Framework contract: the drain never invokes it for {@code source_system = APPLE};
  *       {@link #shouldPropagate} additionally rejects unknown origins and non-executable
  *       aggregates (cycles have no Apple counterpart).
- *   <li>Executables mapped as {@code AGENDA} are read-only and never produce a command; that
- *       check needs the persisted row, so it lives in {@link #propagate} (ADR-009).
+ *   <li>Write-back eligibility is decided by {@link WriteCommandFactory#isWritable}: since core#65
+ *       {@code AGENDA} is writable too (bidirectional to its "DanielC" calendar), so the former
+ *       AGENDA read-only skip is gone — only types with no Apple counterpart are dropped.
  *   <li>The effective operation follows the {@code sync_mapping}: mapped → UPDATED against the
  *       EventKit id; unmapped → CREATED with a null id, closed later by the
  *       {@code WriteCommandResult} (ADR-010).

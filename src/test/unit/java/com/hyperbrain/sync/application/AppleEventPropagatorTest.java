@@ -62,7 +62,8 @@ class AppleEventPropagatorTest {
             new WriteCommandWireMapper(new ObjectMapper().registerModule(new JavaTimeModule()));
         AppleCalendarProperties calendarProperties = new AppleCalendarProperties();
         calendarProperties.setCalendarNames(java.util.Map.of(
-            "ACTIVITY", "HyperBrain", "LEARNING_SESSION", "HyperBrain", "TIME_BLOCK", "Trabajo"));
+            "ACTIVITY", "HyperBrain", "LEARNING_SESSION", "HyperBrain",
+            "TIME_BLOCK", "Trabajo", "AGENDA", "DanielC"));
         service = new AppleEventPropagator(
             executableRepo, syncMappingRepo, commandLogRepo, commandPublisher, wireMapper,
             calendarProperties);
@@ -235,6 +236,29 @@ class AppleEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("core#65: a mapped AGENDA edited (NOTION origin) write-backs a CALENDAR_EVENT on the 'DanielC' calendar")
+    void mapped_agenda_writes_back_to_danielc() {
+        // Given an AGENDA already synced from Google, edited (e.g. in Notion) — a non-Apple origin
+        when(executableRepo.findById(LOCAL_ID))
+            .thenReturn(Optional.of(executable("AGENDA", "TODO")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-agenda-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.CALENDAR_EVENT));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then a CALENDAR_EVENT UPDATE routed to "DanielC", never skipped as read-only
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-agenda-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(((CalendarEventPayload) captor.getValue().payload()).calendarName())
+            .isEqualTo("DanielC");
+    }
+
+    @Test
     @DisplayName("TaskCompletedEvent on a mapped DONE HABIT emits DELETE (habit clone scenario)")
     void task_completed_event_emits_delete() {
         // Given — DONE via TaskCompletedEvent (e.g. HABIT marked done in Notion)
@@ -330,25 +354,9 @@ class AppleEventPropagatorTest {
     }
 
     @Test
-    @DisplayName("AGENDA executable is rejected before emitting (CA-1, CA-19)")
-    void agenda_executable_is_rejected() {
-        // Given
-        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("AGENDA", "TODO")));
-
-        // When
-        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
-
-        // Then
-        verify(commandPublisher, never()).publish(any(), anyString());
-        verifyNoInteractions(commandLogRepo, syncMappingRepo);
-    }
-
-    @Test
-    @DisplayName("AGENDA regression (ADR-028/ADR-009): DELETE is a no-op because AGENDA is never mapped "
-        + "— its UPDATE/CREATE is already rejected above, so no sync_mapping is ever created for it")
-    void agenda_delete_is_a_no_op_because_agenda_is_never_mapped() {
-        // Given — AGENDA is read-only and never reaches a mapped state (see
-        // agenda_executable_is_rejected above); propagateDelete only checks sync_mapping presence
+    @DisplayName("DELETE of an unmapped executable is a no-op (propagateDelete only checks mapping presence)")
+    void delete_of_unmapped_executable_is_a_no_op() {
+        // Given — no Apple mapping for the deleted entity
         when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID)).thenReturn(Optional.empty());
 
         // When

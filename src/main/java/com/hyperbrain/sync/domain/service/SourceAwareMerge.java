@@ -96,8 +96,13 @@ public final class SourceAwareMerge {
     /**
      * Merges an Apple CALENDAR_EVENT state onto the current row. Apple authority: name,
      * notes, start/end and the containing calendar. The status is kept (EventKit events have
-     * no completed flag — the old pipeline hard-reset it to {@code TODO}) and so is the type
-     * ({@code AGENDA} stays {@code AGENDA}, ADR-009).
+     * no completed flag — the old pipeline hard-reset it to {@code TODO}) and so is the type.
+     *
+     * <p>Since core#65 {@code AGENDA} is <b>bidirectional</b> exactly like {@code ACTIVITY}: the
+     * user edits either side, Apple owns the calendar fields here, and the type is preserved (it is
+     * Notion/mapping-owned — Apple never reclassifies AGENDA↔ACTIVITY). The write-back direction is
+     * enabled in {@link WriteCommandFactory} (AGENDA → the "DanielC" calendar); this inbound merge
+     * needs no AGENDA-specific branch — a calendar event is merged the same regardless of type.
      *
      * @param current the current row joined with its profile, or null when unmapped
      * @param id      local executable id (existing mapping or a fresh UUID)

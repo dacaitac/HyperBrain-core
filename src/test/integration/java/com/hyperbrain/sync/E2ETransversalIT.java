@@ -308,22 +308,43 @@ class E2ETransversalIT {
     }
 
     @Test
-    @DisplayName("B5 — AGENDA entity from Notion never generates WriteCommand to Apple (ADR-009, E2E-B5)")
-    void agenda_entity_from_notion_never_triggers_apple_writeback() throws Exception {
+    @DisplayName("B5 — AGENDA edited in Notion write-backs a CALENDAR_EVENT to the DanielC calendar (core#65, was ADR-009 read-only)")
+    void agenda_from_notion_triggers_apple_calendar_writeback() throws Exception {
         String pageId = newPageId();
         // SYSTEM canonical write-back always fires for NOTION ingestions; stub the PATCH so the
-        // propagator succeeds (under the new always-stage behavior the SYSTEM event reaches Notion).
+        // propagator succeeds (the SYSTEM event reaches Notion).
         stubPatchPage(pageId);
 
-        consumer.onMessage(notionAutomation(pageId,
-            taskPage(pageId, "Agenda event B5", "Not started", false, "Agenda")));
+        // An AGENDA with a Date (calendar events require a start_time).
+        consumer.onMessage(notionAutomation(pageId, agendaPageWithDate(pageId, "Agenda event B5")));
         outboxWorker.drainBatch();
 
-        // ADR-009: AGENDA is read-only from Apple's perspective — no WriteCommand
-        assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
+        // core#65: AGENDA is bidirectional — a CALENDAR_EVENT WriteCommand is emitted to Apple,
+        // routed to the "DanielC" Google calendar (config-driven, core#64).
+        Message<String> msg = receiveOne(COMMANDS_QUEUE).orElseThrow(
+            () -> new AssertionError("Expected a CALENDAR_EVENT WriteCommand on apple-commands.fifo"));
+        JsonNode cmd = objectMapper.readTree(msg.getPayload());
+        assertThat(cmd.path("command_type").asText()).isEqualTo("CALENDAR_EVENT");
+        assertThat(cmd.path("payload").path("title").asText()).isEqualTo("Agenda event B5");
+        assertThat(cmd.path("payload").path("calendar_name").asText()).isEqualTo("DanielC");
         // The SYSTEM canonical write-back reaches Notion (loop protection only suppresses
         // NOTION-origin events; SYSTEM-origin events propagate normally).
         NOTION.verify(patchRequestedFor(urlEqualTo("/v1/pages/" + pageId)));
+    }
+
+    /** An AGENDA Notion page carrying a Date range (so the calendar-event write-back has a start_time). */
+    private String agendaPageWithDate(String pageId, String name) {
+        return """
+            {"object":"page","id":"%s","last_edited_time":"2026-07-07T09:00:00.000Z",
+             "archived":false,"in_trash":false,
+             "parent":{"type":"database_id","database_id":"%s"},
+             "properties":{
+               "Name":{"type":"title","title":[{"plain_text":"%s"}]},
+               "Status":{"type":"status","status":{"name":"Not started"}},
+               "Complete":{"type":"checkbox","checkbox":false},
+               "Type":{"type":"select","select":{"name":"Agenda"}},
+               "Date":{"type":"date","date":{"start":"2026-07-08T14:00:00.000-05:00","end":"2026-07-08T15:00:00.000-05:00"}}}}
+            """.formatted(pageId, TASKS_DB, name);
     }
 
     // ── C: Transversal ────────────────────────────────────────────────────────

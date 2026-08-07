@@ -181,6 +181,44 @@ class CalendarEventHandlerIT {
     }
 
     @Test
+    @DisplayName("core#65: an inbound AGENDA edit from DanielC updates the row and stages an APPLE-origin event (loop guard: origin==target is never re-written)")
+    void inbound_agenda_edit_does_not_loop() {
+        String entityId = "EKEvent-agenda-" + UUID.randomUUID();
+        // Given an AGENDA already synced from the DanielC Google calendar (pre-existing mapping).
+        UUID localId = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, source_calendar)
+            VALUES (?, ?, 'Standup', 'AGENDA', 'TODO', '2026-07-07T09:00:00-05:00', 'DanielC')
+            """, localId, DataFixture.SYSTEM_USER_ID);
+        jdbcTemplate.update("""
+            INSERT INTO sync_mappings (id, user_id, local_id, external_system, external_id,
+                                       last_known_checksum, sync_status)
+            VALUES (?, ?, ?, 'APPLE', ?, 'stale-checksum', 'SYNCED')
+            """, UUID.randomUUID(), DataFixture.SYSTEM_USER_ID, localId, entityId);
+
+        // When the user edits the event in DanielC (Apple UPDATE arrives).
+        send(calendarEventBody(UUID.randomUUID().toString(), entityId, "Standup (moved)",
+            "DanielC", "2026-07-07T10:00:00-05:00", null, "UPDATED"),
+            entityId, UUID.randomUUID().toString());
+
+        // Then the AGENDA row is updated (still AGENDA), and the staged sync event is APPLE-origin.
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            Map<String, Object> row = queryExecutable(entityId);
+            assertThat(row).isNotNull();
+            assertThat(row.get("name")).isEqualTo("Standup (moved)");
+            assertThat(row.get("type")).isEqualTo("AGENDA");
+        });
+        // The outbox event carries source_system=APPLE — the OutboxWorker's origin != target() guard
+        // therefore never hands it to the Apple propagator, so the edit does not loop back to Apple.
+        // The Apple sync event carries the EKEvent id in aggregate_id and source_system=APPLE.
+        String source = jdbcTemplate.queryForObject(
+            "SELECT source_system FROM outbox_events WHERE aggregate_id = ? "
+                + "AND event_type = 'CalendarEventSyncedEvent' ORDER BY occurred_at DESC LIMIT 1",
+            String.class, entityId);
+        assertThat(source).isEqualTo("APPLE");
+    }
+
+    @Test
     @DisplayName("REMINDER_LIST and CALENDAR events are routed without error (no persistence)")
     void reminder_list_and_calendar_entities_are_accepted() {
         String listId = "EKCalList-" + UUID.randomUUID();

@@ -123,6 +123,10 @@ app:
         ACTIVITY: HyperBrain
         LEARNING_SESSION: HyperBrain
         TIME_BLOCK: Trabajo
+        # core#65: AGENDA is now bidirectional — written back to the "DanielC" Google calendar.
+        # NOTE: every AGENDA write-back targets DanielC regardless of the calendar it was synced
+        # from, so an AGENDA that came from another Google calendar is (re)written to DanielC.
+        AGENDA: DanielC
     # Notion write-back (HU-10). Disabled unless a token is provisioned (SOPS in Infra, CA-12);
     # the data source ids are the Tasks/Cycles collections verified in issue #15.
     notion:

@@ -159,12 +159,14 @@ class WriteCommandFactoryTest {
     @CsvSource({
         "ACTIVITY, HyperBrain",
         "LEARNING_SESSION, HyperBrain",
-        "TIME_BLOCK, Trabajo"})
-    @DisplayName("core#64: calendar-event types route to their configured destination calendar by type")
+        "TIME_BLOCK, Trabajo",
+        "AGENDA, DanielC"})
+    @DisplayName("core#64/#65: calendar-event types route to their configured destination calendar by type")
     void calendar_event_types_route_by_configured_calendar(String type, String expectedCalendar) {
         // Given the per-type calendar routing config and an executable carrying a different source_calendar
         Map<String, String> calendarNames = Map.of(
-            "ACTIVITY", "HyperBrain", "LEARNING_SESSION", "HyperBrain", "TIME_BLOCK", "Trabajo");
+            "ACTIVITY", "HyperBrain", "LEARNING_SESSION", "HyperBrain",
+            "TIME_BLOCK", "Trabajo", "AGENDA", "DanielC");
         CoreExecutable executable = executable(type, "TODO", START, END, "SomeOtherSource");
 
         // When
@@ -193,14 +195,24 @@ class WriteCommandFactoryTest {
     }
 
     @Test
-    @DisplayName("AGENDA never produces a command (read-only per ADR-009)")
-    void agenda_is_rejected() {
-        // Given
+    @DisplayName("core#65: AGENDA is writable as a CALENDAR_EVENT routed to the 'DanielC' calendar")
+    void agenda_maps_to_calendar_event_on_danielc() {
+        // Given an AGENDA that was synced from a Google calendar
         CoreExecutable agenda = executable("AGENDA", "TODO", START, END, "Google");
+        Map<String, String> calendarNames = Map.of("AGENDA", "DanielC");
 
-        // When / Then
-        assertThat(WriteCommandFactory.forUpsert(COMMAND_ID, agenda, Operation.UPDATED, "EK-1")).isEmpty();
-        assertThat(WriteCommandFactory.isWritable("AGENDA")).isFalse();
+        // When
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, agenda, Operation.UPDATED, "EK-1", calendarNames);
+
+        // Then it is writable and lands on the configured "DanielC" calendar
+        assertThat(WriteCommandFactory.isWritable("AGENDA")).isTrue();
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("AGENDA"))
+            .contains(CommandType.CALENDAR_EVENT);
+        assertThat(command).isPresent();
+        assertThat(command.get().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(((CalendarEventPayload) command.get().payload()).calendarName())
+            .isEqualTo("DanielC");
     }
 
     @Test
@@ -216,12 +228,13 @@ class WriteCommandFactoryTest {
     }
 
     @Test
-    @DisplayName("reminder types and event types are writable; AGENDA and unknown are not")
+    @DisplayName("reminder and event types (incl. AGENDA since core#65) are writable; unknown is not")
     void writable_types() {
-        for (String type : new String[] {"TASK", "HABIT", "LEAD_MEASURE", "BUYING", "ACTIVITY", "LEARNING_SESSION"}) {
+        for (String type : new String[] {"TASK", "HABIT", "LEAD_MEASURE", "BUYING",
+            "ACTIVITY", "LEARNING_SESSION", "TIME_BLOCK", "AGENDA"}) {
             assertThat(WriteCommandFactory.isWritable(type)).as("writable %s", type).isTrue();
         }
-        assertThat(WriteCommandFactory.isWritable("AGENDA")).isFalse();
+        assertThat(WriteCommandFactory.isWritable("UNKNOWN")).isFalse();
         assertThat(WriteCommandFactory.isWritable(null)).isFalse();
     }
 
@@ -234,7 +247,8 @@ class WriteCommandFactoryTest {
         assertThat(WriteCommandFactory.commandTypeForExecutableType("BUYING")).contains(CommandType.REMINDER);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("ACTIVITY")).contains(CommandType.CALENDAR_EVENT);
         assertThat(WriteCommandFactory.commandTypeForExecutableType("LEARNING_SESSION")).contains(CommandType.CALENDAR_EVENT);
-        assertThat(WriteCommandFactory.commandTypeForExecutableType("AGENDA")).isEmpty();
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("TIME_BLOCK")).contains(CommandType.CALENDAR_EVENT);
+        assertThat(WriteCommandFactory.commandTypeForExecutableType("AGENDA")).contains(CommandType.CALENDAR_EVENT);
         assertThat(WriteCommandFactory.commandTypeForExecutableType(null)).isEmpty();
     }
 
