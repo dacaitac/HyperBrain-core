@@ -75,6 +75,22 @@ spring:
           max-tokens: ${SPRING_AI_ANTHROPIC_MAX_TOKENS:16000}
 
 app:
+  core:
+    # ADR-040 D4: the day-close sweep of what expired, dispatched by type (HABIT/LEAD_MEASURE/
+    # ACTIVITY/AGENDA → FAILED, TASK → re-dated to the reference day, BUYING → date cleared).
+    # It is what keeps the bag the next day draws from clean, so it lands BEFORE the window model.
+    #
+    # Deploy-safe default OFF: the sweep mutates real rows once a day and pushes those changes to
+    # Apple and Notion. Enable in prod via APP_CORE_OVERDUE_SWEEP_ENABLED=true when Daniel decides.
+    # Its own switch on purpose — the sweep is domain, not planner, and must be able to run while
+    # the planner flags stay dark. The TIME_BLOCK row of the same table is NOT here: a block's
+    # window closes intraday and is settled by app.timeblock's own minute-cadence sweep.
+    overdue-sweep:
+      enabled: ${APP_CORE_OVERDUE_SWEEP_ENABLED:false}
+      # Early enough that the closed day is really over and the bag is clean before the morning
+      # agenda is generated; the reference day is "today" in this zone.
+      cron: ${APP_CORE_OVERDUE_SWEEP_CRON:0 0 3 * * *}
+      zone: ${APP_CORE_OVERDUE_SWEEP_ZONE:America/Bogota}
   cognitive:
     llm-propose:
       # HU-01c H3: the LLM propose-then-validate tier. Deploy-safe default OFF — the planner

@@ -5,13 +5,17 @@ import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
 import com.hyperbrain.core.domain.model.SubtaskCounts;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -260,6 +264,70 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         WHERE target.id = ? AND source.id = ?
         """;
 
+    /**
+     * ADR-040 D4 candidates: still-open, user-owned rows of a swept type whose window closed on a
+     * local day before the reference day. {@code COALESCE(end_time, start_time)} is the window's
+     * closing instant — a reminder type has no {@code end_time} (DR-01), so its due instant is
+     * both ends of its window. The type list is bound as a parameter so it can only come from
+     * {@code OverduePolicy}. Row-locked with {@code SKIP LOCKED} like every other sweep of this
+     * codebase, so a second instance never fights this one for the same row.
+     */
+    private static final String FIND_OVERDUE_SQL = """
+        SELECT e.id, e.user_id, e.parent_id, e.cycle_id, e.name, e.description, e.type, e.status,
+               e.priority_score, e.urgency_score, e.effort_score, e.is_important, e.frequency,
+               e.start_time, e.end_time, e.source_calendar, e.system_generated, e.container_block_id,
+               p.energy_drain, p.mental_load, p.impact
+        FROM core_executable e
+        LEFT JOIN core_execution_profile p ON p.executable_id = e.id
+        WHERE e.user_id = ?
+          AND e.status NOT IN ('DONE', 'FAILED')
+          AND e.system_generated = false
+          AND e.parent_id IS NULL
+          AND e.type = ANY (string_to_array(?, ','))
+          AND e.start_time IS NOT NULL
+          AND (COALESCE(e.end_time, e.start_time) AT TIME ZONE ?)::date < ?::date
+        ORDER BY COALESCE(e.end_time, e.start_time), e.id
+        FOR UPDATE OF e SKIP LOCKED
+        """;
+
+    private static final String CLOSE_AS_FAILED_SQL = """
+        UPDATE core_executable
+        SET status = 'FAILED'
+        WHERE id = ? AND status NOT IN ('DONE', 'FAILED')
+        """;
+
+    private static final String RESCHEDULE_SQL = """
+        UPDATE core_executable
+        SET start_time = ?, end_time = ?
+        WHERE id = ?
+          AND status NOT IN ('DONE', 'FAILED')
+          AND (start_time IS DISTINCT FROM ? OR end_time IS DISTINCT FROM ?)
+        """;
+
+    private static final RowMapper<ExecutableSnapshot> SNAPSHOT_MAPPER = (rs, rowNum) ->
+        new ExecutableSnapshot(
+            rs.getObject("id", UUID.class),
+            rs.getObject("user_id", UUID.class),
+            rs.getObject("parent_id", UUID.class),
+            rs.getObject("cycle_id", UUID.class),
+            rs.getString("name"),
+            rs.getString("description"),
+            rs.getString("type"),
+            rs.getString("status"),
+            rs.getObject("priority_score", Double.class),
+            rs.getObject("urgency_score", Double.class),
+            rs.getObject("effort_score", Double.class),
+            rs.getBoolean("is_important"),
+            rs.getObject("frequency", Double.class),
+            toOffset(rs.getTimestamp("start_time")),
+            toOffset(rs.getTimestamp("end_time")),
+            rs.getString("source_calendar"),
+            rs.getObject("energy_drain", Integer.class),
+            rs.getObject("mental_load", Integer.class),
+            rs.getObject("impact", Integer.class),
+            rs.getBoolean("system_generated"),
+            rs.getObject("container_block_id", UUID.class));
+
     private static final RowMapper<FocusCandidate> CANDIDATE_MAPPER = (rs, rowNum) ->
         new FocusCandidate(
             rs.getObject("id", UUID.class),
@@ -350,7 +418,7 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     }
 
     @Override
-    public void upsertExecutable(com.hyperbrain.sync.domain.model.ExecutableSnapshot s) {
+    public void upsertExecutable(ExecutableSnapshot s) {
         jdbcTemplate.update(UPSERT_EXECUTABLE_SQL,
             s.id(), s.userId(), s.parentId(), s.cycleId(), s.name(), s.description(),
             s.type(), s.status(), s.priorityScore(), s.urgencyScore(), s.effortScore(),
@@ -413,6 +481,28 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     @Override
     public void copyStreaks(UUID sourceId, UUID targetId) {
         jdbcTemplate.update(COPY_STREAKS_SQL, targetId, sourceId);
+    }
+
+    @Override
+    public List<ExecutableSnapshot> findOverdue(UUID userId, Collection<String> types,
+                                                LocalDate referenceDay, ZoneId zone) {
+        if (types.isEmpty()) {
+            return List.of();
+        }
+        return jdbcTemplate.query(FIND_OVERDUE_SQL, SNAPSHOT_MAPPER,
+            userId, String.join(",", types), zone.getId(), referenceDay.toString());
+    }
+
+    @Override
+    public boolean closeAsFailed(UUID executableId) {
+        return jdbcTemplate.update(CLOSE_AS_FAILED_SQL, executableId) > 0;
+    }
+
+    @Override
+    public boolean reschedule(UUID executableId, OffsetDateTime startTime, OffsetDateTime endTime) {
+        Timestamp start = toTimestamp(startTime);
+        Timestamp end = toTimestamp(endTime);
+        return jdbcTemplate.update(RESCHEDULE_SQL, start, end, executableId, start, end) > 0;
     }
 
     private static Timestamp toTimestamp(OffsetDateTime odt) {

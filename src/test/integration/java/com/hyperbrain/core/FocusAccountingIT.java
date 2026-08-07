@@ -288,7 +288,7 @@ class FocusAccountingIT {
     }
 
     @Test
-    @DisplayName("DR-08 (ADR-039): the expiry sweep settles due TIME_BLOCK executables as FAILED and imputes the window")
+    @DisplayName("ADR-040 D4: the expiry sweep settles due TIME_BLOCK executables as DONE and imputes the window")
     void expiry_settles_due_blocks_and_imputes() {
         String parentPage = newPageId();
         String subtaskPage = newPageId();
@@ -326,7 +326,10 @@ class FocusAccountingIT {
         Map<String, Object> block = jdbcTemplate.queryForMap(
             "SELECT status, actual_duration_minutes, last_completed_at FROM core_executable WHERE id = ?",
             blockId);
-        assertThat(block.get("status")).isEqualTo("FAILED");
+        // ADR-040 D4: a block that elapsed settles as DONE — a container of time, not a broken
+        // commitment. The imputation below is unchanged: it credits DONE *subtasks*, whatever the
+        // block's own terminal is.
+        assertThat(block.get("status")).isEqualTo("DONE");
         assertThat(block.get("actual_duration_minutes")).isEqualTo(60);
         assertThat(block.get("last_completed_at")).isNotNull();
         UUID imputed = jdbcTemplate.queryForObject(

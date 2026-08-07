@@ -2,6 +2,7 @@ package com.hyperbrain.sync;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.core.application.TimeBlockSettlementService;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -15,6 +16,7 @@ import org.springframework.messaging.Message;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -39,6 +41,7 @@ class AppleWriteBackIT {
     @Autowired private SqsTemplate sqsTemplate;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private TimeBlockSettlementService settlementService;
 
     @BeforeEach
     void cleanState() throws Exception {
@@ -141,6 +144,49 @@ class AppleWriteBackIT {
     }
 
     @Test
+    @DisplayName("a settled TIME_BLOCK reaches Apple as an UPDATE of its own calendar — never a delete, never the activities calendar")
+    void settled_block_reaches_apple_with_its_new_state() throws Exception {
+        // Given a mapped planner block whose window already passed
+        UUID blockId = insertElapsedBlock("PLANNER");
+        String entityId = "EKEvent-" + UUID.randomUUID();
+        insertMapping(blockId, entityId);
+
+        // When the block settles and the outbox drains
+        assertThat(settlementService.expireDueBlocks(OffsetDateTime.now())).isEqualTo(1);
+        outboxWorker.drainBatch();
+
+        // Then the block is closed and its calendar event is UPDATED, not removed: a settled block
+        // is a time record (the delete-on-DONE path must not claim it).
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT status FROM core_executable WHERE id = ?", String.class, blockId))
+            .isEqualTo("DONE");
+        Message<String> message = receiveOne(COMMANDS_QUEUE).orElseThrow();
+        JsonNode command = objectMapper.readTree(message.getPayload());
+        assertThat(command.path("command_type").asText()).isEqualTo("CALENDAR_EVENT");
+        assertThat(command.path("operation").asText()).isEqualTo("UPDATED");
+        assertThat(command.path("entity_id").asText()).isEqualTo(entityId);
+        // Type-routed destination: a block goes to its own calendar, not the activities one.
+        assertThat(command.path("payload").path("calendar_name").asText()).isEqualTo("Trabajo");
+        // Exactly one command: the settlement event itself reaches no propagator, so it cannot
+        // produce a competing second write.
+        assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a settled FOCUS block writes nothing to Apple: internal accounting is never mirrored")
+    void settled_focus_block_is_not_written_back() {
+        UUID blockId = insertElapsedBlock("FOCUS");
+
+        assertThat(settlementService.expireDueBlocks(OffsetDateTime.now())).isEqualTo(1);
+        outboxWorker.drainBatch();
+
+        assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
+        Integer commands = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_write_commands", Integer.class);
+        assertThat(commands).isZero();
+    }
+
+    @Test
     @DisplayName("loop protection: source_system=APPLE produces no WriteCommand (CA-10)")
     void apple_sourced_change_is_not_written_back() {
         // Given an Apple-originated outbox event for a mapped executable
@@ -166,6 +212,18 @@ class AppleWriteBackIT {
             INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time, source_calendar)
             VALUES (?, ?, 'Write tests', ?, ?, now(), now() + interval '1 hour', 'HyperBrain')
             """, id, DataFixture.SYSTEM_USER_ID, type, status);
+        return id;
+    }
+
+    /** A TIME_BLOCK whose window already closed, so the expiry sweep settles it. */
+    private UUID insertElapsedBlock(String origin) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time, system_generated)
+            VALUES (?, ?, 'Morning block', 'TIME_BLOCK', 'PLANNED', ?,
+                    now() - interval '2 hours', now() - interval '1 hour', false)
+            """, id, DataFixture.SYSTEM_USER_ID, origin);
         return id;
     }
 

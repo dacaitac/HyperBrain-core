@@ -162,6 +162,52 @@ class RecurrenceCloneRuleTest {
     }
 
     @Test
+    @DisplayName("ADR-040 D4: an AGENDA with a frequency closes WITHOUT cloning — the single exemption to DR-04")
+    void agenda_never_clones_even_with_frequency() {
+        ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("TODO").frequency(7.0).startTime(DUE).endTime(END).build();
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("FAILED").frequency(7.0).startTime(DUE).endTime(END).build();
+
+        ExecutableSnapshot result = rule.apply(previous, merged, ExternalSystem.SYSTEM);
+
+        assertThat(result).isSameAs(merged);
+        verifyNoInteractions(stateRepo);
+        verifyNoInteractions(outboxRepo);
+    }
+
+    @Test
+    @DisplayName("the AGENDA exemption is a property of the type, not of the sweep: a human closing one from Notion never clones either")
+    void agenda_exemption_holds_on_the_ingestion_path() {
+        ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("TODO").frequency(1.0).startTime(DUE).build();
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("DONE").frequency(1.0).startTime(DUE).build();
+
+        rule.apply(previous, merged, ExternalSystem.NOTION);
+
+        verifyNoInteractions(stateRepo);
+        verifyNoInteractions(outboxRepo);
+    }
+
+    @Test
+    @DisplayName("an ACTIVITY with a frequency still clones on a FAILED closure — only AGENDA is exempt")
+    void activity_with_frequency_still_clones_on_failure() {
+        ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot()
+            .type("ACTIVITY").status("TODO").frequency(2.0).startTime(DUE).endTime(END).build();
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .type("ACTIVITY").status("FAILED").frequency(2.0).startTime(DUE).endTime(END).build();
+
+        rule.apply(previous, merged, ExternalSystem.SYSTEM);
+
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(stateRepo).upsertExecutable(captor.capture());
+        assertThat(captor.getValue().type()).isEqualTo("ACTIVITY");
+        assertThat(captor.getValue().startTime()).isEqualTo(DUE.plusDays(2));
+        verify(outboxRepo).append(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
     @DisplayName("system_generated row: no clone")
     void system_generated_no_clone() {
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()

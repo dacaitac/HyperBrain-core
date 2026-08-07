@@ -2,6 +2,7 @@ package com.hyperbrain.core.application.rule;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
@@ -58,8 +59,6 @@ public class ContainmentCopyRule implements DomainRule {
     private static final Logger log = LoggerFactory.getLogger(ContainmentCopyRule.class);
 
     private static final String TIME_BLOCK = "TIME_BLOCK";
-    private static final String EXECUTABLE_AGGREGATE = "CORE_EXECUTABLE";
-    private static final String SOURCE_SYSTEM = "SYSTEM";
     private static final Set<String> EVENT_TYPES = Set.of("ACTIVITY", "AGENDA", "LEARNING_SESSION");
 
     private final ExecutableStateRepository stateRepo;
@@ -166,10 +165,7 @@ public class ContainmentCopyRule implements DomainRule {
     }
 
     private void stageChildUpdate(UUID childId) {
-        String payload = String.format("{\"local_id\":\"%s\",\"operation\":\"UPDATED\"}", childId);
-        outboxRepo.append(new OutboxEvent(
-            UUID.randomUUID(), EXECUTABLE_AGGREGATE, childId.toString(),
-            "ExecutableUpdatedEvent", payload, SOURCE_SYSTEM, OffsetDateTime.now()));
+        outboxRepo.append(ExecutableOutboxEvents.updated(childId));
     }
 
     /**
@@ -186,8 +182,9 @@ public class ContainmentCopyRule implements DomainRule {
             "Schedule is owned by '" + containerName + "'; move that container or remove the "
                 + "containment to reschedule this item");
         outboxRepo.append(new OutboxEvent(
-            UUID.randomUUID(), EXECUTABLE_AGGREGATE, executableId.toString(),
-            "ExecutableUpdatedEvent", toJson(payload), SOURCE_SYSTEM, OffsetDateTime.now()));
+            UUID.randomUUID(), ExecutableOutboxEvents.EXECUTABLE_AGGREGATE, executableId.toString(),
+            "ExecutableUpdatedEvent", toJson(payload),
+            ExecutableOutboxEvents.SOURCE_SYSTEM, OffsetDateTime.now()));
     }
 
     private String toJson(Map<String, Object> payload) {

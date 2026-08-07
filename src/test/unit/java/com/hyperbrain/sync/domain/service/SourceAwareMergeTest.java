@@ -55,13 +55,22 @@ class SourceAwareMergeTest {
         }
 
         @Test
-        @DisplayName("completed=false only regresses an actual DONE, never IN_PROGRESS (loss-aware)")
+        @DisplayName("completed=false only regresses an actual closure, never IN_PROGRESS (loss-aware)")
         void completed_flag_is_loss_aware() {
             assertThat(SourceAwareMerge.mergeCompletedFlag("IN_PROGRESS", false)).isEqualTo("IN_PROGRESS");
             assertThat(SourceAwareMerge.mergeCompletedFlag("PLANNED", false)).isEqualTo("PLANNED");
             assertThat(SourceAwareMerge.mergeCompletedFlag("DONE", false)).isEqualTo("TODO");
             assertThat(SourceAwareMerge.mergeCompletedFlag("IN_PROGRESS", true)).isEqualTo("DONE");
             assertThat(SourceAwareMerge.mergeCompletedFlag("DONE", true)).isEqualTo("DONE");
+        }
+
+        @Test
+        @DisplayName("ADR-040 D4: the echo of a checked-off FAILED reminder keeps FAILED — a sanctioned miss never becomes an achievement")
+        void completed_echo_never_rewrites_failed_into_done() {
+            // The write-back now checks off a FAILED reminder, so its echo carries completed=true.
+            assertThat(SourceAwareMerge.mergeCompletedFlag("FAILED", true)).isEqualTo("FAILED");
+            // Unchecking it in Apple is still the reopen signal, symmetric with the Notion path.
+            assertThat(SourceAwareMerge.mergeCompletedFlag("FAILED", false)).isEqualTo("TODO");
         }
 
         @Test
