@@ -81,9 +81,12 @@ public class AgendaProposalPromptBuilder {
         1. SLEEP: no block may start before wake or end after bedtime (the sleep frontier).
         2. AGENDA: the listed read-only AGENDA windows are fixed, occupied space — never overlap them and \
         never move them; plan around them.
-        3. WIG: the block(s) flagged "wig": true are the Wildly Important Goal — never drop them and \
+        3. OCCUPIED: the listed occupied blocks are time the user has already committed — blocks he \
+        created himself, blocks already finished, and blocks already under way. They are just as fixed as \
+        an AGENDA window: never overlap them, never move them, plan around them.
+        4. WIG: the block(s) flagged "wig": true are the Wildly Important Goal — never drop them and \
         never expel them from the day, and never soften the pace the WIG requires.
-        4. STRUCTURE: every decision's "block_id" MUST be one of the given candidate ids (never invent \
+        5. STRUCTURE: every decision's "block_id" MUST be one of the given candidate ids (never invent \
         an id), and you MUST return exactly one decision per candidate id (cover them all).
 
         The day is already sized and capped to a realistic load — the blocks you are given all fit the \
@@ -91,7 +94,8 @@ public class AgendaProposalPromptBuilder {
         the coach notes), not to prune them. KEEP is the default for every block; MOVE a block only when \
         a new time improves the day; move ACTIVITY blocks as needed. Do NOT drop blocks to lighten a day \
         that is already capped. DROP a non-WIG block ONLY when it genuinely cannot fit today within the \
-        hard walls (sleep frontier, AGENDA windows) — and that block will simply carry to the next day. \
+        hard walls (sleep frontier, AGENDA windows, occupied blocks) — and that block will simply carry \
+        to the next day. \
         The F6 high-load quota and spacing are guidance, not hard rules.""";
 
     private static final String SCHEMA = """
@@ -144,7 +148,8 @@ public class AgendaProposalPromptBuilder {
             INTENSITY DIAL: %d/100 (1 = a gentle, light-touch day; 100 = a full-throttle, ambitious day). \
             %s
             SPECIAL CONTEXT: %s. %s
-            Neither dial ever loosens the SLEEP, AGENDA or WIG rules below, nor the WIG's required pace — \
+            Neither dial ever loosens the SLEEP, AGENDA, OCCUPIED or WIG rules below, nor the WIG's \
+            required pace — \
             they only shape tone, phrasing and how assertively you resequence non-WIG blocks.""".formatted(
             committeeProperties.intensity(), intensityGuidance(committeeProperties.intensity()),
             committeeProperties.specialContext(), specialContextGuidance(committeeProperties.specialContext()));
@@ -191,12 +196,8 @@ public class AgendaProposalPromptBuilder {
             node.put("high_load", block.highLoad());
         }
 
-        ArrayNode walls = root.putArray("agenda_walls");
-        for (OccupiedInterval wall : context.agendaWalls()) {
-            ObjectNode node = walls.addObject();
-            node.put("start", wall.start().toString());
-            node.put("end", wall.end().toString());
-        }
+        renderWalls(root.putArray("agenda_walls"), context.agendaWalls());
+        renderWalls(root.putArray("occupied_blocks"), context.occupiedWalls());
 
         String controlData;
         try {
@@ -221,6 +222,15 @@ public class AgendaProposalPromptBuilder {
             %s
             %s
             """.formatted(controlData, UNTRUSTED_OPEN, titles.toString().stripTrailing(), UNTRUSTED_CLOSE);
+    }
+
+    /** Renders one wall list as bare geometry — the only thing the model needs to plan around it. */
+    private static void renderWalls(ArrayNode target, java.util.List<OccupiedInterval> walls) {
+        for (OccupiedInterval wall : walls) {
+            ObjectNode node = target.addObject();
+            node.put("start", wall.start().toString());
+            node.put("end", wall.end().toString());
+        }
     }
 
     /**

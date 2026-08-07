@@ -151,9 +151,58 @@ class ProposalWallGuardTest {
             .satisfies(w -> assertThat(w.wall()).isEqualTo(ProposalWall.AGENDA_READ_ONLY));
     }
 
+    @Test
+    @DisplayName("OCCUPIED_BLOCK: a block moved onto a window the user already owns is rejected")
+    void moved_onto_occupied_block_rejected() {
+        // The production case: Daniel's own block holds 09:00–10:00 and the model moves work onto it.
+        OccupiedInterval userBlock = new OccupiedInterval(
+            UUID.randomUUID(), WAKE.plusMinutes(120), WAKE.plusMinutes(180), false);
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Set.of(), List.of(), List.of(userBlock));
+        AgendaPropuesta propuesta = new AgendaPropuesta(List.of(
+            move(A, WAKE.plusMinutes(150), WAKE.plusMinutes(210))));
+
+        assertThat(guard.check(propuesta, context).breaches()).singleElement()
+            .satisfies(w -> {
+                assertThat(w.blockId()).isEqualTo(A);
+                assertThat(w.wall()).isEqualTo(ProposalWall.OCCUPIED_BLOCK);
+            });
+    }
+
+    @Test
+    @DisplayName("OCCUPIED_BLOCK: a KEPT block the floor already laid clear of the wall passes")
+    void kept_block_beside_occupied_block_passes() {
+        // Butting up against the wall is not overlapping it: the floor lays windows exactly like this,
+        // so a keep-everything proposal must never be degraded by the new wall.
+        OccupiedInterval userBlock = new OccupiedInterval(
+            UUID.randomUUID(), WAKE.plusMinutes(60), WAKE.plusMinutes(120), false);
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Set.of(), List.of(), List.of(userBlock));
+
+        assertThat(guard.check(new AgendaPropuesta(List.of(keep(A))), context).clean()).isTrue();
+    }
+
+    @Test
+    @DisplayName("OCCUPIED_BLOCK: dropping a non-WIG block whose window is now occupied is still allowed")
+    void drop_over_occupied_block_passes() {
+        OccupiedInterval userBlock = new OccupiedInterval(
+            UUID.randomUUID(), WAKE, WAKE.plusMinutes(60), false);
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Set.of(), List.of(), List.of(userBlock));
+
+        assertThat(guard.check(new AgendaPropuesta(List.of(drop(A))), context).clean()).isTrue();
+    }
+
     private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
                                                  List<OccupiedInterval> agendaWalls) {
-        return new AgendaProposalContext(candidates, WAKE, BEDTIME, agendaWalls, wigIds, 3, "NEUTRAL", Map.of());
+        return context(candidates, wigIds, agendaWalls, List.of());
+    }
+
+    private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
+                                                 List<OccupiedInterval> agendaWalls,
+                                                 List<OccupiedInterval> occupiedWalls) {
+        return new AgendaProposalContext(candidates, WAKE, BEDTIME, agendaWalls, occupiedWalls, wigIds, 3,
+            "NEUTRAL", Map.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {

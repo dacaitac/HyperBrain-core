@@ -6,6 +6,7 @@ import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties;
 import com.hyperbrain.cognitive.infrastructure.CommitteePromptProperties.SpecialContext;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
+import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -39,6 +40,26 @@ class AgendaProposalPromptBuilderTest {
             .contains("WIG")
             .contains("block_id")
             .contains("KEEP|MOVE|DROP");
+    }
+
+    @Test
+    @DisplayName("the occupied blocks the user owns reach the model as geometry and as a stated rule")
+    void user_carries_the_occupied_walls() {
+        // The model cannot plan around a wall it is never shown — and being degraded for hitting an
+        // invisible wall would cost the day its arrangement for no reason.
+        OccupiedInterval userBlock = new OccupiedInterval(
+            UUID.randomUUID(), WAKE.plusMinutes(60), WAKE.plusMinutes(120), false);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
+            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"));
+
+        LlmPrompt prompt = builder.build(context);
+
+        assertThat(prompt.user())
+            .contains("occupied_blocks")
+            .contains(userBlock.start().toString())
+            .contains(userBlock.end().toString());
+        assertThat(prompt.system()).contains("OCCUPIED");
     }
 
     @Test
@@ -133,7 +154,7 @@ class AgendaProposalPromptBuilderTest {
         LlmPrompt prompt = builder.build(context("Write the report"));
 
         assertThat(prompt.system())
-            .contains("Neither dial ever loosens the SLEEP, AGENDA or WIG rules")
+            .contains("Neither dial ever loosens the SLEEP, AGENDA, OCCUPIED or WIG rules")
             .contains("WIG's required pace");
     }
 
@@ -150,6 +171,6 @@ class AgendaProposalPromptBuilderTest {
     private static AgendaProposalContext context(String title) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title));
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title));
     }
 }

@@ -28,8 +28,18 @@ import java.util.UUID;
  *       (anti-hallucination) and no silently dropped block (every id present once);</li>
  *   <li>{@code WIG_PROTECTED} — no WIG block is DROPped (F1 is a hard floor);</li>
  *   <li>{@code SLEEP_FRONTIER} — every surviving block stays inside {@code [wake, bedtime]} (ADR-013 D2);</li>
- *   <li>{@code AGENDA_READ_ONLY} — no surviving block overlaps a read-only AGENDA window (ADR-009).</li>
+ *   <li>{@code AGENDA_READ_ONLY} — no surviving block overlaps a read-only AGENDA window (ADR-009);</li>
+ *   <li>{@code OCCUPIED_BLOCK} — no surviving block overlaps a window somebody already owns: a block the
+ *       user created himself, one already closed, or one this run may no longer re-time.</li>
  * </ol>
+ *
+ * <p><b>Why the last wall is a wall and not arrangement.</b> Two blocks of the same run overlapping each
+ * other is a plan the model composed, and composing the plan is its authority. A block landing on a
+ * window its owner reserved is not a plan at all — the deterministic floor lays its windows around that
+ * occupancy and the {@code AgendaValidator} strips anything that lands on it, so leaving the model's path
+ * without the same wall meant the strictness of the day depended on which tier happened to produce it.
+ * In production it produced the literal case: the user's own morning block, correctly read and correctly
+ * planned around by the floor, with a planner block sitting exactly on top of it.
  *
  * <p>The F6 high-load quota, transition buffers and block-vs-block spacing are deliberately <b>not</b>
  * walls here — they are the LLM's arrangement authority. All breaches are collected (not just the first)
@@ -79,7 +89,7 @@ public class ProposalWallGuard {
         return breaches;
     }
 
-    /** The frontier / AGENDA / WIG walls for one decision. */
+    /** The frontier / AGENDA / occupancy / WIG walls for one decision. */
     private static List<WallBreach> blockBreaches(BlockDecision decision, AgendaProposalContext context) {
         UUID id = decision.blockId();
         if (decision.placement() == Placement.DROP) {
@@ -104,6 +114,10 @@ public class ProposalWallGuard {
         if (overlapsAgenda) {
             breaches.add(new WallBreach(id, ProposalWall.AGENDA_READ_ONLY));
         }
+        boolean overlapsOccupied = context.occupiedWalls().stream().anyMatch(w -> w.overlaps(start, end));
+        if (overlapsOccupied) {
+            breaches.add(new WallBreach(id, ProposalWall.OCCUPIED_BLOCK));
+        }
         return breaches;
     }
 
@@ -113,6 +127,8 @@ public class ProposalWallGuard {
         SLEEP_FRONTIER,
         /** A proposed block overlapped a read-only AGENDA window (ADR-009). */
         AGENDA_READ_ONLY,
+        /** A proposed block landed on a window somebody already owns (a user, closed or started block). */
+        OCCUPIED_BLOCK,
         /** The WIG block was dropped or expelled — F1 is a hard floor. */
         WIG_PROTECTED,
         /** An invented, duplicated, or silently dropped block id (identity diff, anti-hallucination). */

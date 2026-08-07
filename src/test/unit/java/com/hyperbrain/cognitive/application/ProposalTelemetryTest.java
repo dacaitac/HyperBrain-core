@@ -101,6 +101,6 @@ class ProposalTelemetryTest {
             List.of(
                 new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r"),
                 new AgendaBlock(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120), false, false, "r")),
-            WAKE, BEDTIME, List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of());
     }
 }
