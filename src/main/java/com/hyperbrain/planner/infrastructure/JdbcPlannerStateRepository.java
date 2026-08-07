@@ -48,6 +48,13 @@ import java.util.UUID;
  * <p><b>Remaining effort.</b> For tasks with user subtasks the adapter resolves {@code cu} via the
  * {@link LearnedUnitCostCalculator} over the settled-block history ({@link LearnedCostRepository}), so
  * the with-subtasks branch reuses the exact spike-#63 estimator rather than re-deriving it.
+ *
+ * <p><b>Which block model each statement reads.</b> The reads that decide the shape of the day — the
+ * occupancy walls and the two goal-selector signals — run against the deployed model, where a block is
+ * a {@code core_executable} of type {@code TIME_BLOCK} (ADR-039). The write path and the two derived
+ * columns that feed the learned unit-cost estimator still address the frozen {@code core_time_block}
+ * table: they are replaced, not re-pointed, by the window model and by the retirement of the focus
+ * register, and moving them now would be work thrown away.
  */
 @Repository
 class JdbcPlannerStateRepository implements PlannerStateRepository {
@@ -167,10 +174,15 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                (SELECT count(*) FROM core_executable sub
                 WHERE sub.parent_id = e.id
                   AND sub.system_generated = false)              AS total_subtasks,
+               -- Deliberately left on the frozen table: ADR-040 retires the learned unit-cost
+               -- estimator, so this column dies with the focus register instead of being re-pointed.
                COALESCE((SELECT sum(b.actual_duration_minutes) FROM core_time_block b
                 WHERE b.executable_id = e.id
                   AND b.actual_duration_minutes IS NOT NULL), 0) AS settled_actual,
                COALESCE(e.end_time, e.start_time)                AS due_instant,
+               -- Deliberately left on the frozen table too: ADR-040 makes the replan conserve the
+               -- existing plan and re-place it by template slot, and a block no longer expires
+               -- unfulfilled, so this per-executable hour seed has no successor to point at.
                -- ADR-026 D5: the start of the executable's last vencido (EXPIRED) PLANNER block, from
                -- which the reschedule derives the hour (D3). Only surfaced when NO live block remains
                -- for the executable — i.e. the task genuinely needs re-timing; a live PLANNED/ACTIVE
@@ -224,11 +236,19 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * </ul>
      * Remaining fraction is clamped to the borderline defaults: {@code (1.0]} normally; {@code 1.0}
      * when the MCI has no {@code start_date}/{@code end_date} (no temporal pressure); a small positive
-     * floor when overdue (the domain caps the resulting pace). The hysteresis flag
-     * ({@code received_block_yesterday}) and the release-valve streak ({@code degraded_days_without_block},
-     * a bounded consecutive block-less day count) come from the lead measure's recent PLANNER blocks.
-     * The reference day is the caller's {@code now} projected to the user's timezone (bound as a
-     * parameter), so the read is a pure function of the reference instant — never the DB server clock.
+     * floor when overdue (the domain caps the resulting pace). The reference day is the caller's
+     * {@code now} projected to the user's timezone (bound as a parameter), so the read is a pure
+     * function of the reference instant — never the DB server clock.
+     *
+     * <p><b>Selector signals.</b> The hysteresis flag ({@code received_block_yesterday}) and the
+     * release-valve streak ({@code degraded_days_without_block}, a bounded consecutive block-less day
+     * count) still mean exactly what they did — "did this lead measure get a Planner block", read over
+     * the recent past — but they are derived from the deployed model (ADR-039): the lead measure is
+     * held by a {@code TIME_BLOCK} executable through its own {@code container_block_id}, not by an
+     * anchor row in the frozen {@code core_time_block} table. Containment is monovalent, so the trail
+     * is the lead measure's <em>latest</em> container: that is exactly the most recent block, which is
+     * what the streak measures, while the yesterday flag turns false once a same-day replan has already
+     * re-contained the lead measure into today's block.
      */
     private static final String WIG_PORTFOLIO_SQL = """
         WITH RECURSIVE mci AS (
@@ -284,19 +304,24 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                m.end_date                                  AS end_date,
                (m.status = 'COMPLETED')                    AS completed,
                EXISTS (
-                   SELECT 1 FROM core_time_block b
-                   WHERE b.executable_id = l.lead_measure_id
+                   SELECT 1
+                   FROM core_executable lm
+                   JOIN core_executable b ON b.id = lm.container_block_id
+                   WHERE lm.id = l.lead_measure_id
+                     AND b.type = 'TIME_BLOCK'
                      AND b.origin = 'PLANNER'
-                     AND (b.date_start AT TIME ZONE ?)::date = ?::date - 1
+                     AND (b.start_time AT TIME ZONE ?)::date = ?::date - 1
                )                                           AS received_block_yesterday,
                LEAST(
                    ?,
                    COALESCE((
-                       SELECT min(?::date - (b.date_start AT TIME ZONE ?)::date) - 1
-                       FROM core_time_block b
-                       WHERE b.executable_id = l.lead_measure_id
+                       SELECT min(?::date - (b.start_time AT TIME ZONE ?)::date) - 1
+                       FROM core_executable lm
+                       JOIN core_executable b ON b.id = lm.container_block_id
+                       WHERE lm.id = l.lead_measure_id
+                         AND b.type = 'TIME_BLOCK'
                          AND b.origin = 'PLANNER'
-                         AND (b.date_start AT TIME ZONE ?)::date < ?::date
+                         AND (b.start_time AT TIME ZONE ?)::date < ?::date
                    ), ?)
                )                                           AS degraded_days_without_block
         FROM mci m
@@ -304,17 +329,40 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         LEFT JOIN lead l ON l.mci_id = m.id
         """;
 
-    /** Open/settled blocks overlapping the day — hard walls the Planner never schedules over. */
+    /**
+     * The day's real {@code TIME_BLOCK} executables — hard walls the Planner never schedules over.
+     * Reads the deployed model (ADR-039: the block IS a {@code core_executable}), not the frozen
+     * {@code core_time_block} table: blocks created from Notion or from the calendar live only here,
+     * so anchoring the walls to the frozen table left the Planner blind to them.
+     *
+     * <p><b>Which statuses wall.</b> All four of a block's lifecycle states: the open ones
+     * ({@code PLANNED}, {@code IN_PROGRESS}) because they are the plan, and the closed ones
+     * ({@code DONE}, {@code FAILED}) because a block that already ran occupied real time — its window
+     * lies in the past by construction, and the past is never rewritten. The legacy query dropped the
+     * {@code EXPIRED} state (the new {@code FAILED}) so its executable could be re-placed; under the
+     * window model the block is not re-placed — its members are, into the windows that remain — so the
+     * time it consumed stays walled.
+     *
+     * <p><b>Why {@code FOCUS} blocks do not wall.</b> A focus block is retrospective accounting of a
+     * task that is already running, not planned occupancy: its window is either degenerate (auto-opened
+     * with no {@code end_time}, hence the one-minute stub below) or entirely in the past. The occupancy
+     * it accounts for belongs to the task's own container, which already walls. {@code PLANNER} and
+     * {@code USER} blocks — the two that really hold time — both wall.
+     *
+     * <p>The end bound falls back to the settlement clock and then to a one-minute stub so an
+     * open-ended block still yields the strictly-positive interval {@link OccupiedInterval} requires.
+     */
     private static final String OCCUPIED_BLOCKS_SQL = """
-        SELECT b.executable_id,
-               b.date_start,
-               COALESCE(b.date_end, b.settled_at, b.date_start + interval '1 minute') AS date_end
-        FROM core_time_block b
-        JOIN core_executable e ON e.id = b.executable_id
-        WHERE e.user_id = ?
-          AND b.status IN ('PLANNED', 'ACTIVE', 'SETTLED')
-          AND b.date_start < ?
-          AND COALESCE(b.date_end, b.settled_at, b.date_start + interval '1 minute') > ?
+        SELECT b.id,
+               b.start_time,
+               COALESCE(b.end_time, b.last_completed_at, b.start_time + interval '1 minute') AS end_time
+        FROM core_executable b
+        WHERE b.user_id = ?
+          AND b.type = 'TIME_BLOCK'
+          AND b.status IN ('PLANNED', 'IN_PROGRESS', 'DONE', 'FAILED')
+          AND b.origin IS DISTINCT FROM 'FOCUS'
+          AND b.start_time < ?
+          AND COALESCE(b.end_time, b.last_completed_at, b.start_time + interval '1 minute') > ?
         """;
 
     /** Read-only AGENDA executable windows overlapping the day (ADR-009) — walls, never editable. */
@@ -597,11 +645,13 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     @Override
     public List<OccupiedInterval> loadOccupiedIntervals(UUID userId, OffsetDateTime dayStart,
                                                         OffsetDateTime dayEnd) {
+        // The wall is identified by the block's own executable id: since ADR-039 the block IS the
+        // executable, so there is no anchor row to point at any more.
         List<OccupiedInterval> intervals = new ArrayList<>(jdbcTemplate.query(OCCUPIED_BLOCKS_SQL,
             (rs, rowNum) -> new OccupiedInterval(
-                rs.getObject("executable_id", UUID.class),
-                rs.getObject("date_start", OffsetDateTime.class),
-                rs.getObject("date_end", OffsetDateTime.class),
+                rs.getObject("id", UUID.class),
+                rs.getObject("start_time", OffsetDateTime.class),
+                rs.getObject("end_time", OffsetDateTime.class),
                 false),
             userId, dayEnd, dayStart));
 

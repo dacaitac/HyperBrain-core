@@ -24,7 +24,8 @@ import java.util.List;
  *       <b>every member</b> of the block, not only its anchor (ADR-027 D1);</li>
  *   <li>no block may fall outside the sleep frontier {@code [wake, bedtime]} (ADR-013 D2);</li>
  *   <li>no block may overlap a read-only AGENDA window (ADR-009);</li>
- *   <li>no block may overlap an occupied/SETTLED block or a previously accepted block;</li>
+ *   <li>no block may overlap an occupied wall — the window of an existing time block, whatever its
+ *       lifecycle state — or a previously accepted block;</li>
  *   <li>high-load blocks beyond the F6 quota are rejected — <b>except the WIG</b>, which F1 makes
  *       intocable (energy never trims it).</li>
  * </ol>

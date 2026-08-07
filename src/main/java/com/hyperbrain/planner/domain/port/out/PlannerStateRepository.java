@@ -85,8 +85,9 @@ public interface PlannerStateRepository {
      * carrying its lead measure to reserve (or none, when the MCI has no {@code LEAD_MEASURE}), its
      * {@code estimated_minutes}-weighted aggregated progress, its remaining-window fraction (already
      * clamped to the borderline defaults), the completed flag, and the hysteresis/release-valve history
-     * (whether its lead measure held a planner block yesterday, and its recent block-less streak). The
-     * required-pace ordering and the reservation policy live in {@code WigPortfolioSelector}.
+     * (whether its lead measure was held by a planner {@code TIME_BLOCK} yesterday, and its recent
+     * block-less streak). The required-pace ordering and the reservation policy live in
+     * {@code WigPortfolioSelector}.
      *
      * @param userId the owning user
      * @param now    the reference instant used to compute the remaining-window fraction and history
@@ -95,8 +96,9 @@ public interface PlannerStateRepository {
     List<MciWig> loadWigPortfolio(UUID userId, OffsetDateTime now);
 
     /**
-     * Reads the hard walls to plan around: existing open/settled {@code core_time_block} windows and
-     * read-only AGENDA executable windows (ADR-009) that intersect the planning day.
+     * Reads the hard walls to plan around: the windows of the existing {@code TIME_BLOCK} executables
+     * that hold time (ADR-039 — every lifecycle state except the {@code FOCUS}-origin accounting rows)
+     * and the read-only AGENDA executable windows (ADR-009) that intersect the planning day.
      *
      * @param userId    the owning user
      * @param dayStart  the planning window lower bound
