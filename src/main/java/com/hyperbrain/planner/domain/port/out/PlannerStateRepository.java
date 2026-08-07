@@ -18,10 +18,11 @@ import java.util.UUID;
 
 /**
  * Out-port through which the deterministic agenda floor (#6a) reads the day's domain state directly
- * from the aggregates ({@code core_executable}, {@code core_time_block}, {@code core_cycle},
- * {@code tel_sleep_record}, {@code sys_user.settings}) and persists the resulting {@code PLANNED}
- * blocks. The floor does <b>not</b> consume the UserStateReadModel (#61) — that is the LLM tier's
- * contract (#6b), not the floor's (Daniel, 2026-07-09).
+ * from the aggregates ({@code core_executable}, {@code core_cycle}, {@code tel_sleep_record},
+ * {@code sys_user.settings}) and persists the resulting {@code PLANNED} blocks — which since ADR-039
+ * are {@code core_executable} rows of type {@code TIME_BLOCK}, not rows of the frozen
+ * {@code core_time_block} table. The floor does <b>not</b> consume the UserStateReadModel
+ * (#61) — that is the LLM tier's contract (#6b), not the floor's (Daniel, 2026-07-09).
  *
  * <p>The implementation lives in {@code planner.infrastructure} (JDBC), keeping the domain services
  * free of persistence. All reads are per user and, where relevant, anchored to the target day and the

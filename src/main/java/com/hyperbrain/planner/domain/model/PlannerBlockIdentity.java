@@ -14,7 +14,7 @@ import java.util.function.Supplier;
 /**
  * Reconciles the <b>identity</b> of a day's {@code PLANNER} blocks across a regeneration (a full-day
  * run or a replan): every desired block is paired either with the id of the persisted block it
- * continues — so the block keeps its {@code core_time_block.id} and therefore its
+ * continues — so the block keeps its {@code core_executable.id} and therefore its
  * {@code sync_mapping} / EKEvent, and the write-back emits an {@code UPDATE} instead of a duplicate
  * {@code CREATE} (#15) — or with a freshly minted surrogate id when it is genuinely new. Persisted
  * blocks that no desired block continues are reported as removed so their Apple counterpart is
@@ -87,7 +87,7 @@ public final class PlannerBlockIdentity {
     }
 
     /**
-     * A generated block paired with the {@code core_time_block.id} it must be persisted under.
+     * A generated block paired with the block executable id it must be persisted under.
      *
      * @param blockId   the block identity: the id of the block it continues, or a fresh surrogate;
      *                  never null
