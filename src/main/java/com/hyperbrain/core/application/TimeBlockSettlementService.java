@@ -2,6 +2,7 @@ package com.hyperbrain.core.application;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.application.event.TimeBlockSettledPayload;
 import com.hyperbrain.core.domain.model.TimeBlockExecutable;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
@@ -26,6 +27,11 @@ import java.util.UUID;
  * rule (inside the ingestion transaction) and the expiry scheduler (own transaction); since
  * ADR-040 D4 both settle a block as {@code DONE}. Settlement is race-safe: the conditional UPDATE
  * plus {@code FOR UPDATE SKIP LOCKED} on the expiry path guarantee a block settles exactly once.
+ *
+ * <p>A settlement stages <b>two</b> outbox rows, and they are not redundant: the settlement event
+ * itself (plan vs reality, for consumers of {@code core-events}) and the executable notification
+ * that makes the block's mirrors show it closed — the settlement event reaches no propagator on its
+ * own. See {@link #stageSatelliteMirror}.
  */
 @Service
 public class TimeBlockSettlementService {
@@ -119,9 +125,50 @@ public class TimeBlockSettlementService {
                 block.startTime(), block.endTime(), block.plannedMinutes(),
                 actualDurationMinutes, imputed)),
             SOURCE_SYSTEM, settledAt));
+        stageSatelliteMirror(block, finalStatus);
         log.info("Block {} settled as {} (actual {} min, {} subtasks imputed)",
             block.id(), finalStatus, actualDurationMinutes, imputed);
         return true;
+    }
+
+    /**
+     * Stages the satellite notification of a settled block, so its mirrors stop showing it as open.
+     *
+     * <p><b>Why a second event.</b> {@code TimeBlockSettledEvent} carries the aggregate
+     * {@code CORE_TIME_BLOCK}, which <b>no propagator writes</b>: the Apple and Notion propagators
+     * only accept the {@code EXECUTABLE} classification, and the planner's block propagator — the
+     * one that does accept {@code TIME_BLOCK} — drops any event that is not a
+     * {@code TimeBlockChangedEvent}. The consequence was silent and permanent: a block's Notion
+     * page kept reading "Not started" forever. Since ADR-039 the block IS a {@code core_executable},
+     * so the standard notification is all its mirrors need — the Apple propagator already has the
+     * rule that keeps a settled block's calendar event alive instead of deleting it on completion,
+     * and the destination calendar stays type-routed ("Trabajo"), never the activities one.
+     *
+     * <p><b>No double delivery.</b> The two events are disjoint by classification: the settlement
+     * event resolves to {@code TIME_BLOCK} and this one to {@code EXECUTABLE}, so no propagator ever
+     * sees both. The old event is left untouched — it still reaches {@code core-events} for external
+     * consumers — and its retirement belongs to the units that prune the duplicate delivery channel
+     * and dismantle the focus record.
+     *
+     * <p><b>No reopening by echo.</b> A block mirrors as a calendar event, and the inbound merge of
+     * a calendar event preserves the domain status (EventKit has no completed flag), so Apple cannot
+     * reopen it. On the Notion side the closed projection ({@code Status=Done} + {@code Complete})
+     * is exactly what the loss-aware merge reads back as an echo, keeping the status untouched.
+     *
+     * <p><b>FOCUS blocks are excluded.</b> They are internal accounting that is never mirrored, and
+     * they hold no satellite mapping — notifying one would not update an entity, it would CREATE a
+     * spurious calendar event for a block the user never asked for.
+     *
+     * <p>Idempotent by construction: this runs only on the branch where the conditional settle
+     * actually closed the block, so settling twice emits once.
+     */
+    private void stageSatelliteMirror(TimeBlockExecutable block, String finalStatus) {
+        if (TimeBlockExecutable.ORIGIN_FOCUS.equals(block.origin())) {
+            log.debug("Block {} is FOCUS accounting; settlement as {} is not mirrored",
+                block.id(), finalStatus);
+            return;
+        }
+        outboxRepo.append(ExecutableOutboxEvents.updated(block.id()));
     }
 
     private String toJson(TimeBlockSettledPayload payload) {

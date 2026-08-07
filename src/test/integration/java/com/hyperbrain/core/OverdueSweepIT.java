@@ -234,6 +234,24 @@ class OverdueSweepIT {
         // A container of time that elapsed is not an achievement: no streak was extended.
         assertThat(intColumn(block, "current_streak")).isZero();
         assertThat(intColumn(block, "best_streak")).isZero();
+        // The settlement notifies the mirrors, so the block stops reading "not started" forever.
+        assertThat(updateEventsFor(block)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("settling the same block twice notifies the satellites once")
+    void settling_twice_notifies_once() {
+        UUID block = insert("Block", "TIME_BLOCK", "PLANNED",
+            YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
+        OffsetDateTime after = YESTERDAY_AFTERNOON.plusHours(3);
+
+        settlementService.expireDueBlocks(after);
+        settlementService.expireDueBlocks(after);
+
+        assertThat(updateEventsFor(block)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject("""
+            SELECT count(*) FROM outbox_events WHERE event_type = 'TimeBlockSettledEvent'
+            """, Integer.class)).isEqualTo(1);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
