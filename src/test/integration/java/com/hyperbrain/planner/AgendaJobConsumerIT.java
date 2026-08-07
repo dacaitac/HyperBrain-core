@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.application.AgendaDeliveryService;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,6 +60,7 @@ class AgendaJobConsumerIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM planner_agenda_materialization");
         jdbcTemplate.update("DELETE FROM processed_message");
@@ -170,7 +172,7 @@ class AgendaJobConsumerIT {
 
     private int countPlannedBlocks() {
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE status = 'PLANNED' AND origin = 'PLANNER'",
+            "SELECT count(*) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             Integer.class);
         return count == null ? 0 : count;
     }

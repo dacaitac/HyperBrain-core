@@ -53,6 +53,7 @@ class AgendaGenerationServiceTest {
     void setUp() {
         service = spy(new AgendaGenerationService(
             mock(PlannerStateRepository.class),
+            mock(PlannerBlockMaterializer.class),
             mock(SleepFrontierCalculator.class),
             mock(EnergyResolver.class),
             mock(PlanningWindowResolver.class),

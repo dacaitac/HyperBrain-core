@@ -143,6 +143,22 @@ public class CoreExecutableContainmentService implements ExecutableContainmentSe
         return released;
     }
 
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean withdrawBlock(UUID blockId, ZoneId zone) {
+        List<UUID> released = releaseMembers(blockId, ReleaseCause.PLANNER_WITHDRAWAL, zone);
+        if (!stateRepo.deleteWithdrawnBlock(blockId)) {
+            log.warn("Block {} was not withdrawn: a guard held it back — it carries history, it has "
+                + "already started, or something still points at it. It stays in the day (released {} "
+                + "member(s) first)", blockId, released.size());
+            return false;
+        }
+        outboxRepo.append(ExecutableOutboxEvents.deleted(blockId));
+        log.info("Block {} withdrawn from the plan after releasing {} member(s)",
+            blockId, released.size());
+        return true;
+    }
+
     /**
      * Returns a released member's date to the midnight placeholder of the day it already stood on
      * (ADR-040 D10, planner withdrawal): the day survives, the hour dies. A member with no date is

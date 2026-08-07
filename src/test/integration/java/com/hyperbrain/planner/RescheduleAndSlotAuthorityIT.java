@@ -1,6 +1,5 @@
 package com.hyperbrain.planner;
 
-import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.support.DataFixture;
@@ -27,10 +26,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       executable's {@code rescheduleSeed}, the wall-clock hour of its last {@code EXPIRED} PLANNER
  *       block projected onto the target day (ADR-026 D3) — and only when no live block remains, so a
  *       still-placed task keeps the Planner's full authorship (D4).</li>
- *   <li><b>D6 — slot authority / user override.</b> A user's time edit, captured as a {@code USER}-origin
- *       block (ADR-018), is <b>not overwritten by the next replan</b>: the reconciliation is scoped to
- *       {@code PLANNER}-origin rows, so the {@code USER} block and its live membership survive untouched
- *       while the planner block for the same task is skipped rather than stealing the slot.</li>
+ *   <li><b>D6 — slot authority / user override.</b> Work the user timed by hand — held by a
+ *       {@code USER}-origin block, or by one already under way — is not even offered to the floor, so a
+ *       replan cannot quietly pull it out of the block the user put it in. Containment being monovalent
+ *       (ADR-039), that guard has to live in the admission, not in the persistence: by the time a block
+ *       is written the move has already happened.</li>
  * </ul>
  */
 @IntegrationTest
@@ -111,35 +111,37 @@ class RescheduleAndSlotAuthorityIT {
     }
 
     @Test
-    @DisplayName("D6: a user's time-edit (USER-origin block) survives the next replan — it is never overwritten")
-    void user_override_is_not_overwritten_by_the_replan() {
+    @DisplayName("D6: work the user timed by hand is not even a candidate — your authority outlives the replan")
+    void user_override_is_not_a_planner_candidate() {
         UUID task = insertTask("User-timed task");
-        // The user moved the block to 15:00; this is captured as a USER-origin live block (ADR-018)
-        // with its live membership on the bridge table.
-        UUID userBlock = insertRawBlock(task, at(2026, 7, 10, 15), at(2026, 7, 10, 16), "PLANNED", "USER");
-        insertMember(userBlock, task);
+        // The user moved the task to 15:00; on the deployed model that is a USER-origin TIME_BLOCK
+        // executable holding it through container_block_id (ADR-039).
+        UUID userBlock = insertUserBlock(at(2026, 7, 10, 15), at(2026, 7, 10, 16));
+        contain(userBlock, task);
 
-        // The next replan wants the same task at 09:00.
-        List<UUID> removed = repository.reconcilePlannedBlocks(USER, TARGET, ZONE,
-            List.of(new AgendaBlock(task, at(2026, 7, 10, 9), at(2026, 7, 10, 10), false, false,
-                "Ranked by priority")));
+        List<SchedulableExecutable> ranked =
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
 
-        // The USER block is untouched: same id, same 15:00 window, still USER/PLANNED.
-        assertThat(removed).doesNotContain(userBlock);
+        // The task never reaches the floor, so no plan can quietly pull it out of the block the user
+        // put it in. Containment is monovalent: had it been offered, placing it WOULD have moved it.
+        assertThat(ranked).isEmpty();
         assertThat(jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE id = ?", OffsetDateTime.class, userBlock))
-            .isEqualTo(at(2026, 7, 10, 15));
-        assertThat(jdbcTemplate.queryForObject(
-            "SELECT origin FROM core_time_block WHERE id = ?", String.class, userBlock))
-            .isEqualTo("USER");
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, task))
+            .isEqualTo(userBlock);
+    }
 
-        // The task's single live membership is still on the USER block — the planner projection did not
-        // steal the slot (the conflicting bridge row was skipped, D5 index honoured).
-        List<UUID> liveHosts = jdbcTemplate.queryForList("""
-            SELECT block_id FROM core_time_block_member
-            WHERE executable_id = ? AND block_status IN ('PLANNED', 'ACTIVE')
-            """, UUID.class, task);
-        assertThat(liveHosts).containsExactly(userBlock);
+    @Test
+    @DisplayName("D6: work held by the planner's own still-planned block stays a candidate — that is what a replan re-places")
+    void planner_held_work_remains_a_candidate() {
+        UUID task = insertTask("Planner-timed task");
+        UUID plannerBlock = insertPlannerBlock(at(2026, 7, 10, 9), at(2026, 7, 10, 10));
+        contain(plannerBlock, task);
+
+        List<SchedulableExecutable> ranked =
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
+
+        assertThat(ranked).singleElement().satisfies(executable ->
+            assertThat(executable.id()).isEqualTo(task));
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -175,10 +177,27 @@ class RescheduleAndSlotAuthorityIT {
         return id;
     }
 
-    private void insertMember(UUID blockId, UUID executableId) {
+    private UUID insertUserBlock(OffsetDateTime start, OffsetDateTime end) {
+        return insertBlockExecutable("USER", start, end);
+    }
+
+    private UUID insertPlannerBlock(OffsetDateTime start, OffsetDateTime end) {
+        return insertBlockExecutable("PLANNER", start, end);
+    }
+
+    private UUID insertBlockExecutable(String origin, OffsetDateTime start, OffsetDateTime end) {
+        UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_time_block_member (block_id, executable_id, planned_minutes, ord)
-            VALUES (?, ?, 60, 0)
-            """, blockId, executableId);
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time)
+            VALUES (?, ?, ?, 'TIME_BLOCK', 'PLANNED', ?, ?, ?)
+            """, id, USER, origin + " block", origin, start, end);
+        return id;
+    }
+
+    private void contain(UUID blockId, UUID memberId) {
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            blockId, memberId);
     }
 }

@@ -3,6 +3,7 @@ package com.hyperbrain.planner;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,6 +67,7 @@ class UserCommandConsumerIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
         jdbcTemplate.update("DELETE FROM processed_message");
@@ -368,14 +370,14 @@ class UserCommandConsumerIT {
 
     private int countPlannedBlocks() {
         Integer count = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE status = 'PLANNED' AND origin = 'PLANNER'",
+            "SELECT count(*) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             Integer.class);
         return count == null ? 0 : count;
     }
 
     private OffsetDateTime earliestBlockStart() {
         return jdbcTemplate.queryForObject(
-            "SELECT min(date_start) FROM core_time_block WHERE status = 'PLANNED' AND origin = 'PLANNER'",
+            "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
     }
 

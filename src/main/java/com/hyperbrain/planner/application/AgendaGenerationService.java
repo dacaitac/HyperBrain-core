@@ -13,6 +13,7 @@ import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MciWig;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlanningWindow;
 import com.hyperbrain.planner.domain.model.PlannerDayState;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
@@ -72,6 +73,7 @@ public class AgendaGenerationService {
     private static final String SOURCE_SYSTEM = "SYSTEM";
 
     private final PlannerStateRepository repository;
+    private final PlannerBlockMaterializer blockMaterializer;
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final EnergyResolver energyResolver;
     private final PlanningWindowResolver planningWindowResolver;
@@ -86,6 +88,7 @@ public class AgendaGenerationService {
 
     AgendaGenerationService(
         PlannerStateRepository repository,
+        PlannerBlockMaterializer blockMaterializer,
         SleepFrontierCalculator sleepFrontierCalculator,
         EnergyResolver energyResolver,
         PlanningWindowResolver planningWindowResolver,
@@ -98,6 +101,7 @@ public class AgendaGenerationService {
         ObjectMapper objectMapper,
         ObjectProvider<AgendaProposer> agendaProposerProvider) {
         this.repository = repository;
+        this.blockMaterializer = blockMaterializer;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
         this.planningWindowResolver = planningWindowResolver;
@@ -437,12 +441,10 @@ public class AgendaGenerationService {
             }
         }
 
-        // Identity-stable reconciliation (#15): a regeneration keeps a surviving block's id (so its
-        // Apple EKEvent is UPDATED, not duplicated), inserts genuinely new blocks, and reports the
-        // blocks that dropped out so their EKEvents are deleted — all in the same transaction as the
-        // write-back staging, so the plan and its delivery are atomic.
+        // Identity, withdrawal and containment all live in the materializer, where ADR-040 D10's
+        // order-of-operations invariant is readable in one place.
         List<UUID> removedBlockIds =
-            repository.reconcilePlannedBlocks(userId, targetDay, zone, validated.accepted());
+            blockMaterializer.materialize(userId, targetDay, zone, validated.accepted());
 
         if (!validated.accepted().isEmpty() || !removedBlockIds.isEmpty()) {
             stageAgendaBlockDelivery(
@@ -542,47 +544,34 @@ public class AgendaGenerationService {
     }
 
     /**
-     * The occupancy minus the run's own regenerable blocks (same-day {@code PLANNER}/{@code PLANNED}).
-     * A prior materialization persists those blocks and they are re-read as occupied walls; both the
-     * generator and the idempotency hash must exclude them — the generator so a replan can re-place its
-     * own tasks instead of walling itself out, and the hash so a redelivery of the same input digests
-     * identically (folding in the run's own output would re-materialize on every redelivery). Existing
-     * Every other wall is preserved: the read-only AGENDA windows and the {@code TIME_BLOCK}
-     * executables that hold time — {@code USER} blocks and blocks already closed ({@code DONE},
-     * {@code FAILED}) among them; {@code FOCUS}-origin rows never wall in the first place.
+     * The occupancy minus the run's own regenerable blocks (the day's planner-authored, still-planned
+     * {@code TIME_BLOCK} executables). A prior materialization persists those blocks and they are
+     * re-read as occupied walls; both the generator and the idempotency hash must exclude them — the
+     * generator so a replan can re-place its own work instead of walling itself out, and the hash so a
+     * redelivery of the same input digests identically (folding in the run's own output would
+     * re-materialize on every redelivery). Every other wall stands: the read-only AGENDA windows and
+     * the {@code TIME_BLOCK} executables that genuinely hold time — {@code USER} blocks and blocks
+     * already closed among them.
      *
-     * <p><b>Inert by construction until the window model lands (ADR-040 step 3).</b> The two sides of
-     * this subtraction read <em>different</em> block models, so their keys can never meet: the
-     * regenerable set comes from the frozen {@code core_time_block} table and is keyed by each
-     * <b>member's</b> executable id, while the walls now come from {@code core_executable} and are
-     * keyed by the <b>block's own</b> id (ADR-039 — the block IS the executable). A TIME_BLOCK
-     * executable is never a member of a frozen planner block, so no wall is ever subtracted here today.
-     * That is harmless only because the Planner's switches are off <em>and</em> it still writes the
-     * frozen table; the migrated production blocks that already live in {@code core_executable} with
-     * {@code origin = 'PLANNER'} do wall, and this method cannot free them. <b>Both sides must move in
-     * the same commit</b> when step 3 makes the Planner write {@code TIME_BLOCK} executables —
-     * re-pointing the write path without re-pointing this subtraction re-opens the bug it exists to
-     * prevent (a replan walls itself out of today and pushes everything to tomorrow).
+     * <p><b>Both sides of this subtraction now read the same model, and that is the point.</b> Between
+     * ADR-040's step 1 and this one the subtraction was inert by construction: the walls came from
+     * {@code core_executable} keyed by the block's own id, while the regenerable set still came from
+     * the frozen table keyed by each member's id — two key spaces that designate different entities and
+     * can never meet. Re-pointing the write path without re-pointing this read would have re-opened the
+     * exact bug it exists to prevent: a replan walls itself out of today and pushes the whole day onto
+     * tomorrow. The subtraction is by <b>block id</b>, which is now the only key either side speaks.
      */
     private List<OccupiedInterval> withoutRegenerable(UUID userId, LocalDate targetDay, ZoneId zone,
                                                       List<OccupiedInterval> occupied) {
-        // Keyed by every member (ADR-027 D1), not only the anchor: the occupancy read exposes a block
-        // through its anchor today, but a themed container must drop its whole membership from the
-        // walls so a replan can re-place any of its executables.
-        Set<String> regenerable = repository.loadPlannedBlocksForDay(userId, targetDay, zone).stream()
-            .flatMap(block -> block.members().stream()
-                .map(member -> wallKey(member.executableId(), block.start(), block.end())))
+        Set<UUID> regenerable = repository.loadRegenerableBlocks(userId, targetDay, zone).stream()
+            .map(PlannerBlockIdentity.PersistedBlock::blockId)
             .collect(Collectors.toSet());
         if (regenerable.isEmpty()) {
             return occupied;
         }
         return occupied.stream()
-            .filter(wall -> !regenerable.contains(wallKey(wall.executableId(), wall.start(), wall.end())))
+            .filter(wall -> !regenerable.contains(wall.executableId()))
             .toList();
-    }
-
-    private static String wallKey(UUID executableId, OffsetDateTime start, OffsetDateTime end) {
-        return executableId + "|" + start + "|" + end;
     }
 
     private static Set<UUID> readOnlyAgendaIds(List<OccupiedInterval> occupied) {

@@ -8,6 +8,7 @@ import com.hyperbrain.cognitive.domain.model.LlmPrompt;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.application.AgendaGenerationService;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -51,6 +52,7 @@ class AgendaProposalCycleIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
         jdbcTemplate.update("DELETE FROM core_execution_profile");
@@ -78,7 +80,7 @@ class AgendaProposalCycleIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         List<String> reasons = jdbcTemplate.queryForList(
-            "SELECT reason FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            "SELECT reason FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             String.class);
         assertThat(reasons).hasSize(2).allMatch(COACH_NOTE::equals);
     }
@@ -93,7 +95,7 @@ class AgendaProposalCycleIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         List<String> reasons = jdbcTemplate.queryForList(
-            "SELECT reason FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            "SELECT reason FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
             String.class);
         // The floor still planned both tasks; none carries the (never-applied) coach note.
         assertThat(reasons).hasSize(2).noneMatch(COACH_NOTE::equals);
@@ -110,7 +112,7 @@ class AgendaProposalCycleIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         Integer wigBlocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE executable_id = ?", Integer.class, wig);
+            "SELECT count(*) FROM planner_blocks WHERE executable_id = ?", Integer.class, wig);
         assertThat(wigBlocks).isEqualTo(1); // DEGRADED to the floor, which reserves the WIG
     }
 
@@ -160,7 +162,7 @@ class AgendaProposalCycleIT {
     private int localDayCount(java.time.ZoneId zone, int year, int month, int day) {
         OffsetDateTime start = java.time.LocalDate.of(year, month, day).atStartOfDay(zone).toOffsetDateTime();
         Integer n = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED' "
                 + "AND date_start >= ? AND date_start < ?", Integer.class, start, start.plusDays(1));
         return n == null ? 0 : n;
     }
@@ -179,10 +181,10 @@ class AgendaProposalCycleIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         List<OffsetDateTime> starts = jdbcTemplate.queryForList(
-            "SELECT date_start FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
+            "SELECT date_start FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED' "
                 + "ORDER BY date_start", OffsetDateTime.class);
         List<OffsetDateTime> ends = jdbcTemplate.queryForList(
-            "SELECT date_end FROM core_time_block WHERE origin = 'PLANNER' AND status = 'PLANNED' "
+            "SELECT date_end FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED' "
                 + "ORDER BY date_start", OffsetDateTime.class);
         // Both blocks survive at their overlapping windows — nothing was stripped.
         assertThat(starts).containsExactly(
@@ -206,7 +208,7 @@ class AgendaProposalCycleIT {
         service.generate(USER, DAY, UTC, NOON, false);
 
         OffsetDateTime blockStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM core_time_block WHERE executable_id = ?", OffsetDateTime.class, task);
+            "SELECT date_start FROM planner_blocks WHERE executable_id = ?", OffsetDateTime.class, task);
         assertThat(blockStart).isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
     }
 

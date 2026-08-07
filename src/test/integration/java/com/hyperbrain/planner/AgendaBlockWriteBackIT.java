@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
+import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,6 +46,7 @@ class AgendaBlockWriteBackIT {
 
     @BeforeEach
     void cleanState() throws Exception {
+        PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM sync_write_commands");
         jdbcTemplate.update("DELETE FROM sync_mappings");
@@ -77,7 +79,10 @@ class AgendaBlockWriteBackIT {
         assertThat(command.path("operation").asText()).isEqualTo("CREATED");
 
         JsonNode payload = command.path("payload");
-        assertThat(payload.path("title").asText()).isEqualTo("Deep work");
+        // Since ADR-039 the block is an executable with a name of its own: the calendar event is
+        // titled after the BLOCK, not after the work it holds (ADR-040 D7 — the name is free and the
+        // LLM owns it, while identity is anchored to the template slot).
+        assertThat(payload.path("title").asText()).isEqualTo("Focus window");
         // The block's temporal span is preserved: start + end, no due_date.
         assertThat(payload.path("start_time").asText()).startsWith("2026-07-10T09:00:00");
         assertThat(payload.path("end_time").asText()).startsWith("2026-07-10T10:00:00");
@@ -123,9 +128,13 @@ class AgendaBlockWriteBackIT {
     private UUID insertPlannedBlock(UUID executableId, String reason) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_time_block (id, executable_id, date_start, date_end, status, origin, reason)
-            VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?)
-            """, id, executableId, BLOCK_START, BLOCK_END, reason);
+            INSERT INTO core_executable
+                (id, user_id, name, description, type, status, origin, start_time, end_time)
+            VALUES (?, ?, 'Focus window', ?, 'TIME_BLOCK', 'PLANNED', 'PLANNER', ?, ?)
+            """, id, USER, reason, BLOCK_START, BLOCK_END);
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            id, executableId);
         return id;
     }
 

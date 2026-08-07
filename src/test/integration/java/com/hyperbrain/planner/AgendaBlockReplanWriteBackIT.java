@@ -3,7 +3,7 @@ package com.hyperbrain.planner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
-import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.planner.application.PlannerBlockMaterializer;
 import com.hyperbrain.shared.outbox.OutboxWorker;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
@@ -15,6 +15,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.messaging.Message;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -50,7 +51,8 @@ class AgendaBlockReplanWriteBackIT {
     private static final OffsetDateTime NOON = OffsetDateTime.of(2026, 7, 10, 12, 0, 0, 0, UTC);
 
     @Autowired private OutboxWorker outboxWorker;
-    @Autowired private PlannerStateRepository plannerStateRepository;
+    @Autowired private PlannerBlockMaterializer blockMaterializer;
+    @Autowired private TransactionTemplate transactionTemplate;
     @Autowired private SqsTemplate sqsTemplate;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private ObjectMapper objectMapper;
@@ -101,15 +103,13 @@ class AgendaBlockReplanWriteBackIT {
         UUID anchor = insertExecutable("Deep work");
         UUID leaving = insertExecutable("Leaving the theme");
         UUID joining = insertExecutable("Joining the theme");
-        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC,
-            List.of(themedBlock(anchor, List.of(leaving))));
+        materialize(List.of(themedBlock(anchor, List.of(leaving))));
         UUID blockId = plannerBlockId();
         String eventId = "EKEvent-" + UUID.randomUUID();
         insertBlockMapping(blockId, eventId);
 
         // When a replan swaps a member out for another one
-        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC,
-            List.of(themedBlock(anchor, List.of(joining))));
+        materialize(List.of(themedBlock(anchor, List.of(joining))));
         insertAgendaBlockEvent(List.of());
         outboxWorker.drainBatch();
 
@@ -127,7 +127,7 @@ class AgendaBlockReplanWriteBackIT {
     void themed_container_is_titled_by_theme_and_lists_members() throws Exception {
         UUID anchor = insertExecutable("Write the report");
         UUID companion = insertExecutable("Review PRs");
-        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC, List.of(
+        materialize(List.of(
             new AgendaBlock(anchor, BLOCK_START, BLOCK_END, false, false, "Ranked by priority",
                 List.of(companion), "Deep work morning")));
         insertAgendaBlockEvent(List.of());
@@ -149,18 +149,21 @@ class AgendaBlockReplanWriteBackIT {
     }
 
     @Test
-    @DisplayName("a themeless single-executable block keeps the anchor's name as title, with no member list")
-    void themeless_block_keeps_the_anchor_name() throws Exception {
+    @DisplayName("a themeless block is titled with its own slot label — the block has a name of its own")
+    void themeless_block_carries_its_own_name() throws Exception {
         UUID anchor = insertExecutable("Write the report");
-        plannerStateRepository.reconcilePlannedBlocks(USER, DAY, UTC,
+        materialize(
             List.of(new AgendaBlock(anchor, BLOCK_START, BLOCK_END, false, false, "Ranked by priority")));
         insertAgendaBlockEvent(List.of());
 
         outboxWorker.drainBatch();
 
-        // The deterministic floor leaves the theme null: the calendar reads exactly as before ADR-027.
+        // The deterministic floor leaves the theme null, and since ADR-039 the block is an executable
+        // with a name of its own, so it no longer borrows the member's title. The LLM renames it later
+        // (ADR-040 D5/D6) without ever touching the member's canonical title.
         JsonNode command = objectMapper.readTree(receiveOne(COMMANDS_QUEUE).orElseThrow().getPayload());
-        assertThat(command.path("payload").path("title").asText()).isEqualTo("Write the report");
+        assertThat(command.path("payload").path("title").asText())
+            .isEqualTo(PlannerBlockMaterializer.DEFAULT_BLOCK_NAME);
         assertThat(command.path("payload").path("notes").asText())
             .doesNotContain("In this block:")
             .startsWith("Ranked by priority");
@@ -256,9 +259,16 @@ class AgendaBlockReplanWriteBackIT {
             "Reserved as the WIG lead measure", additionalMembers);
     }
 
+    /** Runs the materializer inside a transaction: core's containment operation is MANDATORY. */
+    private void materialize(List<AgendaBlock> blocks) {
+        transactionTemplate.executeWithoutResult(status ->
+            blockMaterializer.materialize(USER, DAY, UTC, blocks));
+    }
+
     private UUID plannerBlockId() {
         return jdbcTemplate.queryForObject(
-            "SELECT id FROM core_time_block WHERE origin = 'PLANNER'", UUID.class);
+            "SELECT id FROM core_executable WHERE type = 'TIME_BLOCK' AND origin = 'PLANNER'",
+            UUID.class);
     }
 
     private UUID insertExecutable(String name) {
@@ -270,12 +280,17 @@ class AgendaBlockReplanWriteBackIT {
         return id;
     }
 
-    private UUID insertPlannedBlock(UUID executableId, String reason) {
+    /** A planner block on the deployed model (ADR-039): the block IS a TIME_BLOCK executable. */
+    private UUID insertPlannedBlock(UUID memberId, String reason) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_time_block (id, executable_id, date_start, date_end, status, origin, reason)
-            VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?)
-            """, id, executableId, BLOCK_START, BLOCK_END, reason);
+            INSERT INTO core_executable
+                (id, user_id, name, description, type, status, origin, start_time, end_time)
+            VALUES (?, ?, ?, ?, 'TIME_BLOCK', 'PLANNED', 'PLANNER', ?, ?)
+            """, id, USER, "Focus window", reason, BLOCK_START, BLOCK_END);
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            id, memberId);
         return id;
     }
 

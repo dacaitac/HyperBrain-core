@@ -68,4 +68,24 @@ public interface ExecutableContainmentService {
      * @return the ids of the members this call actually released; never null, may be empty
      */
     List<UUID> releaseMembers(UUID blockId, ReleaseCause cause, ZoneId zone);
+
+    /**
+     * Withdraws a block the plan no longer wants — the whole of ADR-040 D10 as <b>one</b> procedure, in
+     * this order: let every member go with its own event, and only then delete, with every guard inside
+     * the delete predicate (planner-authored, still planned, no history hanging off it).
+     *
+     * <p><b>Why it lives here and not in the Planner.</b> The order is the invariant. Splitting it in
+     * two — the Planner releasing and then deleting through its own adapter — would put a
+     * publicly-reachable delete next to a release nothing forces you to call first, which is exactly
+     * the shape that produced the silent mirror corruption in the first place. The Planner authors the
+     * block row; core owns letting it go.
+     *
+     * <p>A block a guard held back is <b>a notice, not a failure</b>: it earned a history and stays.
+     * The caller is told so and simply keeps it in the day.
+     *
+     * @param blockId the block to withdraw; never null
+     * @param zone    the timezone the released members' midnight placeholder is resolved in; never null
+     * @return true when the block was actually deleted (and its deletion announced to the satellites)
+     */
+    boolean withdrawBlock(UUID blockId, ZoneId zone);
 }

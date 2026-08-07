@@ -29,10 +29,16 @@ import java.util.function.Supplier;
  * membership; continuity is re-established by <b>anchoring</b>:
  *
  * <ol>
+ *   <li><b>Slot pass (ADR-040 D7).</b> A desired block continues the persisted block that realises the
+ *       <em>same template slot</em>. It runs first, and it is the one that carries the weight: a block
+ *       displaced by a hard commitment no longer sits on its original hours, and a block the LLM
+ *       renamed is no longer recognisable by its title — but its band of the day has not moved. The
+ *       slot is derived from the template and never from the name, the user or the membership, which
+ *       is exactly why membership churn cannot regenerate the id.</li>
  *   <li><b>Anchor pass.</b> A desired block continues the persisted block that already holds its
- *       <em>anchor</em> member ({@link AgendaBlock#executableId()}). The D5 invariant (≤ 1 live block
- *       per executable per day, enforced by a unique index on {@code core_time_block_member}) makes
- *       that persisted block unique, so the match is unambiguous.</li>
+ *       <em>anchor</em> member ({@link AgendaBlock#executableId()}). Containment is monovalent, so
+ *       that persisted block is unique and the match is unambiguous. This is the pass that carries a
+ *       block belonging to no template slot at all.</li>
  *   <li><b>Shared-membership pass.</b> A desired block whose anchor is new continues the persisted
  *       block it shares the most members with — this is what keeps the id stable when the anchor
  *       itself rotates out of the theme. Ties are broken by the longest temporal overlap, then by the
@@ -56,25 +62,27 @@ public final class PlannerBlockIdentity {
     /**
      * A {@code PLANNER} block already persisted for the day — the reconciliation universe.
      *
-     * @param blockId the persisted {@code core_time_block.id}; never null
-     * @param members the executables the block currently holds (anchor included); never null nor empty
-     * @param start   the persisted block start; never null
-     * @param end     the persisted block end; never null
+     * @param blockId        the persisted block executable's id; never null
+     * @param templateSlotId the template slot the block realises; null when it comes from no template
+     * @param members        the executables the block currently holds; never null, <b>may be empty</b>
+     *                       — under the window model a window is laid before anything is put in it, and
+     *                       an empty one is still the same block
+     * @param start          the persisted block start; never null
+     * @param end            the persisted block end; never null
      */
-    public record PersistedBlock(UUID blockId, Set<UUID> members, OffsetDateTime start,
-                                 OffsetDateTime end) {
+    public record PersistedBlock(UUID blockId, String templateSlotId, Set<UUID> members,
+                                 OffsetDateTime start, OffsetDateTime end) {
 
         public PersistedBlock {
             if (blockId == null) {
                 throw new IllegalArgumentException("blockId must not be null");
             }
-            if (members == null || members.isEmpty()) {
-                throw new IllegalArgumentException("members must not be empty");
-            }
-            members = Set.copyOf(members);
+            members = members == null ? Set.of() : Set.copyOf(members);
             if (start == null || end == null) {
                 throw new IllegalArgumentException("start and end must not be null");
             }
+            templateSlotId = templateSlotId == null || templateSlotId.isBlank()
+                ? null : templateSlotId.strip();
         }
     }
 
@@ -162,6 +170,7 @@ public final class PlannerBlockIdentity {
         UUID[] assigned = new UUID[chronological.size()];
         Set<UUID> claimed = new HashSet<>();
 
+        matchByTemplateSlot(chronological, candidates, assigned, claimed);
         matchByAnchor(chronological, candidates, assigned, claimed);
         matchBySharedMembership(chronological, candidates, assigned, claimed);
 
@@ -180,12 +189,37 @@ public final class PlannerBlockIdentity {
     }
 
     /**
-     * Pass 1: a desired block continues the persisted block that already holds its anchor member. The
-     * D5 unique index makes that block unique, so the first unclaimed hit is the only hit.
+     * Pass 0 (ADR-040 D7): a desired block continues the persisted block that realises the same
+     * template slot. The template lays at most one window per slot per day, so the first unclaimed hit
+     * is the only hit. Blocks with no slot skip this pass entirely and fall through to the anchor.
+     */
+    private static void matchByTemplateSlot(List<AgendaBlock> desired, List<PersistedBlock> candidates,
+                                            UUID[] assigned, Set<UUID> claimed) {
+        for (int index = 0; index < desired.size(); index++) {
+            String slotId = desired.get(index).templateSlotId();
+            if (slotId == null) {
+                continue;
+            }
+            for (PersistedBlock candidate : candidates) {
+                if (!claimed.contains(candidate.blockId()) && slotId.equals(candidate.templateSlotId())) {
+                    assigned[index] = candidate.blockId();
+                    claimed.add(candidate.blockId());
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Pass 1: a desired block continues the persisted block that already holds its anchor member.
+     * Containment is monovalent, so the first unclaimed hit is the only hit.
      */
     private static void matchByAnchor(List<AgendaBlock> desired, List<PersistedBlock> candidates,
                                       UUID[] assigned, Set<UUID> claimed) {
         for (int index = 0; index < desired.size(); index++) {
+            if (assigned[index] != null) {
+                continue;
+            }
             UUID anchor = desired.get(index).executableId();
             for (PersistedBlock candidate : candidates) {
                 if (!claimed.contains(candidate.blockId()) && candidate.members().contains(anchor)) {

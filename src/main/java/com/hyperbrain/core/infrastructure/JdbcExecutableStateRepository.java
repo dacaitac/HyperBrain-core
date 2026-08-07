@@ -310,6 +310,24 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         ORDER BY e.container_ord NULLS LAST, e.id
         """;
 
+    /**
+     * ADR-040 D10 — the withdrawal of a planner block, with every guard in the predicate: planner
+     * authorship, still planned, no frozen duration, no completion clock, no member still contained and
+     * nothing imputed to it. The two {@code NOT EXISTS} are what make "let go first, delete after" an
+     * enforced order rather than a convention.
+     */
+    private static final String DELETE_WITHDRAWN_BLOCK_SQL = """
+        DELETE FROM core_executable b
+        WHERE b.id     = ?
+          AND b.type   = 'TIME_BLOCK'
+          AND b.origin = 'PLANNER'
+          AND b.status = 'PLANNED'
+          AND b.actual_duration_minutes IS NULL
+          AND b.last_completed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM core_executable m WHERE m.container_block_id = b.id)
+          AND NOT EXISTS (SELECT 1 FROM core_executable i WHERE i.imputed_block_id   = b.id)
+        """;
+
     private static final String CLOSE_AS_FAILED_SQL = """
         UPDATE core_executable
         SET status = 'FAILED'
@@ -515,6 +533,11 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     @Override
     public List<ExecutableSnapshot> findContainedBy(UUID blockId) {
         return jdbcTemplate.query(FIND_CONTAINED_BY_SQL, SNAPSHOT_MAPPER, blockId);
+    }
+
+    @Override
+    public boolean deleteWithdrawnBlock(UUID blockId) {
+        return jdbcTemplate.update(DELETE_WITHDRAWN_BLOCK_SQL, blockId) > 0;
     }
 
     @Override

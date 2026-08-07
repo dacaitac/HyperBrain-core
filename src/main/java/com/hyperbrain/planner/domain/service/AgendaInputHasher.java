@@ -99,9 +99,19 @@ public class AgendaInputHasher {
             .append(energy.highLoadQuota()).append(RECORD);
     }
 
+    /**
+     * The ranked candidates, in the order the read port supplied them (priority-score descending) —
+     * rank order is a determinant, so it is never re-sorted here.
+     *
+     * <p><b>The due instant is deliberately absent.</b> Since the window model, an executable's hour is
+     * a SYSTEM-owned copy of the window that holds it (DR-10): it is the plan's own <em>output</em>.
+     * Folding it into the digest made every materialization change the next digest, so a redelivery of
+     * an identical job claimed a fresh slot and planned the day all over again — the exact failure mode
+     * the claim exists to prevent. Nothing is lost: the day-scoped admission (ADR-040 D3) is applied
+     * upstream, so an executable's <em>presence in this list</em> already carries the whole of what its
+     * date decides, and the date no longer dictates where inside the day it lands (ADR-026 D4).
+     */
     private void appendRanked(StringBuilder canonical, PlannerDayState state) {
-        // Rank order is a determinant, so the ranked list is hashed in the order the read port
-        // supplied (priority-score desc) — never sorted here.
         for (SchedulableExecutable e : state.rankedExecutables()) {
             new Joiner(canonical, "R")
                 .add(e.id())
@@ -112,8 +122,6 @@ public class AgendaInputHasher {
                 .add(e.learnedUnitCost())
                 .add(e.pendingSubtasks())
                 .add(e.estimatedMinutes())
-                .add(e.settledActualMinutes())
-                .add(e.dueInstant())
                 .add(e.cycleId())
                 .end();
         }

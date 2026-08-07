@@ -1,6 +1,5 @@
 package com.hyperbrain.planner.infrastructure;
 
-import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.ExecutableType;
 import com.hyperbrain.planner.domain.model.LearnedUnitCost;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
@@ -9,6 +8,7 @@ import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannedBlockMember;
 import com.hyperbrain.planner.domain.model.PlannedBlockRecord;
 import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
+import com.hyperbrain.planner.domain.model.PlannerBlockRow;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
@@ -214,6 +214,19 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND (e.last_completed_at IS NULL
                OR e.last_completed_at <  ?
                OR e.last_completed_at >= ?)
+          -- Slot authority (ADR-026 D6, carried onto the deployed model). An executable already held
+          -- by a LIVE block outside the planner's regenerable universe — a USER block the user timed
+          -- by hand, or a block already under way — is not a candidate at all. Containment is
+          -- monovalent, so offering it would silently move it out of the block the user put it in:
+          -- your authority would last exactly until the next replan. Blocks the planner itself
+          -- authored and still holds as PLANNED are excluded from this guard, because those are
+          -- precisely the ones this run re-places.
+          AND NOT EXISTS (
+              SELECT 1 FROM core_executable holder
+              WHERE holder.id     = e.container_block_id
+                AND holder.type   = 'TIME_BLOCK'
+                AND holder.status IN ('PLANNED', 'IN_PROGRESS')
+                AND NOT (holder.origin = 'PLANNER' AND holder.status = 'PLANNED'))
         ORDER BY e.priority_score DESC NULLS LAST, e.id
         """;
 
@@ -380,128 +393,91 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         """;
 
     /**
-     * Upserts a desired block under the id the reconciliation assigned it: a fresh surrogate inserts, a
-     * continued id updates in place (so the block keeps its {@code sync_mapping} → the write-back emits
-     * an UPDATE, not a duplicate CREATE, #15). The anchor {@code executable_id} is re-written on update
-     * because the anchor may rotate while the block itself continues (ADR-027 D3). The
-     * {@code ON CONFLICT} update is guarded to {@code PLANNED}/{@code PLANNER} rows so an id that
-     * happens to collide with an {@code ACTIVE}/{@code SETTLED} block (already-started work,
-     * telemetry-bearing) never clobbers it.
+     * Inserts or re-times a planner block under the id the reconciliation assigned it — on the deployed
+     * model, where a block is a {@code core_executable} of type {@code TIME_BLOCK} (ADR-039). A fresh
+     * surrogate inserts; a continued id updates in place, so the block keeps its {@code sync_mapping}
+     * and its calendar event is UPDATED rather than duplicated (#15).
+     *
+     * <p>Three properties are load-bearing and none of them is decoration:
+     * <ul>
+     *   <li><b>The name is never updated.</b> Naming is the LLM's work and it survives a replan
+     *       (ADR-040 D8); the replan recomputes the block's place in time and nothing else.</li>
+     *   <li><b>The update is guarded to planner-authored, still-{@code PLANNED} rows</b>, so an id that
+     *       collided with a {@code USER} block or with already-started work can never clobber it.</li>
+     *   <li><b>Nothing is written when nothing moved</b> ({@code IS DISTINCT FROM} guards): the update
+     *       count is therefore an exact "did this block really change", which is what lets the caller
+     *       announce two blocks on a replan that moved two, instead of thirty (ADR-040 D17).</li>
+     * </ul>
      */
     private static final String UPSERT_BLOCK_SQL = """
-        INSERT INTO core_time_block
-            (id, executable_id, date_start, date_end, status, origin, planned_minutes, reason, theme)
-        VALUES (?, ?, ?, ?, 'PLANNED', 'PLANNER', ?, ?, ?)
+        INSERT INTO core_executable
+            (id, user_id, name, description, type, status, origin,
+             start_time, end_time, template_slot_id, system_generated)
+        VALUES (?, ?, ?, ?, 'TIME_BLOCK', 'PLANNED', 'PLANNER', ?, ?, ?, false)
         ON CONFLICT (id) DO UPDATE
-           SET executable_id   = EXCLUDED.executable_id,
-               date_start      = EXCLUDED.date_start,
-               date_end        = EXCLUDED.date_end,
-               planned_minutes = EXCLUDED.planned_minutes,
-               reason          = EXCLUDED.reason,
-               theme           = EXCLUDED.theme
-         WHERE core_time_block.status = 'PLANNED'
-           AND core_time_block.origin = 'PLANNER'
+           SET start_time       = EXCLUDED.start_time,
+               end_time         = EXCLUDED.end_time,
+               description      = EXCLUDED.description,
+               template_slot_id = EXCLUDED.template_slot_id
+         WHERE core_executable.type   = 'TIME_BLOCK'
+           AND core_executable.origin = 'PLANNER'
+           AND core_executable.status = 'PLANNED'
+           AND (core_executable.start_time       IS DISTINCT FROM EXCLUDED.start_time
+             OR core_executable.end_time         IS DISTINCT FROM EXCLUDED.end_time
+             OR core_executable.description      IS DISTINCT FROM EXCLUDED.description
+             OR core_executable.template_slot_id IS DISTINCT FROM EXCLUDED.template_slot_id)
         """;
 
     /**
-     * The day's regenerable planner blocks with their current membership — the reconciliation universe
-     * (continued vs. removed). The anchor {@code core_time_block.executable_id} is read alongside the
-     * bridge rows and folded into the member set, so a block persisted before the ADR-027 migration (or
-     * one whose anchor membership was skipped by the D5 guard) still reconciles by its anchor.
+     * The day's regenerable blocks with the membership each currently holds — the reconciliation
+     * universe and the starting point of the conservative replan (ADR-040 D8). Membership is read
+     * straight off {@code container_block_id}: since ADR-039 there is no bridge table and no anchor row,
+     * the block is the executable and its members point at it.
+     *
+     * <p>The join is a LEFT JOIN on purpose: under the window model a window is laid before anything is
+     * put inside it, so an <b>empty</b> block is a legitimate row that must still reconcile by its slot.
      */
-    private static final String EXISTING_PLANNED_BLOCKS_SQL = """
+    private static final String REGENERABLE_BLOCKS_SQL = """
         SELECT b.id,
-               b.executable_id AS anchor_id,
-               m.executable_id AS member_id,
-               b.date_start,
-               COALESCE(b.date_end, b.date_start + interval '1 minute') AS date_end
-        FROM core_time_block b
-        JOIN core_executable e ON e.id = b.executable_id
-        LEFT JOIN core_time_block_member m ON m.block_id = b.id
-        WHERE e.user_id = ?
-          AND b.status = 'PLANNED'
+               b.template_slot_id,
+               b.start_time,
+               COALESCE(b.end_time, b.start_time + interval '1 minute') AS end_time,
+               m.id AS member_id
+        FROM core_executable b
+        LEFT JOIN core_executable m ON m.container_block_id = b.id
+        WHERE b.user_id = ?
+          AND b.type   = 'TIME_BLOCK'
           AND b.origin = 'PLANNER'
-          AND b.date_start >= ?
-          AND b.date_start < ?
-        ORDER BY b.date_start, b.id
+          AND b.status = 'PLANNED'
+          AND b.start_time >= ?
+          AND b.start_time <  ?
+        ORDER BY b.start_time, b.id, m.container_ord NULLS LAST, m.id
         """;
 
     /**
-     * The executables already held by a <b>live block outside the reconciliation universe</b> on the
-     * target day (a {@code FOCUS}/{@code USER} block, or one already {@code ACTIVE}/{@code SETTLED}).
-     * The D5 unique index on {@code core_time_block_member} would reject a second live membership for
-     * them, so the planner drops those bridge rows explicitly instead of letting the whole day's
-     * generation fail on a constraint violation. {@code block_date}/{@code block_status} are the
-     * trigger-derived columns the index is built on — read-only for the core.
-     */
-    private static final String EXTERNALLY_HELD_EXECUTABLES_SQL = """
-        SELECT DISTINCT m.executable_id
-        FROM core_time_block_member m
-        JOIN core_time_block b ON b.id = m.block_id
-        JOIN core_executable e ON e.id = b.executable_id
-        WHERE e.user_id = ?
-          AND m.block_date = ?
-          AND m.block_status IN ('PLANNED', 'ACTIVE', 'SETTLED')
-          AND NOT (b.status = 'PLANNED' AND b.origin = 'PLANNER')
-        """;
-
-    /**
-     * Clears a continued block's bridge rows before they are re-inserted from the new plan. Doing it
-     * before any insert is what lets an executable move between two blocks of the same day without
-     * tripping the D5 unique index.
-     */
-    private static final String DELETE_BLOCK_MEMBERS_SQL =
-        "DELETE FROM core_time_block_member WHERE block_id = ?";
-
-    /**
-     * Inserts one bridge row per block member (ADR-027 D2). Only the four owned columns are written:
-     * {@code block_date} and {@code block_status} are derived by trigger from the parent block and must
-     * never be written by the core.
-     */
-    private static final String INSERT_BLOCK_MEMBER_SQL = """
-        INSERT INTO core_time_block_member (block_id, executable_id, planned_minutes, ord)
-        VALUES (?, ?, ?, ?)
-        """;
-
-    /**
-     * Deletes a single regenerable block by id when it dropped out of the new plan. Scoped to
-     * {@code PLANNED}/{@code PLANNER} so {@code FOCUS}/{@code USER} blocks and settled work survive.
-     */
-    private static final String DELETE_REMOVED_BLOCK_SQL = """
-        DELETE FROM core_time_block
-        WHERE id = ?
-          AND status = 'PLANNED'
-          AND origin = 'PLANNER'
-        """;
-
-    /**
-     * Re-reads the day's persisted planner blocks with their theme and <b>one row per member</b>
-     * (ADR-027 D1/D2), each joined to its executable's display name for the write-back. The join to
-     * {@code core_time_block_member} is a LEFT JOIN with a fallback onto the anchor
-     * {@code core_time_block.executable_id}: a block carrying no bridge row (persisted before the
-     * migration, or whose membership the D5 guard skipped) still yields exactly one member, so the
-     * write-back never loses a block.
+     * Re-reads the day's persisted planner blocks with one row per member, each joined to its display
+     * name, for the agenda write-back (HU-01b). A block with no members still yields one row (LEFT
+     * JOIN), so an empty window is never silently lost from the delivery.
      */
     private static final String PLANNED_BLOCKS_FOR_DAY_SQL = """
         SELECT b.id,
-               b.theme,
-               b.date_start,
-               COALESCE(b.date_end, b.date_start + interval '1 minute')  AS date_end,
-               b.reason,
-               COALESCE(m.executable_id, b.executable_id)                AS member_id,
-               COALESCE(me.name, e.name)                                 AS member_name,
-               COALESCE(m.planned_minutes, b.planned_minutes, 0)         AS member_minutes,
-               COALESCE(m.ord, 0)                                        AS member_ord
-        FROM core_time_block b
-        JOIN core_executable e ON e.id = b.executable_id
-        LEFT JOIN core_time_block_member m ON m.block_id = b.id
-        LEFT JOIN core_executable me ON me.id = m.executable_id
-        WHERE e.user_id = ?
-          AND b.status = 'PLANNED'
+               b.name                                                    AS theme,
+               b.start_time                                              AS date_start,
+               COALESCE(b.end_time, b.start_time + interval '1 minute')  AS date_end,
+               b.description                                             AS reason,
+               m.id                                                      AS member_id,
+               m.name                                                    AS member_name,
+               COALESCE(m.container_planned_minutes, 0)                  AS member_minutes,
+               COALESCE(m.container_ord, 0)                              AS member_ord
+        FROM core_executable b
+        LEFT JOIN core_executable m ON m.container_block_id = b.id
+        WHERE b.user_id = ?
+          AND b.type   = 'TIME_BLOCK'
           AND b.origin = 'PLANNER'
-          AND b.date_start >= ?
-          AND b.date_start < ?
-        ORDER BY b.date_start, b.id, member_ord
+          AND b.status = 'PLANNED'
+          AND b.start_time >= ?
+          AND b.start_time <  ?
+        ORDER BY b.start_time, b.id, member_ord
         """;
 
     /** Display names of a set of executables for the LLM-facing read model (#61, H3). */
@@ -666,68 +642,22 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     }
 
     @Override
-    public List<UUID> reconcilePlannedBlocks(UUID userId, LocalDate targetDay, ZoneId zone,
-                                             List<AgendaBlock> desired) {
+    public List<PlannerBlockIdentity.PersistedBlock> loadRegenerableBlocks(
+        UUID userId, LocalDate targetDay, ZoneId zone) {
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
 
-        List<PlannerBlockIdentity.PersistedBlock> persisted =
-            loadPersistedPlannerBlocks(userId, dayStart, dayEnd);
-        PlannerBlockIdentity.Reconciliation reconciliation =
-            PlannerBlockIdentity.reconcile(desired, persisted);
-        List<PlannerBlockIdentity.IdentifiedBlock> identified = reconciliation.identified();
-        List<UUID> removed = reconciliation.removedBlockIds();
-
-        // Order matters for the D5 unique index: the memberships that are going away (dropped blocks
-        // first, then the continued blocks' stale rows) must be gone before any new membership is
-        // inserted, so an executable that moves between two blocks of the same day never collides with
-        // its own previous row.
-        if (!removed.isEmpty()) {
-            jdbcTemplate.batchUpdate(DELETE_REMOVED_BLOCK_SQL, removed, removed.size(),
-                (ps, id) -> ps.setObject(1, id));
-        }
-        List<UUID> continuedIds = identified.stream()
-            .filter(PlannerBlockIdentity.IdentifiedBlock::continued)
-            .map(PlannerBlockIdentity.IdentifiedBlock::blockId)
-            .toList();
-        if (!continuedIds.isEmpty()) {
-            jdbcTemplate.batchUpdate(DELETE_BLOCK_MEMBERS_SQL, continuedIds, continuedIds.size(),
-                (ps, id) -> ps.setObject(1, id));
-        }
-
-        jdbcTemplate.batchUpdate(UPSERT_BLOCK_SQL, identified, identified.size(), (ps, entry) -> {
-            AgendaBlock block = entry.block();
-            ps.setObject(1, entry.blockId());
-            ps.setObject(2, block.executableId());
-            ps.setObject(3, block.start());
-            ps.setObject(4, block.end());
-            ps.setObject(5, (int) block.durationMinutes());
-            ps.setString(6, block.reason());
-            ps.setString(7, block.theme());
-        });
-        insertBlockMembers(userId, targetDay, identified);
-
-        return removed;
-    }
-
-    /**
-     * Re-reads the day's regenerable blocks with their membership, folding the anchor
-     * {@code executable_id} into the member set so a block still reconciles by its anchor even when it
-     * carries no bridge row yet.
-     */
-    private List<PlannerBlockIdentity.PersistedBlock> loadPersistedPlannerBlocks(
-        UUID userId, OffsetDateTime dayStart, OffsetDateTime dayEnd) {
         Map<UUID, PersistedBlockAccumulator> accumulators = new LinkedHashMap<>();
-        jdbcTemplate.query(EXISTING_PLANNED_BLOCKS_SQL, rs -> {
+        jdbcTemplate.query(REGENERABLE_BLOCKS_SQL, rs -> {
             UUID blockId = rs.getObject("id", UUID.class);
             PersistedBlockAccumulator accumulator = accumulators.get(blockId);
             if (accumulator == null) {
                 accumulator = new PersistedBlockAccumulator(
-                    rs.getObject("date_start", OffsetDateTime.class),
-                    rs.getObject("date_end", OffsetDateTime.class));
+                    rs.getString("template_slot_id"),
+                    rs.getObject("start_time", OffsetDateTime.class),
+                    rs.getObject("end_time", OffsetDateTime.class));
                 accumulators.put(blockId, accumulator);
             }
-            accumulator.members().add(rs.getObject("anchor_id", UUID.class));
             UUID memberId = rs.getObject("member_id", UUID.class);
             if (memberId != null) {
                 accumulator.members().add(memberId);
@@ -736,44 +666,18 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
 
         return accumulators.entrySet().stream()
             .map(entry -> new PlannerBlockIdentity.PersistedBlock(
-                entry.getKey(), entry.getValue().members(),
+                entry.getKey(), entry.getValue().templateSlotId(), entry.getValue().members(),
                 entry.getValue().start(), entry.getValue().end()))
             .toList();
     }
 
-    /**
-     * Projects each block's membership onto {@code core_time_block_member} (ADR-027 D2), splitting the
-     * container's duration across its members. Executables already held by a live block outside the
-     * planner's universe are skipped and logged: the D5 unique index would otherwise abort the whole
-     * day's generation, and the block itself is still worth delivering.
-     */
-    private void insertBlockMembers(UUID userId, LocalDate targetDay,
-                                    List<PlannerBlockIdentity.IdentifiedBlock> identified) {
-        if (identified.isEmpty()) {
-            return;
-        }
-        Set<UUID> externallyHeld = Set.copyOf(jdbcTemplate.queryForList(
-            EXTERNALLY_HELD_EXECUTABLES_SQL, UUID.class, userId, java.sql.Date.valueOf(targetDay)));
-
-        List<Object[]> rows = new ArrayList<>();
-        for (PlannerBlockIdentity.IdentifiedBlock entry : identified) {
-            List<UUID> blockMembers = entry.block().members();
-            List<Integer> minutes = entry.block().memberPlannedMinutes();
-            for (int ord = 0; ord < blockMembers.size(); ord++) {
-                UUID member = blockMembers.get(ord);
-                if (externallyHeld.contains(member)) {
-                    log.warn("Executable {} is already held by another live block on {}; "
-                        + "its membership of planner block {} is skipped (ADR-027 D5)",
-                        member, targetDay, entry.blockId());
-                    continue;
-                }
-                rows.add(new Object[] {entry.blockId(), member, minutes.get(ord), ord});
-            }
-        }
-        if (!rows.isEmpty()) {
-            jdbcTemplate.batchUpdate(INSERT_BLOCK_MEMBER_SQL, rows);
-        }
+    @Override
+    public boolean upsertBlock(PlannerBlockRow block) {
+        return jdbcTemplate.update(UPSERT_BLOCK_SQL,
+            block.blockId(), block.userId(), block.name(), block.description(),
+            block.start(), block.end(), block.templateSlotId()) > 0;
     }
+
 
     @Override
     public List<PlannedBlockRecord> loadPlannedBlocksForDay(UUID userId, LocalDate targetDay,
@@ -821,12 +725,12 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         return titles;
     }
 
-    /** Groups the joined block/member rows of {@link #loadPersistedPlannerBlocks} into one block. */
-    private record PersistedBlockAccumulator(Set<UUID> members, OffsetDateTime start,
-                                             OffsetDateTime end) {
+    /** Groups the joined block/member rows of {@link #loadRegenerableBlocks} into one block. */
+    private record PersistedBlockAccumulator(Set<UUID> members, String templateSlotId,
+                                             OffsetDateTime start, OffsetDateTime end) {
 
-        PersistedBlockAccumulator(OffsetDateTime start, OffsetDateTime end) {
-            this(new LinkedHashSet<>(), start, end);
+        PersistedBlockAccumulator(String templateSlotId, OffsetDateTime start, OffsetDateTime end) {
+            this(new LinkedHashSet<>(), templateSlotId, start, end);
         }
     }
 

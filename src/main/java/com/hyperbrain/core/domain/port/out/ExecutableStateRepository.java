@@ -259,6 +259,20 @@ public interface ExecutableStateRepository {
      */
     List<ExecutableSnapshot> findContainedBy(UUID blockId);
 
+    /**
+     * Deletes a planner-authored {@code TIME_BLOCK} the plan withdrew, with every guard <b>inside the
+     * predicate</b> (ADR-040 D10): planner origin, still {@code PLANNED}, and no history hanging off it
+     * — no frozen duration, no completion clock, no member still contained and nothing imputed to it.
+     *
+     * <p>Guards in the predicate rather than in a prior read is what makes the withdrawal race-safe:
+     * there is no window between checking and deleting. A call that deletes nothing is a notice, not a
+     * failure.
+     *
+     * @param blockId the block to delete
+     * @return true when the row was actually deleted
+     */
+    boolean deleteWithdrawnBlock(UUID blockId);
+
     // ── ADR-040 D4: the day-close sweep of what expired ───────────────────────
 
     /**
