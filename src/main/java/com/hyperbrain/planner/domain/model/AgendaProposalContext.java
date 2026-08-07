@@ -22,6 +22,12 @@ import java.util.UUID;
  *       walls;</li>
  *   <li>{@code agendaWalls} — read-only AGENDA windows only: fixed occupied space the LLM plans around
  *       and can never overlap;</li>
+ *   <li>{@code occupiedWalls} — the day's <b>real</b> occupancy: the time blocks somebody already owns —
+ *       the ones the user created himself, the ones already closed, and the ones this run may no longer
+ *       re-time because they have started. Just as fixed as an AGENDA window and for the same reason:
+ *       that time is spoken for by someone other than this run. They were once absent from this read
+ *       model, and the consequence was exactly what one would expect — the model could not see the
+ *       user's own block, so it planned straight over it;</li>
  *   <li>{@code wigExecutableIds} — the WIG blocks (F1 lead measures): a hard floor the LLM can never
  *       DROP nor expel;</li>
  *   <li>{@code frontierStart}/{@code frontierEnd} — the sleep frontier {@code [wake, bedtime]}; no
@@ -37,6 +43,7 @@ import java.util.UUID;
  * @param frontierStart    the sleep-frontier lower edge (wake); never null
  * @param frontierEnd      the sleep-frontier upper edge (bedtime); never null, after {@code frontierStart}
  * @param agendaWalls      the read-only AGENDA windows (fixed walls); never null
+ * @param occupiedWalls    the day's real occupied blocks (fixed walls); never null
  * @param wigExecutableIds the WIG executable ids (never droppable); never null
  * @param highLoadQuota    the F6 high-load quota, soft guidance for the prompt; never negative
  * @param energyCriterion  the readable energy criterion; never blank
@@ -47,6 +54,7 @@ public record AgendaProposalContext(
     OffsetDateTime frontierStart,
     OffsetDateTime frontierEnd,
     List<OccupiedInterval> agendaWalls,
+    List<OccupiedInterval> occupiedWalls,
     Set<UUID> wigExecutableIds,
     int highLoadQuota,
     String energyCriterion,
@@ -69,6 +77,7 @@ public record AgendaProposalContext(
         }
         candidateBlocks = candidateBlocks == null ? List.of() : List.copyOf(candidateBlocks);
         agendaWalls = agendaWalls == null ? List.of() : List.copyOf(agendaWalls);
+        occupiedWalls = occupiedWalls == null ? List.of() : List.copyOf(occupiedWalls);
         wigExecutableIds = wigExecutableIds == null ? Set.of() : Set.copyOf(wigExecutableIds);
         titles = titles == null ? Map.of() : Map.copyOf(titles);
     }

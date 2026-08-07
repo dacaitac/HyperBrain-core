@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.cognitive.domain.model.LlmPrompt;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.application.AgendaGenerationService;
+import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
@@ -197,6 +198,30 @@ class AgendaProposalCycleIT {
     }
 
     @Test
+    @DisplayName("an accepted arrangement may never land on a block the user owns: the proposal is "
+        + "degraded and the floor plans around the wall")
+    void accepted_llm_may_not_land_on_a_user_block() {
+        // Production case (2026-08-08): Daniel's own «WakeUP» block holds 08:00–09:00, the floor lays its
+        // windows around it correctly — and the LLM then moved a block straight on top of it. Overlapping
+        // another PLANNED block is the model's arrangement authority; overlapping a window its owner
+        // reserved is not, and the guard is the only thing standing between the two.
+        insertUserBlock("WakeUP", OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
+        insertTask("Work", 0.9, 60);
+        gateway.respondWith(prompt -> moveAllOnto(prompt,
+            OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC),
+            OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC)));
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(plannerBlockWindows())
+            .isNotEmpty()  // the day still materializes: the proposal degrades, it does not empty the day
+            .noneMatch(window -> window.overlaps(
+                OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, UTC),
+                OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC)));
+    }
+
+    @Test
     @DisplayName("DEGRADED path runs the floor validator: an invalid completion yields the floor's "
         + "non-overlapping, wall-respecting blocks")
     void degraded_path_runs_floor_validator() {
@@ -237,6 +262,25 @@ class AgendaProposalCycleIT {
         }
     }
 
+
+    /** Every candidate moved onto one and the same window — the shape of a model ignoring a wall. */
+    private String moveAllOnto(LlmPrompt prompt, OffsetDateTime start, OffsetDateTime end) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode root = mapper.createObjectNode();
+        ArrayNode decisions = root.putArray("decisions");
+        for (java.util.UUID blockId : candidateIds(prompt, mapper)) {
+            ObjectNode decision = decisions.addObject();
+            decision.put("block_id", blockId.toString());
+            decision.put("placement", "MOVE");
+            decision.put("start", start.toString());
+            decision.put("end", end.toString());
+        }
+        try {
+            return mapper.writeValueAsString(root);
+        } catch (Exception ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
 
     private String keepAll(LlmPrompt prompt, String note) {
         return proposal(prompt, "KEEP", note);
@@ -292,6 +336,26 @@ class AgendaProposalCycleIT {
             "INSERT INTO core_execution_profile (executable_id, estimated_minutes) VALUES (?, ?)",
             id, estimatedMinutes);
         return id;
+    }
+
+    /**
+     * A block the user owns: born through the ordinary ingestion of an executable (from Notion or the
+     * calendar), so it carries no origin and arrives as {@code TODO} — the production shape of «WakeUP».
+     */
+    private void insertUserBlock(String name, OffsetDateTime start, OffsetDateTime end) {
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
+            VALUES (?, ?, ?, 'TIME_BLOCK', 'TODO', ?, ?)
+            """, java.util.UUID.randomUUID(), USER, name, start, end);
+    }
+
+    /** The windows the planner persisted for the day, as intervals that can be asked about overlap. */
+    private List<OccupiedInterval> plannerBlockWindows() {
+        return jdbcTemplate.query(
+            "SELECT date_start, date_end FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED'",
+            (rs, rowNum) -> new OccupiedInterval(null,
+                rs.getObject("date_start", OffsetDateTime.class),
+                rs.getObject("date_end", OffsetDateTime.class), false));
     }
 
     private void insertAgendaEvent(OffsetDateTime start, OffsetDateTime end) {

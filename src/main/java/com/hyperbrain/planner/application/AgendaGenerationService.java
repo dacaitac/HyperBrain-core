@@ -412,13 +412,24 @@ public class AgendaGenerationService {
 
     /**
      * Assembles the LLM-facing read model (#61) from the resolved day and the floor's block set: the
-     * candidate blocks, the sleep frontier, the read-only AGENDA walls (ACTIVITY stays a movable
-     * candidate, never a wall), the WIG ids, the F6 quota and the untrusted executable titles (the only
-     * extra read, done here on the LLM path so the floor path stays untouched).
+     * candidate blocks, the sleep frontier, the hard walls (ACTIVITY stays a movable candidate, never a
+     * wall), the WIG ids, the F6 quota and the untrusted executable titles (the only extra read, done
+     * here on the LLM path so the floor path stays untouched).
+     *
+     * <p><b>The walls travel in two lists because they answer to two different owners</b>, and both are
+     * fixed: the read-only AGENDA windows (ADR-009) and the day's real occupancy — the blocks the user
+     * created himself, the ones already closed, and the ones this run may no longer re-time. The run's
+     * own regenerable blocks are already subtracted upstream (see {@code withoutRegenerable}), so this
+     * never walls the model out of the very windows it is being asked to arrange. The synthetic meal
+     * anchors carry no executable and stay out: they are a rhythm the deterministic floor protects, not
+     * somebody's commitment, and shaping the day around them is the model's authority.
      */
     private AgendaProposalContext buildProposalContext(PreparedDay prepared, Agenda floorAgenda) {
         List<OccupiedInterval> agendaWalls = prepared.occupied().stream()
             .filter(OccupiedInterval::readOnlyAgenda)
+            .toList();
+        List<OccupiedInterval> occupiedWalls = prepared.occupied().stream()
+            .filter(wall -> !wall.readOnlyAgenda() && wall.executableId() != null)
             .toList();
         Set<UUID> wigIds = floorAgenda.blocks().stream()
             .filter(AgendaBlock::wig)
@@ -432,6 +443,7 @@ public class AgendaGenerationService {
             prepared.window().frontierStart(),
             prepared.window().frontierEnd(),
             agendaWalls,
+            occupiedWalls,
             wigIds,
             prepared.state().energyProfile().highLoadQuota(),
             floorAgenda.energyCriterion(),
