@@ -114,8 +114,8 @@ public class AgendaDeliveryService {
             return true;
         }
 
-        // Legacy synchronous path. The blocks + AgendaBlockPlannedEvent commit atomically inside
-        // generate (its own transaction). The trigger-state save and the negative-case signal run
+        // Legacy synchronous path. The blocks and the outbox rows announcing them commit atomically
+        // inside generate (its own transaction). The trigger-state save and the negative-case signal run
         // afterwards, outside any multi-statement transaction, so no SQS publish happens inside a
         // domain transaction.
         Agenda agenda = agendaGenerationService.generate(userId, today, zone, now, false);

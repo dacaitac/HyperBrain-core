@@ -4,6 +4,7 @@ import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.domain.model.ContainmentRequest;
 import com.hyperbrain.core.domain.port.in.ExecutableContainmentService;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlannerBlockRow;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
@@ -18,6 +19,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -59,8 +61,12 @@ public class PlannerBlockMaterializer {
 
     private static final Logger log = LoggerFactory.getLogger(PlannerBlockMaterializer.class);
 
-    /** The label a block with no template slot and no theme carries until the LLM names it (D6). */
-    public static final String DEFAULT_BLOCK_NAME = "Focus window";
+    /**
+     * The label a block with no template slot and no theme carries until the LLM names it (D6). In
+     * Spanish for the same reason the template's labels are: it is the title of an event in Daniel's
+     * calendar, not a piece of code.
+     */
+    public static final String DEFAULT_BLOCK_NAME = "Bloque de trabajo";
 
     /** Heading of the member list a block carries in its note, so the calendar event says what it holds. */
     public static final String MEMBERS_NOTE_HEADING = "In this block:";
@@ -78,13 +84,16 @@ public class PlannerBlockMaterializer {
     private final PlannerStateRepository repository;
     private final ExecutableContainmentService containment;
     private final OutboxRepository outboxRepository;
+    private final DayTemplate dayTemplate;
 
     public PlannerBlockMaterializer(PlannerStateRepository repository,
                                     ExecutableContainmentService containment,
-                                    OutboxRepository outboxRepository) {
+                                    OutboxRepository outboxRepository,
+                                    DayTemplate dayTemplate) {
         this.repository = repository;
         this.containment = containment;
         this.outboxRepository = outboxRepository;
+        this.dayTemplate = dayTemplate;
     }
 
     /**
@@ -103,8 +112,11 @@ public class PlannerBlockMaterializer {
     public List<UUID> materialize(UUID userId, LocalDate targetDay, ZoneId zone,
                                   List<AgendaBlock> accepted, OffsetDateTime notBefore,
                                   String energyCriterion) {
-        PlannerBlockIdentity.Reconciliation reconciliation = PlannerBlockIdentity.reconcile(
-            accepted, repository.loadRegenerableBlocks(userId, targetDay, zone, notBefore));
+        List<PlannerBlockIdentity.PersistedBlock> persisted =
+            repository.loadRegenerableBlocks(userId, targetDay, zone, notBefore);
+        PlannerBlockIdentity.Reconciliation reconciliation =
+            PlannerBlockIdentity.reconcile(accepted, persisted);
+        Map<UUID, String> persistedNames = namesByBlockId(persisted);
         Map<UUID, String> memberNames = repository.loadExecutableTitles(
             accepted.stream().flatMap(block -> block.members().stream()).toList());
 
@@ -119,7 +131,8 @@ public class PlannerBlockMaterializer {
         for (PlannerBlockIdentity.IdentifiedBlock identified : reconciliation.identified()) {
             AgendaBlock block = identified.block();
             if (repository.upsertBlock(new PlannerBlockRow(
-                identified.blockId(), userId, blockName(block),
+                identified.blockId(), userId,
+                blockName(block, persistedNames.get(identified.blockId())),
                 blockNote(block, memberNames, energyCriterion),
                 block.start(), block.end(), block.templateSlotId()))) {
                 // A block is an executable, so it reaches Apple and Notion through the standard
@@ -142,17 +155,66 @@ public class PlannerBlockMaterializer {
     }
 
     /**
-     * The name a freshly inserted block is born with. A block the plan continues keeps the name it
-     * already has — the upsert never rewrites it — so the LLM's naming survives every replan
-     * (ADR-040 D8). On the deterministic floor there is no theme yet (D6: the day comes out laid and
-     * ordered, but neither grouped nor named), so the block borrows the label of its template slot and
-     * the LLM replaces it when it runs.
+     * The name to persist for a block, which is either a name somebody authored or a default the floor
+     * itself produced — and the difference is the whole rule:
+     * <ul>
+     *   <li><b>A theme wins outright.</b> The intelligent layer just named this block (ADR-040 D5), and
+     *       that is the best name available.</li>
+     *   <li><b>A default is recomputed.</b> A block whose stored name is one the floor could have given
+     *       it — the slot's label, the sanctioned label of that slot, the technical slot key that used
+     *       to leak into the calendar, or the generic fallback — is renamed in place. That is what heals
+     *       a day already published as {@code MEETING_ZONE}, and what lets a label corrected in settings
+     *       reach the blocks that are already out there.</li>
+     *   <li><b>Anything else is left exactly as it is.</b> A name the LLM gave in an earlier run must
+     *       survive every later replan (ADR-040 D8), and so must one Daniel typed into the calendar
+     *       himself. Returning the stored name unchanged also keeps the upsert's "did anything move"
+     *       guard honest: an untouched name is not a change and announces nothing.</li>
+     * </ul>
+     *
+     * @param block         the block being persisted; never null
+     * @param persistedName the name the block currently carries, or null when it is being inserted
      */
-    private static String blockName(AgendaBlock block) {
+    private String blockName(AgendaBlock block, String persistedName) {
         if (block.theme() != null) {
             return block.theme();
         }
-        return block.templateSlotId() != null ? block.templateSlotId() : DEFAULT_BLOCK_NAME;
+        String floorName = floorName(block.templateSlotId());
+        if (persistedName == null || isFloorAuthored(persistedName, block.templateSlotId())) {
+            return floorName;
+        }
+        return persistedName;
+    }
+
+    /** The readable name the floor gives a block of this slot: its label, or the generic fallback. */
+    private String floorName(String templateSlotId) {
+        return dayTemplate.labelOf(templateSlotId).orElseGet(
+            () -> templateSlotId != null ? templateSlotId : DEFAULT_BLOCK_NAME);
+    }
+
+    /**
+     * Whether a stored name is one the floor produced rather than one somebody chose. The sanctioned
+     * label counts alongside the configured one so that editing a label in settings still renames the
+     * blocks born under the default, and the bare slot id counts because that is precisely the leak
+     * being repaired.
+     */
+    private boolean isFloorAuthored(String name, String templateSlotId) {
+        return name.equals(DEFAULT_BLOCK_NAME)
+            || name.equals(floorName(templateSlotId))
+            || (templateSlotId != null
+                && (name.equals(templateSlotId)
+                    || DayTemplate.DEFAULT.labelOf(templateSlotId).filter(name::equals).isPresent()));
+    }
+
+    /** The persisted blocks' current names, keyed by block id — the "is this name mine to change" input. */
+    private static Map<UUID, String> namesByBlockId(
+        List<PlannerBlockIdentity.PersistedBlock> persisted) {
+        Map<UUID, String> names = new LinkedHashMap<>();
+        for (PlannerBlockIdentity.PersistedBlock block : persisted) {
+            if (block.name() != null) {
+                names.put(block.blockId(), block.name());
+            }
+        }
+        return names;
     }
 
     /**

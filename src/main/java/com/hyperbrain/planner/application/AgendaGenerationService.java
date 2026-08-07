@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.hyperbrain.core.application.OverdueSweepService;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
@@ -35,6 +36,7 @@ import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -90,6 +92,8 @@ public class AgendaGenerationService {
     private final OutboxRepository outboxRepository;
     private final ObjectMapper objectMapper;
     private final ObjectProvider<AgendaProposer> agendaProposerProvider;
+    private final OverdueSweepService overdueSweepService;
+    private final boolean sweepOnReplanEnabled;
 
     AgendaGenerationService(
         PlannerStateRepository repository,
@@ -106,7 +110,9 @@ public class AgendaGenerationService {
         AgendaMaterializationLedger materializationLedger,
         OutboxRepository outboxRepository,
         ObjectMapper objectMapper,
-        ObjectProvider<AgendaProposer> agendaProposerProvider) {
+        ObjectProvider<AgendaProposer> agendaProposerProvider,
+        OverdueSweepService overdueSweepService,
+        @Value("${app.core.overdue-sweep.enabled:false}") boolean sweepOnReplanEnabled) {
         this.repository = repository;
         this.blockMaterializer = blockMaterializer;
         this.dayWindowResolver = dayWindowResolver;
@@ -122,6 +128,8 @@ public class AgendaGenerationService {
         this.outboxRepository = outboxRepository;
         this.objectMapper = objectMapper;
         this.agendaProposerProvider = agendaProposerProvider;
+        this.overdueSweepService = overdueSweepService;
+        this.sweepOnReplanEnabled = sweepOnReplanEnabled;
     }
 
     /**
@@ -180,8 +188,8 @@ public class AgendaGenerationService {
     /**
      * Idempotent single-owner materialization (HU-01c H2): claims the {@code (user, day, input_hash)}
      * slot and materializes only when the input is new. Runs in one transaction so the claim, the
-     * persisted blocks and the staged {@code AgendaBlockPlannedEvent} commit atomically — a rollback
-     * releases the claim and lets SQS redeliver.
+     * persisted blocks and the outbox rows announcing them commit atomically — a rollback releases the
+     * claim and lets SQS redeliver.
      *
      * @param userId      the user whose day to materialize; never null
      * @param targetDay   the calendar day being materialized; never null
@@ -229,11 +237,22 @@ public class AgendaGenerationService {
      * window (WIG lead measures are exempt — a daily recurring commitment). Each day's
      * delete-before-persist keeps repeats convergent.
      *
+     * <p><b>The sweep runs first, and the order is the point</b> (Daniel, 2026-08-07). Every replan
+     * retires what is behind its own trigger hour <em>before</em> a single window is laid, so the day
+     * is planned over a bag that is already clean and this morning's leftovers are back among today's
+     * candidates. Sweeping afterwards would leave the run planning against the state the button was
+     * meant to correct. It sits here rather than in the command handler because both replan roads —
+     * the synchronous one and the {@code ia-jobs} one — pass through this method, and it shares the
+     * caller's transaction, so the retirement and the plan it enables commit together.
+     *
      * @param userId     the user whose window to replan; never null
      * @param occurredAt the instant the replan is anchored to; never null
      * @param zone       the user's timezone; never null
      */
     void replanAcrossWindow(UUID userId, OffsetDateTime occurredAt, ZoneId zone) {
+        if (sweepOnReplanEnabled) {
+            overdueSweepService.sweep(userId, occurredAt, zone);
+        }
         LocalDate startDay = occurredAt.atZoneSameInstant(zone).toLocalDate();
         LocalDate lastDay = occurredAt.plusHours(48).atZoneSameInstant(zone).toLocalDate();
         Set<UUID> placed = new LinkedHashSet<>();

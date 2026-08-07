@@ -35,10 +35,15 @@ class OverdueSweepServiceTest {
 
     private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final UUID ROW_ID = UUID.fromString("11111111-0000-0000-0000-00000000000a");
+    private static final UUID OTHER_ROW_ID = UUID.fromString("22222222-0000-0000-0000-00000000000b");
+    private static final UUID THIRD_ROW_ID = UUID.fromString("33333333-0000-0000-0000-00000000000c");
     private static final UUID BLOCK_ID = UUID.fromString("bbbbbbbb-0000-0000-0000-0000000000b1");
     private static final ZoneId ZONE = ZoneId.of("America/Bogota");
     /** The sweep opens 2026-08-07 and closes 2026-08-06. */
     private static final LocalDate REFERENCE_DAY = LocalDate.of(2026, 8, 7);
+    /** The day-close trigger: 03:00 local on the reference day. */
+    private static final OffsetDateTime DAY_CLOSE =
+        REFERENCE_DAY.atTime(3, 0).atZone(ZONE).toOffsetDateTime();
     /** Yesterday 14:30 local (Bogota = UTC-5). */
     private static final OffsetDateTime YESTERDAY_AFTERNOON =
         OffsetDateTime.of(2026, 8, 6, 19, 30, 0, 0, ZoneOffset.UTC);
@@ -68,7 +73,7 @@ class OverdueSweepServiceTest {
         givenCandidates(habit);
         when(stateRepo.closeAsFailed(ROW_ID)).thenReturn(true);
 
-        OverdueSweepReport report = service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         assertThat(report.closedAsFailed()).isEqualTo(1);
         assertThat(report.rescheduled()).isZero();
@@ -89,7 +94,7 @@ class OverdueSweepServiceTest {
         givenCandidates(candidate("LEAD_MEASURE", YESTERDAY_AFTERNOON));
         when(stateRepo.closeAsFailed(ROW_ID)).thenReturn(false);
 
-        OverdueSweepReport report = service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         assertThat(report.isEmpty()).isTrue();
         verifyNoInteractions(completionOutcomeRule);
@@ -107,7 +112,7 @@ class OverdueSweepServiceTest {
         when(stateRepo.reschedule(eq(ROW_ID), any(), any())).thenReturn(true);
         when(stateRepo.copyScheduleToContained(any(), any(), any(), any())).thenReturn(List.of());
 
-        OverdueSweepReport report = service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         assertThat(report.rescheduled()).isEqualTo(1);
         ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
@@ -124,7 +129,7 @@ class OverdueSweepServiceTest {
         when(stateRepo.reschedule(eq(ROW_ID), any(), any())).thenReturn(true);
         when(stateRepo.copyScheduleToContained(any(), any(), any(), any())).thenReturn(List.of());
 
-        service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
         verify(stateRepo).reschedule(eq(ROW_ID), start.capture(), eq(null));
@@ -144,7 +149,7 @@ class OverdueSweepServiceTest {
         when(stateRepo.reschedule(eq(ROW_ID), any(), any())).thenReturn(true);
         when(stateRepo.copyScheduleToContained(any(), any(), any(), any())).thenReturn(List.of());
 
-        service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         var inOrder = org.mockito.Mockito.inOrder(stateRepo);
         inOrder.verify(stateRepo).clearContainer(ROW_ID);
@@ -167,7 +172,7 @@ class OverdueSweepServiceTest {
         when(stateRepo.copyScheduleToContained(eq(ROW_ID), any(), eq(null), eq(cycleId)))
             .thenReturn(List.of(subtask));
 
-        service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         ArgumentCaptor<OutboxEvent> events = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo, org.mockito.Mockito.times(2)).append(events.capture());
@@ -182,7 +187,7 @@ class OverdueSweepServiceTest {
         when(stateRepo.clearContainer(ROW_ID)).thenReturn(false);
         when(stateRepo.reschedule(eq(ROW_ID), any(), any())).thenReturn(false);
 
-        OverdueSweepReport report = service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         assertThat(report.isEmpty()).isTrue();
         verify(stateRepo, never()).copyScheduleToContained(any(), any(), any(), any());
@@ -197,7 +202,7 @@ class OverdueSweepServiceTest {
         givenCandidates(candidate("BUYING", YESTERDAY_AFTERNOON));
         when(stateRepo.reschedule(ROW_ID, null, null)).thenReturn(true);
 
-        OverdueSweepReport report = service.sweep(USER_ID, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = service.sweep(USER_ID, DAY_CLOSE, ZONE);
 
         assertThat(report.dateCleared()).isEqualTo(1);
         // Detached first, so the containment hard copy cannot stamp the block's date straight back.
@@ -213,14 +218,121 @@ class OverdueSweepServiceTest {
     void empty_sweep_is_a_noop() {
         when(stateRepo.findOverdue(any(), any(), any(), any())).thenReturn(List.of());
 
-        assertThat(service.sweep(USER_ID, REFERENCE_DAY, ZONE).isEmpty()).isTrue();
+        assertThat(service.sweep(USER_ID, DAY_CLOSE, ZONE).isEmpty()).isTrue();
         verifyNoInteractions(outboxRepo);
+    }
+
+    // ── The intraday trigger (Daniel, 2026-08-07) ─────────────────────────────
+
+    @Test
+    @DisplayName("a sweep fired mid-afternoon puts this morning's leftovers back on TODAY, not on tomorrow")
+    void an_intraday_sweep_re_dates_onto_the_running_day() {
+        OffsetDateTime thisAfternoon = REFERENCE_DAY.atTime(16, 4).atZone(ZONE).toOffsetDateTime();
+        OffsetDateTime thisMorning = REFERENCE_DAY.atTime(10, 0).atZone(ZONE).toOffsetDateTime();
+        ExecutableSnapshot stranded = ExecutableSnapshotBuilder.snapshot()
+            .id(ROW_ID).userId(USER_ID).type("TASK").status("TODO")
+            .startTime(thisMorning).containerBlockId(BLOCK_ID).build();
+        when(stateRepo.findOverdue(eq(USER_ID), any(), eq(thisAfternoon), eq(ZONE)))
+            .thenReturn(List.of(stranded));
+        when(stateRepo.clearContainer(ROW_ID)).thenReturn(true);
+        when(stateRepo.reschedule(eq(ROW_ID), any(), any())).thenReturn(true);
+        when(stateRepo.copyScheduleToContained(any(), any(), any(), any())).thenReturn(List.of());
+
+        OverdueSweepReport report = service.sweep(USER_ID, thisAfternoon, ZONE);
+
+        // Landing on the running day is what lets the generation behind this sweep place it in the
+        // windows the afternoon has left; landing on tomorrow would only move the problem.
+        assertThat(report.rescheduled()).isEqualTo(1);
+        ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(stateRepo).reschedule(eq(ROW_ID), start.capture(), eq(null));
+        assertThat(start.getValue()).isEqualTo(REFERENCE_DAY.atStartOfDay(ZONE).toOffsetDateTime());
+    }
+
+    // ── The membership selector: a block that closed lets its work go ─────────
+
+    @Test
+    @DisplayName("closing a block applies the same table to what it still held, by type")
+    void closing_a_block_retires_its_members_by_type() {
+        ExecutableSnapshot habit = member("HABIT", ROW_ID);
+        ExecutableSnapshot task = member("TASK", OTHER_ROW_ID);
+        when(stateRepo.findContainedBy(BLOCK_ID)).thenReturn(List.of(habit, task));
+        when(stateRepo.closeAsFailed(ROW_ID)).thenReturn(true);
+        when(stateRepo.clearContainer(OTHER_ROW_ID)).thenReturn(true);
+        when(stateRepo.reschedule(eq(OTHER_ROW_ID), any(), any())).thenReturn(true);
+        when(stateRepo.copyScheduleToContained(any(), any(), any(), any())).thenReturn(List.of());
+
+        OverdueSweepReport report = service.releaseMembersOf(BLOCK_ID, DAY_CLOSE, ZONE);
+
+        assertThat(report.closedAsFailed()).isEqualTo(1);
+        assertThat(report.rescheduled()).isEqualTo(1);
+        // The task leaves the block before its date is rewritten, or the hard copy stamps it back.
+        var inOrder = org.mockito.Mockito.inOrder(stateRepo);
+        inOrder.verify(stateRepo).clearContainer(OTHER_ROW_ID);
+        inOrder.verify(stateRepo).reschedule(eq(OTHER_ROW_ID), any(), eq(null));
+        verify(recurrenceCloneRule).apply(eq(habit), any(), eq(ExternalSystem.SYSTEM));
+    }
+
+    @Test
+    @DisplayName("a member selected by membership is retired even when its own hour is still ahead")
+    void a_future_member_is_retired_when_its_block_closes_early() {
+        OffsetDateTime tonight = REFERENCE_DAY.atTime(21, 0).atZone(ZONE).toOffsetDateTime();
+        ExecutableSnapshot habit = ExecutableSnapshotBuilder.snapshot()
+            .id(ROW_ID).userId(USER_ID).type("HABIT").status("TODO")
+            .startTime(tonight).containerBlockId(BLOCK_ID).build();
+        when(stateRepo.findContainedBy(BLOCK_ID)).thenReturn(List.of(habit));
+        when(stateRepo.closeAsFailed(ROW_ID)).thenReturn(true);
+
+        // Closed by hand at three in the morning, hours before its own window: the temporal selector
+        // would never have reached this row, and the membership one must.
+        assertThat(service.releaseMembersOf(BLOCK_ID, DAY_CLOSE, ZONE).closedAsFailed()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("already-closed members, subtasks and system rows are left alone")
+    void the_release_skips_what_is_not_the_user_s_open_work() {
+        when(stateRepo.findContainedBy(BLOCK_ID)).thenReturn(List.of(
+            ExecutableSnapshotBuilder.snapshot()
+                .id(ROW_ID).userId(USER_ID).type("TASK").status("DONE").build(),
+            ExecutableSnapshotBuilder.snapshot()
+                .id(OTHER_ROW_ID).userId(USER_ID).type("TASK").status("TODO")
+                .parentId(ROW_ID).build(),
+            ExecutableSnapshotBuilder.snapshot()
+                .id(THIRD_ROW_ID).userId(USER_ID).type("TASK").status("TODO")
+                .systemGenerated(true).build()));
+
+        assertThat(service.releaseMembersOf(BLOCK_ID, DAY_CLOSE, ZONE).isEmpty()).isTrue();
+        verifyNoInteractions(outboxRepo);
+    }
+
+    @Test
+    @DisplayName("a member both selectors reach is retired once: the second pass writes nothing")
+    void overlapping_selectors_retire_a_member_once() {
+        ExecutableSnapshot habit = member("HABIT", ROW_ID);
+        when(stateRepo.findOverdue(eq(USER_ID), any(), eq(DAY_CLOSE), eq(ZONE)))
+            .thenReturn(List.of(habit));
+        when(stateRepo.findContainedBy(BLOCK_ID)).thenReturn(List.of(habit));
+        // The conditional closure is the whole guard: whoever gets there first closes the row.
+        when(stateRepo.closeAsFailed(ROW_ID)).thenReturn(true, false);
+
+        service.sweep(USER_ID, DAY_CLOSE, ZONE);
+        OverdueSweepReport second = service.releaseMembersOf(BLOCK_ID, DAY_CLOSE, ZONE);
+
+        assertThat(second.isEmpty()).isTrue();
+        verify(outboxRepo, org.mockito.Mockito.times(1)).append(any());
+        verify(recurrenceCloneRule, org.mockito.Mockito.times(1))
+            .apply(any(), any(), eq(ExternalSystem.SYSTEM));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    private static ExecutableSnapshot member(String type, UUID id) {
+        return ExecutableSnapshotBuilder.snapshot()
+            .id(id).userId(USER_ID).type(type).status("TODO")
+            .startTime(YESTERDAY_AFTERNOON).containerBlockId(BLOCK_ID).build();
+    }
+
     private void givenCandidates(ExecutableSnapshot... candidates) {
-        when(stateRepo.findOverdue(eq(USER_ID), any(), eq(REFERENCE_DAY), eq(ZONE)))
+        when(stateRepo.findOverdue(eq(USER_ID), any(), eq(DAY_CLOSE), eq(ZONE)))
             .thenReturn(List.of(candidates));
     }
 

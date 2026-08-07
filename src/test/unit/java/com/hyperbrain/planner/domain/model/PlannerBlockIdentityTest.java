@@ -198,13 +198,13 @@ class PlannerBlockIdentityTest {
     void persisted_block_rejects_invalid_input() {
         OffsetDateTime start = OffsetDateTime.of(2026, 7, 21, 9, 0, 0, 0, UTC);
         assertThatThrownBy(() ->
-            new PlannerBlockIdentity.PersistedBlock(null, null, Set.of(ANCHOR), start, start))
+            new PlannerBlockIdentity.PersistedBlock(null, null, Set.of(ANCHOR), start, start, null))
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() ->
-            new PlannerBlockIdentity.PersistedBlock(PERSISTED_ID, null, Set.of(ANCHOR), null, start))
+            new PlannerBlockIdentity.PersistedBlock(PERSISTED_ID, null, Set.of(ANCHOR), null, start, null))
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() ->
-            new PlannerBlockIdentity.PersistedBlock(PERSISTED_ID, null, Set.of(ANCHOR), start, null))
+            new PlannerBlockIdentity.PersistedBlock(PERSISTED_ID, null, Set.of(ANCHOR), start, null, null))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -229,7 +229,7 @@ class PlannerBlockIdentityTest {
     private static PlannerBlockIdentity.PersistedBlock persistedBlock(UUID blockId, Set<UUID> members,
                                                                      int startHour, int endHour) {
         return new PlannerBlockIdentity.PersistedBlock(
-            blockId, null, members, at(startHour), at(endHour));
+            blockId, null, members, at(startHour), at(endHour), null);
     }
 
     private static OffsetDateTime at(int hour) {

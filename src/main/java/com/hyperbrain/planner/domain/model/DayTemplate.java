@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -42,22 +43,30 @@ public record DayTemplate(int wakeAnchorMinute, List<TemplateSlot> slots) {
     /**
      * The sanctioned template of ADR-040. Drawn against a 07:00 wake anchor: 06:00–07:00 is the margin
      * for winning against the bed, and by 07:00 one is up.
+     *
+     * <p><b>The labels are in Spanish on purpose</b> — they are not code, they are the default value of
+     * a configuration property, and they end up as the title of an event in Daniel's calendar next to
+     * the ones he writes by hand («WakeUP», «Oficio», «Torbellino»). A block titled in the language
+     * nobody speaks at home reads as a machine's output; that is the whole defect this fixes. Every one
+     * of them is overridable from settings, so the wording is a starting point, not a decision.
      */
     public static final DayTemplate DEFAULT = new DayTemplate(at(7, 0), List.of(
-        new TemplateSlot("WAKE_MARGIN", at(6, 0), at(7, 0), SlotPurpose.WAKE_MARGIN),
-        new TemplateSlot("PERSONAL_ROUTINE", at(7, 0), at(8, 0), SlotPurpose.PERSONAL_ROUTINE),
-        new TemplateSlot("DAILY_STANDUP", at(8, 0), at(8, 20), SlotPurpose.AGENDA_ANCHOR),
-        new TemplateSlot("MORNING_BUFFER", at(8, 20), at(8, 30), SlotPurpose.BUFFER),
-        new TemplateSlot("GOAL_MORNING", at(8, 30), at(10, 30), SlotPurpose.GOAL),
-        new TemplateSlot("LONG_BREAK", at(10, 30), at(11, 0), SlotPurpose.BREAK),
-        new TemplateSlot("WORK_MORNING", at(11, 0), at(13, 0), SlotPurpose.WORK),
-        new TemplateSlot("LUNCH", at(13, 0), at(14, 0), SlotPurpose.MEAL),
-        new TemplateSlot("WHIRLWIND_LIGHT", at(14, 0), at(14, 30), SlotPurpose.WHIRLWIND),
-        new TemplateSlot("FIXED_MEETING", at(14, 30), at(15, 30), SlotPurpose.AGENDA_ANCHOR),
-        new TemplateSlot("MEETING_ZONE", at(15, 30), at(17, 0), SlotPurpose.MEETING_ZONE),
-        new TemplateSlot("FREE_EVENING", at(17, 0), at(19, 0), SlotPurpose.FREE),
-        new TemplateSlot("HOUSEHOLD", at(19, 0), at(21, 0), SlotPurpose.HOUSEHOLD),
-        new TemplateSlot("WIND_DOWN", at(21, 0), at(22, 0), SlotPurpose.WIND_DOWN)));
+        new TemplateSlot("WAKE_MARGIN", "Despertar", at(6, 0), at(7, 0), SlotPurpose.WAKE_MARGIN),
+        new TemplateSlot("PERSONAL_ROUTINE", "Rutina personal", at(7, 0), at(8, 0),
+            SlotPurpose.PERSONAL_ROUTINE),
+        new TemplateSlot("DAILY_STANDUP", "Daily", at(8, 0), at(8, 20), SlotPurpose.AGENDA_ANCHOR),
+        new TemplateSlot("MORNING_BUFFER", "Respiro", at(8, 20), at(8, 30), SlotPurpose.BUFFER),
+        new TemplateSlot("GOAL_MORNING", "Meta de la mañana", at(8, 30), at(10, 30), SlotPurpose.GOAL),
+        new TemplateSlot("LONG_BREAK", "Descanso", at(10, 30), at(11, 0), SlotPurpose.BREAK),
+        new TemplateSlot("WORK_MORNING", "Oficio", at(11, 0), at(13, 0), SlotPurpose.WORK),
+        new TemplateSlot("LUNCH", "Almuerzo", at(13, 0), at(14, 0), SlotPurpose.MEAL),
+        new TemplateSlot("WHIRLWIND_LIGHT", "Torbellino", at(14, 0), at(14, 30), SlotPurpose.WHIRLWIND),
+        new TemplateSlot("FIXED_MEETING", "Reunión fija", at(14, 30), at(15, 30),
+            SlotPurpose.AGENDA_ANCHOR),
+        new TemplateSlot("MEETING_ZONE", "Reuniones", at(15, 30), at(17, 0), SlotPurpose.MEETING_ZONE),
+        new TemplateSlot("FREE_EVENING", "Tarde libre", at(17, 0), at(19, 0), SlotPurpose.FREE),
+        new TemplateSlot("HOUSEHOLD", "Casa", at(19, 0), at(21, 0), SlotPurpose.HOUSEHOLD),
+        new TemplateSlot("WIND_DOWN", "Cierre del día", at(21, 0), at(22, 0), SlotPurpose.WIND_DOWN)));
 
     public DayTemplate {
         if (slots == null || slots.isEmpty()) {
@@ -106,6 +115,23 @@ public record DayTemplate(int wakeAnchorMinute, List<TemplateSlot> slots) {
                 midnight.plusMinutes(slot.endMinute() + shift)));
         }
         return List.copyOf(windows);
+    }
+
+    /**
+     * The readable label of one slot — what a block born in that band is called until the intelligent
+     * layer names it better.
+     *
+     * @param slotId the slot key to look up; may be null
+     * @return the slot's label, or empty when this template carries no such slot
+     */
+    public Optional<String> labelOf(String slotId) {
+        if (slotId == null) {
+            return Optional.empty();
+        }
+        return slots.stream()
+            .filter(slot -> slot.id().equals(slotId))
+            .map(TemplateSlot::label)
+            .findFirst();
     }
 
     private static int at(int hour, int minute) {

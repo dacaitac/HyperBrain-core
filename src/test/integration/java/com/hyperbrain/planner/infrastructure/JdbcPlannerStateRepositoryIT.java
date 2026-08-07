@@ -79,19 +79,41 @@ class JdbcPlannerStateRepositoryIT {
     }
 
     @Test
-    @DisplayName("every lifecycle state of a real block walls: open, executing and already closed")
+    @DisplayName("every lifecycle state of a real block walls: reserved, open, executing and closed")
     void open_and_closed_blocks_all_wall() {
+        // The state a block Daniel creates by hand is born in: it arrives from Notion through the
+        // ordinary ingestion of an executable, so nothing ever sets it to PLANNED.
+        UUID reserved = insertUserBlock("Hyperbrain", at(19, 0), at(22, 0));
         UUID planned = insertTimeBlock("Planned", "PLANNED", "PLANNER", at(8, 0), at(9, 0));
         UUID running = insertTimeBlock("Running", "IN_PROGRESS", "USER", at(9, 30), at(10, 30));
         UUID done = insertTimeBlock("Done", "DONE", "PLANNER", at(11, 0), at(12, 0));
         // The expiry sweep closes an unfulfilled block: its window is in the past, and the past is
         // never rewritten, so it keeps walling (the legacy read dropped this state).
         UUID failed = insertTimeBlock("Failed", "FAILED", "PLANNER", at(13, 0), at(14, 0));
+        UUID waiting = insertTimeBlock("Waiting", "WAITING", "USER", at(15, 0), at(16, 0));
 
         List<OccupiedInterval> walls = repository.loadOccupiedIntervals(USER, DAY_START, DAY_END);
 
         assertThat(walls).extracting(OccupiedInterval::executableId)
-            .containsExactlyInAnyOrder(planned, running, done, failed);
+            .containsExactlyInAnyOrder(reserved, planned, running, done, failed, waiting);
+    }
+
+    @Test
+    @DisplayName("a block the user reserved by hand walls in its initial state: TODO is not free time")
+    void a_user_block_in_its_initial_state_is_a_wall() {
+        // Exactly the production row that broke: created from Notion, so no origin and status TODO.
+        UUID evening = insertUserBlock("Hyperbrain", at(19, 0), at(22, 0));
+
+        List<OccupiedInterval> walls = repository.loadOccupiedIntervals(USER, DAY_START, DAY_END);
+
+        // Had this block stayed invisible, the planner would have laid its 20:00 and 21:00 windows
+        // straight on top of the three hours their owner had already spoken for.
+        assertThat(walls).singleElement().satisfies(wall -> {
+            assertThat(wall.executableId()).isEqualTo(evening);
+            assertThat(wall.start()).isEqualTo(at(19, 0));
+            assertThat(wall.end()).isEqualTo(at(22, 0));
+            assertThat(wall.readOnlyAgenda()).isFalse();
+        });
     }
 
     @Test
@@ -226,6 +248,19 @@ class JdbcPlannerStateRepositoryIT {
             INSERT INTO core_executable (id, user_id, name, type, status, origin, start_time, end_time)
             VALUES (?, ?, ?, 'TIME_BLOCK', ?, ?, ?, ?)
             """, id, USER, name, status, origin, start, end);
+        return id;
+    }
+
+    /**
+     * A block as it is really born when the user creates it: from Notion, through the same ingestion
+     * every other executable takes — so it carries no origin and the default {@code TODO} status.
+     */
+    private UUID insertUserBlock(String name, OffsetDateTime start, OffsetDateTime end) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
+            VALUES (?, ?, ?, 'TIME_BLOCK', 'TODO', ?, ?)
+            """, id, USER, name, start, end);
         return id;
     }
 

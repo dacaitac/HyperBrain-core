@@ -1,5 +1,6 @@
 package com.hyperbrain.core.application;
 
+import com.hyperbrain.core.application.rule.BlockClosureReleaseRule;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.ContainmentCopyRule;
@@ -33,6 +34,7 @@ class CoreDomainChangeProcessorTest {
     private ProgressRecalculationRule progressRule;
     private CompletionOutcomeRule completionOutcomeRule;
     private RecurrenceCloneRule habitRule;
+    private BlockClosureReleaseRule blockClosureReleaseRule;
     private CoreDomainChangeProcessor processor;
 
     @BeforeEach
@@ -44,9 +46,10 @@ class CoreDomainChangeProcessorTest {
         progressRule = mock(ProgressRecalculationRule.class);
         completionOutcomeRule = mock(CompletionOutcomeRule.class);
         habitRule = mock(RecurrenceCloneRule.class);
+        blockClosureReleaseRule = mock(BlockClosureReleaseRule.class);
         processor = new CoreDomainChangeProcessor(
             endTimeRule, completionReactivationRule, containmentEligibilityRule, containmentCopyRule,
-            progressRule, completionOutcomeRule, habitRule);
+            progressRule, completionOutcomeRule, habitRule, blockClosureReleaseRule);
     }
 
     @Test
@@ -61,6 +64,7 @@ class CoreDomainChangeProcessorTest {
         ExecutableSnapshot afterProgress = ExecutableSnapshotBuilder.snapshot().name("e").build();
         ExecutableSnapshot afterOutcome = ExecutableSnapshotBuilder.snapshot().name("eo").build();
         ExecutableSnapshot afterHabit = ExecutableSnapshotBuilder.snapshot().name("f").build();
+        ExecutableSnapshot afterRelease = ExecutableSnapshotBuilder.snapshot().name("g").build();
         when(endTimeRule.apply(same(previous), same(merged), eq(ExternalSystem.NOTION)))
             .thenReturn(afterEndTime);
         when(completionReactivationRule.apply(same(previous), same(afterEndTime), eq(ExternalSystem.NOTION)))
@@ -75,12 +79,15 @@ class CoreDomainChangeProcessorTest {
             .thenReturn(afterOutcome);
         when(habitRule.apply(same(previous), same(afterOutcome), eq(ExternalSystem.NOTION)))
             .thenReturn(afterHabit);
+        when(blockClosureReleaseRule.apply(same(previous), same(afterHabit), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterRelease);
 
         ExecutableSnapshot result = processor.process(previous, merged, ExternalSystem.NOTION);
 
-        assertThat(result).isSameAs(afterHabit);
+        assertThat(result).isSameAs(afterRelease);
         InOrder order = inOrder(endTimeRule, completionReactivationRule, containmentEligibilityRule,
-            containmentCopyRule, progressRule, completionOutcomeRule, habitRule);
+            containmentCopyRule, progressRule, completionOutcomeRule, habitRule,
+            blockClosureReleaseRule);
         order.verify(endTimeRule).apply(any(), any(), any());
         order.verify(completionReactivationRule).apply(any(), any(), any());
         order.verify(containmentEligibilityRule).apply(any(), any(), any());
@@ -88,5 +95,6 @@ class CoreDomainChangeProcessorTest {
         order.verify(progressRule).apply(any(), any(), any());
         order.verify(completionOutcomeRule).apply(any(), any(), any());
         order.verify(habitRule).apply(any(), any(), any());
+        order.verify(blockClosureReleaseRule).apply(any(), any(), any());
     }
 }

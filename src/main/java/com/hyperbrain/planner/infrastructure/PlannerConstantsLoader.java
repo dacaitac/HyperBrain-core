@@ -115,11 +115,17 @@ class PlannerConstantsLoader {
      * with no schema of its own). The expected shape under {@code planner_constants.day_template} is
      * <pre>{@code
      * {"wake_anchor": "07:00",
-     *  "slots": [{"id": "GOAL_MORNING", "start": "08:30", "end": "10:30", "purpose": "GOAL"}, ...]}
+     *  "slots": [{"id": "GOAL_MORNING", "label": "Meta de la mañana",
+     *             "start": "08:30", "end": "10:30", "purpose": "GOAL"}, ...]}
      * }</pre>
      * A missing, malformed or empty object degrades to the sanctioned {@link DayTemplate#DEFAULT} —
      * never to an absent template, because a floor with no reference structure collapses the whole day
      * against the first hour (ADR-040 D2).
+     *
+     * <p><b>{@code label} is optional and degrades in two steps</b>, so a settings blob written before
+     * labels existed still yields a readable day: the sanctioned label of a slot with the same id, and
+     * only failing that the id itself. Falling straight back to the id would re-open the defect this
+     * exists to close — a calendar full of {@code MEETING_ZONE}.
      *
      * @return the resolved template; {@code DEFAULT} when settings carry none or carry an invalid one
      */
@@ -145,8 +151,10 @@ class PlannerConstantsLoader {
         }
         List<TemplateSlot> slots = new ArrayList<>(slotsNode.size());
         for (JsonNode slot : slotsNode) {
+            String id = text(slot, "id");
             slots.add(new TemplateSlot(
-                text(slot, "id"),
+                id,
+                label(slot, id),
                 minuteOfDay(text(slot, "start")),
                 minuteOfDay(text(slot, "end")),
                 SlotPurpose.valueOf(text(slot, "purpose"))));
@@ -156,6 +164,19 @@ class PlannerConstantsLoader {
             ? minuteOfDay(anchor.asText())
             : DayTemplate.DEFAULT.wakeAnchorMinute();
         return new DayTemplate(wakeAnchor, slots);
+    }
+
+    /**
+     * The slot's readable label: the configured one, else the sanctioned label of the slot with the
+     * same id, else the id — the last resort, and the only shape in which a technical key can still
+     * reach a calendar event.
+     */
+    private static String label(JsonNode slot, String id) {
+        JsonNode value = slot.get("label");
+        if (value != null && value.isTextual() && !value.asText().isBlank()) {
+            return value.asText();
+        }
+        return DayTemplate.DEFAULT.labelOf(id).orElse(id);
     }
 
     private static String text(JsonNode node, String field) {

@@ -83,7 +83,7 @@ class MorningAgendaDispatchIT {
         boolean fired = deliveryService.dispatchIfDue(USER, ZONE, DUE_NOW);
 
         assertThat(fired).isTrue();
-        // No AgendaBlockPlannedEvent is staged (there are no blocks to deliver)...
+        // No block event is staged at all (there are no blocks to deliver)...
         Integer blockEvents = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM outbox_events WHERE aggregate_type = 'AGENDA_BLOCK'", Integer.class);
         assertThat(blockEvents).isZero();

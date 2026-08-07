@@ -101,7 +101,7 @@ class HumanizedAgendaFloorTest {
 
     private static DayWindow window(String slotId, int startHour, int endHour, SlotPurpose purpose) {
         return new DayWindow(
-            new TemplateSlot(slotId, startHour * 60, endHour * 60, purpose), at(startHour), at(endHour));
+            new TemplateSlot(slotId, slotId, startHour * 60, endHour * 60, purpose), at(startHour), at(endHour));
     }
 
     private static SchedulableExecutable task(double priority, UUID cycleId) {

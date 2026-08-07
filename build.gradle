@@ -17,6 +17,13 @@ java {
     }
 }
 
+// Pinned, not inherited: source files carry accented literals (the day template's readable labels end
+// up as the title of a calendar event), and a build machine whose default charset is not UTF-8 would
+// silently mangle them instead of failing.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
 repositories {
     maven { url 'https://repo.spring.io/milestone' }
     mavenCentral()

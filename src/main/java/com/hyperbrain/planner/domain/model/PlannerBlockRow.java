@@ -8,14 +8,16 @@ import java.util.UUID;
  * executable, the old separate table is frozen history) with the identity the reconciliation assigned
  * it.
  *
- * <p>{@code name} is only honoured when the row is <b>inserted</b>. A block the plan continues keeps
- * the name it already had, because grouping and naming belong to the LLM and they survive a replan
- * (ADR-040 D8); a replan recomputes where the block sits in time and nothing else.
+ * <p>{@code name} is written as given, on insert and on update alike. Protecting a name somebody
+ * authored — the LLM's grouping survives a replan (ADR-040 D8), and so does one the user typed — is
+ * the caller's job, and it does it by carrying the block's current name over into this row. That
+ * inversion is deliberate: while the persistence refused the write outright, a block published under a
+ * bad name could never be corrected in place.
  *
  * @param blockId        the block executable's id — inherited from the block it continues, or freshly
  *                       minted; never null
  * @param userId         the owning user; never null
- * @param name           the block's display name, written on insert only; never blank
+ * @param name           the block's display name as it must end up stored; never blank
  * @param description    the readable block note: why it is there and, for a sized window, the internal
  *                       split Daniel reads to set his timer; may be null
  * @param start          the block start instant; never null

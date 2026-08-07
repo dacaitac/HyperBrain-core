@@ -37,6 +37,33 @@ class DayTemplateTest {
     }
 
     @Test
+    @DisplayName("every band carries a readable label, and none of them is its own technical key")
+    void every_slot_carries_a_readable_label() {
+        // When
+        List<TemplateSlot> slots = DayTemplate.DEFAULT.slots();
+
+        // Then: the label is what reaches the calendar until the intelligent layer names the block, so
+        // a label equal to the slot key would be the very defect this exists to prevent.
+        assertThat(slots).allSatisfy(slot -> {
+            assertThat(slot.label()).isNotBlank();
+            assertThat(slot.label()).isNotEqualTo(slot.id());
+        });
+        assertThat(DayTemplate.DEFAULT.labelOf("GOAL_MORNING")).contains("Meta de la mañana");
+        assertThat(DayTemplate.DEFAULT.labelOf("MEETING_ZONE")).contains("Reuniones");
+        // A band this template does not have has no label to give.
+        assertThat(DayTemplate.DEFAULT.labelOf("NO_SUCH_SLOT")).isEmpty();
+        assertThat(DayTemplate.DEFAULT.labelOf(null)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a slot without a readable label is rejected: the key must never reach the calendar")
+    void a_slot_without_a_label_is_rejected() {
+        assertThatThrownBy(() -> new TemplateSlot("GOAL_MORNING", "  ", 0, 60, SlotPurpose.GOAL))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("label");
+    }
+
+    @Test
     @DisplayName("only the agenda bands are closed to the generator (Daniel, 2026-08-07)")
     void only_the_agenda_bands_are_closed() {
         // When
@@ -120,8 +147,8 @@ class DayTemplateTest {
     void overlapping_slots_are_rejected() {
         // Given
         List<TemplateSlot> overlapping = List.of(
-            new TemplateSlot("A", 0, 120, SlotPurpose.WORK),
-            new TemplateSlot("B", 60, 180, SlotPurpose.GOAL));
+            new TemplateSlot("A", "Uno", 0, 120, SlotPurpose.WORK),
+            new TemplateSlot("B", "Dos", 60, 180, SlotPurpose.GOAL));
 
         // Then
         assertThatThrownBy(() -> new DayTemplate(0, overlapping))
@@ -134,8 +161,8 @@ class DayTemplateTest {
     void duplicate_slot_ids_are_rejected() {
         // Given
         List<TemplateSlot> duplicated = List.of(
-            new TemplateSlot("A", 0, 60, SlotPurpose.WORK),
-            new TemplateSlot("A", 60, 120, SlotPurpose.GOAL));
+            new TemplateSlot("A", "Uno", 0, 60, SlotPurpose.WORK),
+            new TemplateSlot("A", "Otro", 60, 120, SlotPurpose.GOAL));
 
         // Then
         assertThatThrownBy(() -> new DayTemplate(0, duplicated))

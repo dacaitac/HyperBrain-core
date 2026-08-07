@@ -319,19 +319,22 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * {@code core_time_block} table: blocks created from Notion or from the calendar live only here,
      * so anchoring the walls to the frozen table left the Planner blind to them.
      *
-     * <p><b>Which statuses wall.</b> All four of a block's lifecycle states: the open ones
-     * ({@code PLANNED}, {@code IN_PROGRESS}) because they are the plan, and the closed ones
-     * ({@code DONE}, {@code FAILED}) because a block that already ran occupied real time — its window
-     * lies in the past by construction, and the past is never rewritten. The legacy query dropped the
-     * {@code EXPIRED} state (the new {@code FAILED}) so its executable could be re-placed; under the
-     * window model the block is not re-placed — its members are, into the windows that remain — so the
-     * time it consumed stays walled.
+     * <p><b>Status does not decide whether a block walls, and it must not.</b> A block that is not focus
+     * accounting holds real time in whatever state it is in: an open one ({@code PLANNED},
+     * {@code IN_PROGRESS}) is the plan, a closed one ({@code DONE}, {@code FAILED}) occupied time that
+     * has already gone by, and a {@code TODO} one is time the user reserved and has simply not started.
+     * That last case is what a status list got wrong in production: a block Daniel creates by hand is
+     * born from Notion through the ordinary ingestion of an executable, so it arrives as {@code TODO} —
+     * and while {@code TODO} was missing from the list, his evening block was invisible as a wall and
+     * the planner laid three windows straight on top of it. There is no state of a real block that
+     * means "this time is free"; the only thing that means it is the block not being there.
      *
      * <p><b>Why {@code FOCUS} blocks do not wall.</b> A focus block is retrospective accounting of a
      * task that is already running, not planned occupancy: its window is either degenerate (auto-opened
      * with no {@code end_time}, hence the one-minute stub below) or entirely in the past. The occupancy
-     * it accounts for belongs to the task's own container, which already walls. {@code PLANNER} and
-     * {@code USER} blocks — the two that really hold time — both wall.
+     * it accounts for belongs to the task's own container, which already walls. Focus is therefore the
+     * single exclusion, and it is written as {@code IS DISTINCT FROM} rather than a whitelist because a
+     * block Notion created carries no origin at all: a whitelist would have made those invisible too.
      *
      * <p>The end bound falls back to the settlement clock and then to a one-minute stub so an
      * open-ended block still yields the strictly-positive interval {@link OccupiedInterval} requires.
@@ -343,7 +346,6 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         FROM core_executable b
         WHERE b.user_id = ?
           AND b.type = 'TIME_BLOCK'
-          AND b.status IN ('PLANNED', 'IN_PROGRESS', 'DONE', 'FAILED')
           AND b.origin IS DISTINCT FROM 'FOCUS'
           AND b.start_time < ?
           AND COALESCE(b.end_time, b.last_completed_at, b.start_time + interval '1 minute') > ?
@@ -391,8 +393,11 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      *
      * <p>Three properties are load-bearing and none of them is decoration:
      * <ul>
-     *   <li><b>The name is never updated.</b> Naming is the LLM's work and it survives a replan
-     *       (ADR-040 D8); the replan recomputes the block's place in time and nothing else.</li>
+     *   <li><b>The name is written as given, and the caller is the one that protects it.</b> Naming is
+     *       the LLM's work and it survives a replan (ADR-040 D8) — but that rule lives where the two
+     *       names can be compared, in {@code PlannerBlockMaterializer}, which sends back the block's
+     *       current name whenever it must not change. Refusing the write here instead was what left a
+     *       block published under a bad name stuck with it forever.</li>
      *   <li><b>The update is guarded to planner-authored, still-{@code PLANNED} rows</b>, so an id that
      *       collided with a {@code USER} block or with already-started work can never clobber it.</li>
      *   <li><b>Nothing is written when nothing moved</b> ({@code IS DISTINCT FROM} guards): the update
@@ -406,14 +411,16 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
              start_time, end_time, template_slot_id, system_generated)
         VALUES (?, ?, ?, ?, 'TIME_BLOCK', 'PLANNED', 'PLANNER', ?, ?, ?, false)
         ON CONFLICT (id) DO UPDATE
-           SET start_time       = EXCLUDED.start_time,
+           SET name             = EXCLUDED.name,
+               start_time       = EXCLUDED.start_time,
                end_time         = EXCLUDED.end_time,
                description      = EXCLUDED.description,
                template_slot_id = EXCLUDED.template_slot_id
          WHERE core_executable.type   = 'TIME_BLOCK'
            AND core_executable.origin = 'PLANNER'
            AND core_executable.status = 'PLANNED'
-           AND (core_executable.start_time       IS DISTINCT FROM EXCLUDED.start_time
+           AND (core_executable.name             IS DISTINCT FROM EXCLUDED.name
+             OR core_executable.start_time       IS DISTINCT FROM EXCLUDED.start_time
              OR core_executable.end_time         IS DISTINCT FROM EXCLUDED.end_time
              OR core_executable.description      IS DISTINCT FROM EXCLUDED.description
              OR core_executable.template_slot_id IS DISTINCT FROM EXCLUDED.template_slot_id)
@@ -431,6 +438,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     private static final String REGENERABLE_BLOCKS_SQL = """
         SELECT b.id,
                b.template_slot_id,
+               b.name,
                b.start_time,
                COALESCE(b.end_time, b.start_time + interval '1 minute') AS end_time,
                m.id AS member_id
@@ -624,6 +632,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             if (accumulator == null) {
                 accumulator = new PersistedBlockAccumulator(
                     rs.getString("template_slot_id"),
+                    rs.getString("name"),
                     rs.getObject("start_time", OffsetDateTime.class),
                     rs.getObject("end_time", OffsetDateTime.class));
                 accumulators.put(blockId, accumulator);
@@ -637,7 +646,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         return accumulators.entrySet().stream()
             .map(entry -> new PlannerBlockIdentity.PersistedBlock(
                 entry.getKey(), entry.getValue().templateSlotId(), entry.getValue().members(),
-                entry.getValue().start(), entry.getValue().end()))
+                entry.getValue().start(), entry.getValue().end(), entry.getValue().name()))
             .toList();
     }
 
@@ -696,11 +705,12 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     }
 
     /** Groups the joined block/member rows of {@link #loadRegenerableBlocks} into one block. */
-    private record PersistedBlockAccumulator(Set<UUID> members, String templateSlotId,
+    private record PersistedBlockAccumulator(Set<UUID> members, String templateSlotId, String name,
                                              OffsetDateTime start, OffsetDateTime end) {
 
-        PersistedBlockAccumulator(String templateSlotId, OffsetDateTime start, OffsetDateTime end) {
-            this(new LinkedHashSet<>(), templateSlotId, start, end);
+        PersistedBlockAccumulator(String templateSlotId, String name, OffsetDateTime start,
+                                  OffsetDateTime end) {
+            this(new LinkedHashSet<>(), templateSlotId, name, start, end);
         }
     }
 

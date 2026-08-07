@@ -7,7 +7,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.UUID;
 
@@ -17,10 +17,12 @@ import java.util.UUID;
  * is generated. Thin by design — {@link OverdueSweepService} decides everything, so tests drive the
  * sweep deterministically without the clock.
  *
- * <p><b>The reference day is today.</b> The sweep opens day D and closes day D−1: everything whose
- * window ended before D expired, and a task that expired is re-dated ONTO D — literally "the next
- * day" relative to the day that just closed, and exactly what the admission rule needs to see it as
- * a candidate again.
+ * <p><b>The reference is the firing instant.</b> Running in the small hours of day D, "everything
+ * behind now" is day D−1 and earlier, and what is retired lands ON D — literally "the next day"
+ * relative to the day that just closed, and exactly what the admission rule needs to see it as a
+ * candidate again. This is no longer the only trigger: the same sweep runs on every replan
+ * (Daniel, 2026-08-07), which is why the service takes an instant and this scheduler no longer
+ * decides anything but when to fire.
  *
  * <p><b>Off by default, on purpose.</b> Unlike its sibling schedulers this bean does not exist
  * unless {@code app.core.overdue-sweep.enabled=true}: the sweep mutates real rows and pushes those
@@ -54,6 +56,6 @@ public class OverdueSweepScheduler {
         cron = "${app.core.overdue-sweep.cron:0 0 3 * * *}",
         zone = "${app.core.overdue-sweep.zone:America/Bogota}")
     public void sweepPreviousDay() {
-        sweepService.sweep(defaultUserId, LocalDate.now(zone), zone);
+        sweepService.sweep(defaultUserId, OffsetDateTime.now(zone), zone);
     }
 }
