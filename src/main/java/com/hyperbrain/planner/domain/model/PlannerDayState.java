@@ -15,6 +15,9 @@ import java.util.List;
  *   <li>{@code rankedExecutables} — the day's schedulables ordered by {@code priority_score}
  *       highest-first (the floor reads the score, never recomputes it);</li>
  *   <li>{@code wigPortfolio} — the active MCIs (1–3), for the F1 per-MCI reservation;</li>
+ *   <li>{@code windows} — the day's laid windows (ADR-040): the unit of scheduling. Already resolved
+ *       against the template, the real wake instant and the hard walls, so the generator only decides
+ *       WHAT goes in each one, never WHERE a window sits;</li>
  *   <li>{@code occupied} — the hard walls already spoken for (existing blocks, AGENDA windows);</li>
  *   <li>{@code energyProfile} — the resolved F3 margin / F6 quota and its readable criterion;</li>
  *   <li>{@code dataComplete} — false when a required signal was missing, steering the generator into
@@ -23,6 +26,8 @@ import java.util.List;
  *
  * @param windowStart       concrete planning-window start; never null
  * @param windowEnd         concrete planning-window end; never null, after {@code windowStart}
+ * @param windows           the day's laid windows, chronologically ordered; never null, may be empty
+ *                          (a day whose every band is spoken for plans nothing, which is legitimate)
  * @param rankedExecutables schedulables ordered highest priority first; never null
  * @param wigPortfolio      the active MCIs for the F1 per-MCI reservation; never null, may be empty
  * @param occupied          the hard walls to plan around; never null
@@ -32,6 +37,7 @@ import java.util.List;
 public record PlannerDayState(
     OffsetDateTime windowStart,
     OffsetDateTime windowEnd,
+    List<DayWindow> windows,
     List<SchedulableExecutable> rankedExecutables,
     List<MciWig> wigPortfolio,
     List<OccupiedInterval> occupied,
@@ -50,6 +56,7 @@ public record PlannerDayState(
         if (energyProfile == null) {
             throw new IllegalArgumentException("energyProfile must not be null");
         }
+        windows = windows == null ? List.of() : List.copyOf(windows);
         rankedExecutables = rankedExecutables == null ? List.of() : List.copyOf(rankedExecutables);
         wigPortfolio = wigPortfolio == null ? List.of() : List.copyOf(wigPortfolio);
         occupied = occupied == null ? List.of() : List.copyOf(occupied);

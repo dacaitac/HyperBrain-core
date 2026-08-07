@@ -20,12 +20,14 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Verifies the two facts ADR-026 D5/D6 pin down against a real PostgreSQL:
+ * Verifies slot authority (ADR-026 D6) against a real PostgreSQL.
+ *
+ * <p>D5's reschedule seed — re-placing a task at the hour of its last expired block — is gone with the
+ * cursor sweep it served (ADR-040). Under the window model a task is not re-timed at all: it becomes a
+ * member of the window that holds it, and it is the window that carries the hour. The seed had no
+ * successor to point at, so its tests went with it rather than being re-pointed at nothing.
+ *
  * <ul>
- *   <li><b>D5 — reschedule of a vencido block.</b> {@code loadRankedExecutables} surfaces, as the
- *       executable's {@code rescheduleSeed}, the wall-clock hour of its last {@code EXPIRED} PLANNER
- *       block projected onto the target day (ADR-026 D3) — and only when no live block remains, so a
- *       still-placed task keeps the Planner's full authorship (D4).</li>
  *   <li><b>D6 — slot authority / user override.</b> Work the user timed by hand — held by a
  *       {@code USER}-origin block, or by one already under way — is not even offered to the floor, so a
  *       replan cannot quietly pull it out of the block the user put it in. Containment being monovalent
@@ -54,60 +56,6 @@ class RescheduleAndSlotAuthorityIT {
             DataFixture.insertSystemUser(conn);
         }
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'UTC' WHERE id = ?", USER);
-    }
-
-    @Test
-    @DisplayName("D5: the reschedule seed is the hour of the last EXPIRED block, projected onto the target day")
-    void reschedule_seed_derives_the_hour_of_the_last_expired_block() {
-        UUID task = insertTask("Overdue task");
-        // The task's last block ran the day before at 15:00–16:00 and expired unattended.
-        insertRawBlock(task, at(2026, 7, 9, 15), at(2026, 7, 9, 16), "EXPIRED", "PLANNER");
-
-        List<SchedulableExecutable> ranked =
-            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
-
-        assertThat(ranked).singleElement().satisfies(executable -> assertThat(executable.rescheduleSeed())
-            .isEqualTo(at(2026, 7, 10, 15)));
-    }
-
-    @Test
-    @DisplayName("D5: the most recent EXPIRED block wins the seed hour")
-    void reschedule_seed_uses_the_most_recent_expired_block() {
-        UUID task = insertTask("Twice-expired task");
-        insertRawBlock(task, at(2026, 7, 7, 9), at(2026, 7, 7, 10), "EXPIRED", "PLANNER");
-        insertRawBlock(task, at(2026, 7, 9, 15), at(2026, 7, 9, 16), "EXPIRED", "PLANNER");
-
-        List<SchedulableExecutable> ranked =
-            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
-
-        assertThat(ranked).singleElement().satisfies(executable -> assertThat(executable.rescheduleSeed())
-            .isEqualTo(at(2026, 7, 10, 15)));
-    }
-
-    @Test
-    @DisplayName("D5: a task that still holds a live block carries no seed — the Planner keeps full authorship (D4)")
-    void no_seed_while_a_live_block_remains() {
-        UUID task = insertTask("Still-planned task");
-        insertRawBlock(task, at(2026, 7, 9, 15), at(2026, 7, 9, 16), "EXPIRED", "PLANNER");
-        insertRawBlock(task, at(2026, 7, 10, 8), at(2026, 7, 10, 9), "PLANNED", "PLANNER");
-
-        List<SchedulableExecutable> ranked =
-            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
-
-        assertThat(ranked).singleElement().satisfies(executable ->
-            assertThat(executable.rescheduleSeed()).isNull());
-    }
-
-    @Test
-    @DisplayName("D5: a task with no block at all carries no seed")
-    void no_seed_without_any_prior_block() {
-        insertTask("Fresh task");
-
-        List<SchedulableExecutable> ranked =
-            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
-
-        assertThat(ranked).singleElement().satisfies(executable ->
-            assertThat(executable.rescheduleSeed()).isNull());
     }
 
     @Test

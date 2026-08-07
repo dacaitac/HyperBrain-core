@@ -143,16 +143,17 @@ class AgendaValidatorTest {
     }
 
     @Test
-    @DisplayName("F6: a high-load block beyond the quota is rejected")
-    void rejects_high_load_beyond_quota() {
+    @DisplayName("the high-load quota no longer trims the day: both blocks stand (ADR-040 D1)")
+    void high_load_is_no_longer_a_wall() {
         AgendaBlock h1 = block(WAKE, WAKE.plusMinutes(60), false, true);
         AgendaBlock h2 = block(WAKE.plusMinutes(60), WAKE.plusMinutes(120), false, true);
 
+        // A quota of one would once have cut the second block. The quota is gone with the other three
+        // capacity discounts: availability lives on the time axis, and nothing trims the tail of a day.
         ValidatedAgenda result = validator.validate(List.of(h1, h2), context(1, Set.of()));
 
-        assertThat(result.accepted()).containsExactly(h1);
-        assertThat(result.violations()).singleElement()
-            .satisfies(v -> assertThat(v.wall()).isEqualTo(Wall.HIGH_LOAD_QUOTA_EXCEEDED));
+        assertThat(result.isClean()).isTrue();
+        assertThat(result.accepted()).containsExactly(h1, h2);
     }
 
     @Test

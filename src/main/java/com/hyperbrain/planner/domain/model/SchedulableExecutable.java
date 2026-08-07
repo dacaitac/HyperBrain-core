@@ -35,22 +35,15 @@ import java.util.UUID;
  *                             work already spent, subtracted in the without-subtasks branch
  * @param dueInstant           the executable's due timestamp ({@code COALESCE(end_time, start_time)});
  *                             when non-null it scopes WHICH day the executable is schedulable (the
- *                             day-filter in {@code AgendaGenerationService}). Since ADR-026 D4 it no
- *                             longer seeds WHERE inside the day the block lands — placement is the
- *                             Planner's own authorship. Null when no due date is set
+ *                             admission rule in {@code AgendaGenerationService}, ADR-040 D3: today's
+ *                             items plus the dateless bag, nothing else). Since ADR-026 D4 it does not
+ *                             seed WHERE inside the day the work lands, and since the window model it
+ *                             does not seed anything at all — work sits at the start of the window that
+ *                             holds it. Null when no due date is set
  * @param cycleId              the {@code core_executable.cycle_id} this executable belongs to; the
  *                             context key the humanized floor batches on (same Cycle/type placed
  *                             adjacently to cut context-switching, H1 rule 4); null when the executable
  *                             hangs off no cycle
- * @param rescheduleSeed       the instant on the target day at which to <em>reschedule</em> this
- *                             executable — the same wall-clock time-of-day as its last
- *                             {@code core_time_block} (ADR-026 D5/D3), carried forward when the task's
- *                             existing blocks are all {@code EXPIRED} (vencidos) and no live block
- *                             remains. When present the generator seeds the block's start here (never
- *                             overriding a hard wall or the window); null for a fresh placement, where
- *                             the Planner owns the WHERE entirely (ADR-026 D4). Sourced from the
- *                             Planner's own prior slot — not the authorial reminder time D4 retired —
- *                             so the reschedule keeps a task at the hour the system last chose for it
  */
 public record SchedulableExecutable(
     UUID id,
@@ -63,8 +56,7 @@ public record SchedulableExecutable(
     Integer estimatedMinutes,
     int settledActualMinutes,
     OffsetDateTime dueInstant,
-    UUID cycleId,
-    OffsetDateTime rescheduleSeed
+    UUID cycleId
 ) {
 
     public SchedulableExecutable {
@@ -80,21 +72,7 @@ public record SchedulableExecutable(
         if (settledActualMinutes < 0) {
             throw new IllegalArgumentException("settledActualMinutes must be non-negative: " + settledActualMinutes);
         }
-        // dueInstant and rescheduleSeed nullable: no validation needed
-    }
-
-    /**
-     * Convenience constructor for a freshly-placed executable with no reschedule seed (the common
-     * case: a task the Planner places by its own authorship, ADR-026 D4). Keeps every existing call
-     * site — and the whole fresh-placement path — unchanged by defaulting {@code rescheduleSeed} to
-     * null.
-     */
-    public SchedulableExecutable(
-        UUID id, ExecutableType type, Double priorityScore, boolean inProgress, Integer energyDrain,
-        Double learnedUnitCost, int pendingSubtasks, Integer estimatedMinutes, int settledActualMinutes,
-        OffsetDateTime dueInstant, UUID cycleId) {
-        this(id, type, priorityScore, inProgress, energyDrain, learnedUnitCost, pendingSubtasks,
-            estimatedMinutes, settledActualMinutes, dueInstant, cycleId, null);
+        // dueInstant nullable: no validation needed
     }
 
     /** @return the ranking key: the priority score, or the neutral floor {@code 0.0} when null */

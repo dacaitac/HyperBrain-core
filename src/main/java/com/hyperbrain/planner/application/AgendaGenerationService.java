@@ -8,6 +8,7 @@ import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaBlockPlannedEvent;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
+import com.hyperbrain.planner.domain.model.DayWindow;
 import com.hyperbrain.planner.domain.model.EmptyAgendaProposedEvent;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
@@ -25,6 +26,7 @@ import com.hyperbrain.planner.domain.port.out.AgendaProposer;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import com.hyperbrain.planner.domain.service.AgendaInputHasher;
 import com.hyperbrain.planner.domain.service.AgendaValidator;
+import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
@@ -74,6 +76,7 @@ public class AgendaGenerationService {
 
     private final PlannerStateRepository repository;
     private final PlannerBlockMaterializer blockMaterializer;
+    private final DayWindowResolver dayWindowResolver;
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final EnergyResolver energyResolver;
     private final PlanningWindowResolver planningWindowResolver;
@@ -89,6 +92,7 @@ public class AgendaGenerationService {
     AgendaGenerationService(
         PlannerStateRepository repository,
         PlannerBlockMaterializer blockMaterializer,
+        DayWindowResolver dayWindowResolver,
         SleepFrontierCalculator sleepFrontierCalculator,
         EnergyResolver energyResolver,
         PlanningWindowResolver planningWindowResolver,
@@ -102,6 +106,7 @@ public class AgendaGenerationService {
         ObjectProvider<AgendaProposer> agendaProposerProvider) {
         this.repository = repository;
         this.blockMaterializer = blockMaterializer;
+        this.dayWindowResolver = dayWindowResolver;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
         this.planningWindowResolver = planningWindowResolver;
@@ -300,15 +305,15 @@ public class AgendaGenerationService {
 
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
+        // Admission (ADR-040 D3): the day takes what is dated FOR it, plus the dateless bag it draws
+        // from. Nothing else — an overdue item is not dragged forward here, because the day-close sweep
+        // (D4) is what re-dates it; pulling the past into today as well would double-count it and undo
+        // the sweep's work. A future-dated item waits for its own day.
         List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd)
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
-            // A dated executable is schedulable once its due day has arrived: on its due day, or — when
-            // already overdue — from today onward (an overdue task must be replanned, not dropped from
-            // every day). A future-dated one waits for its day. The multi-day replan's cross-day
-            // exclusion keeps it on a single day (the first that schedules it), never duplicated.
             .filter(e -> e.dueInstant() == null
-                      || !e.dueInstant().atZoneSameInstant(zone).toLocalDate().isAfter(targetDay))
+                      || e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
             .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
         List<OccupiedInterval> occupied = new ArrayList<>(repository.loadOccupiedIntervals(
@@ -332,9 +337,16 @@ public class AgendaGenerationService {
         // observed flag only distinguishes learned vs. default, not usable vs. unusable.
         boolean dataComplete = true;
 
+        // The day's windows are laid before anything is put in them (ADR-040): against the template,
+        // displaced by the REAL wake instant, and clipped by the same walls the generator plans around.
+        // The floor decides what goes in each window; it never decides where a window sits.
+        List<DayWindow> windows = dayWindowResolver.resolve(
+            targetDay, zone, window.frontierStart(), window.lowerBound(), window.frontierEnd(),
+            planningWalls);
+
         PlannerDayState state = new PlannerDayState(
-            window.lowerBound(), window.frontierEnd(), ranked, wigPortfolio, planningWalls, energy,
-            dataComplete);
+            window.lowerBound(), window.frontierEnd(), windows, ranked, wigPortfolio, planningWalls,
+            energy, dataComplete);
         return new PreparedDay(state, window, planningWalls, energy.criterion());
     }
 

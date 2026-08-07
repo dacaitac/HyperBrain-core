@@ -1,204 +1,114 @@
 package com.hyperbrain.planner.domain.service;
 
 import com.hyperbrain.planner.domain.model.Agenda;
-import com.hyperbrain.planner.domain.model.AgendaBlock;
+import com.hyperbrain.planner.domain.model.DayWindow;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.EnergyTier;
-import com.hyperbrain.planner.domain.model.ExclusionReason;
 import com.hyperbrain.planner.domain.model.ExecutableType;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
-import com.hyperbrain.planner.domain.model.MciWig;
-import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.model.PlannerDayState;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
+import com.hyperbrain.planner.domain.model.SlotPurpose;
+import com.hyperbrain.planner.domain.model.TemplateSlot;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@DisplayName("HumanizedAgendaFloor (H1, composed humanized deterministic floor)")
+/**
+ * The floor pipeline after ADR-040: batch by context, then fill the windows. The post-placement stage
+ * this used to end with is gone — dropping slivers and trimming to an occupancy cap were two of the
+ * four capacity discounts D1 retired.
+ */
+@DisplayName("HumanizedAgendaFloor — batch, then fill the day's windows (ADR-040 D6)")
 class HumanizedAgendaFloorTest {
 
-    private static final OffsetDateTime WAKE = OffsetDateTime.of(2026, 7, 10, 7, 0, 0, 0, ZoneOffset.UTC);
-    private static final OffsetDateTime BEDTIME = OffsetDateTime.of(2026, 7, 10, 23, 0, 0, 0, ZoneOffset.UTC);
-
-    /** No chaos margin, so the ranking may use the whole window — humanization does the trimming. */
-    private static final EnergyProfile FULL_WINDOW =
-        new EnergyProfile(EnergyTier.NEUTRAL, 0.0, 16, "no chaos margin");
+    private static final LocalDate DAY = LocalDate.of(2026, 8, 7);
+    private static final EnergyProfile NEUTRAL =
+        new EnergyProfile(EnergyTier.NEUTRAL, 0.0, 3, "neutral");
 
     @Test
-    @DisplayName("rule 1: a transition buffer spaces consecutive blocks apart")
-    void inserts_transition_buffer_between_blocks() {
-        HumanizationSettings settings = settings(5, List.of(), 0, 0.0, 1.0);
-        SchedulableExecutable a = task(0.9, 60);
-        SchedulableExecutable b = task(0.8, 60);
+    @DisplayName("the degraded day comes out laid and ordered, but neither grouped nor named")
+    void the_degraded_day_is_laid_and_ordered_but_unnamed() {
+        // Given
+        List<SchedulableExecutable> ranked = List.of(task(0.9, null), task(0.5, null));
 
-        Agenda agenda = floor(settings).generate(
-            state(WAKE, BEDTIME, List.of(a, b), List.of(), List.of()));
+        // When
+        Agenda agenda = floor().generate(state(
+            List.of(window("WORK", 9, 11, SlotPurpose.WORK)), ranked));
 
-        assertThat(agenda.blocks()).hasSize(2);
-        AgendaBlock first = agenda.blocks().get(0);
-        AgendaBlock second = agenda.blocks().get(1);
-        assertThat(Duration.between(first.end(), second.start()).toMinutes()).isEqualTo(5);
+        // Then: a block exists, its membership is ordered by rank, and it carries no name at all —
+        // grouping and naming are the intelligent layer's work.
+        assertThat(agenda.blocks()).singleElement().satisfies(block -> {
+            assertThat(block.members()).containsExactly(ranked.get(0).id(), ranked.get(1).id());
+            assertThat(block.theme()).isNull();
+            assertThat(block.reason()).isNotBlank();
+        });
+        assertThat(agenda.degraded()).isFalse();
     }
 
     @Test
-    @DisplayName("rule 2: no block invades a protected meal-anchor wall")
-    void never_invades_meal_window() {
-        HumanizationSettings settings = settings(0, List.of(), 0, 0.0, 1.0);
-        OccupiedInterval lunch = new OccupiedInterval(null,
-            OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, ZoneOffset.UTC),
-            OffsetDateTime.of(2026, 7, 10, 13, 30, 0, 0, ZoneOffset.UTC), false);
-        List<SchedulableExecutable> ranked = IntStream.range(0, 8)
-            .mapToObj(i -> task(0.9 - i * 0.01, 60)).toList();
+    @DisplayName("context batching keeps same-cycle work together inside a comparable-priority band")
+    void context_batching_groups_comparable_work() {
+        // Given: two cycles interleaved by score, all inside one 0.10 band.
+        UUID alpha = UUID.randomUUID();
+        UUID beta = UUID.randomUUID();
+        List<SchedulableExecutable> ranked = List.of(
+            task(0.90, alpha), task(0.88, beta), task(0.86, alpha), task(0.84, beta));
 
-        Agenda agenda = floor(settings).generate(
-            state(WAKE, BEDTIME, ranked, List.of(), List.of(lunch)));
+        // When: two windows, so the batching decides which pair shares a window.
+        Agenda agenda = floor().generate(state(List.of(
+            window("MORNING", 9, 11, SlotPurpose.WORK),
+            window("AFTERNOON", 14, 16, SlotPurpose.WHIRLWIND)), ranked));
 
-        assertThat(agenda.blocks()).allSatisfy(block ->
-            assertThat(block.start().isBefore(lunch.end()) && block.end().isAfter(lunch.start()))
-                .as("block %s-%s must not overlap lunch", block.start(), block.end())
-                .isFalse());
+        // Then: each window holds one cycle's work rather than a slice of both.
+        List<UUID> first = agenda.blocks().get(0).members();
+        assertThat(first).hasSize(2);
+        assertThat(cycleOf(ranked, first.get(0))).isEqualTo(cycleOf(ranked, first.get(1)));
     }
 
     @Test
-    @DisplayName("rule 3: a sub-minimum block is not left as a sliver")
-    void drops_sub_minimum_slivers() {
-        HumanizationSettings settings = settings(0, List.of(), 15, 0.0, 1.0);
-        SchedulableExecutable sliver = task(0.9, 10);
-        SchedulableExecutable viable = task(0.8, 60);
-
-        Agenda agenda = floor(settings).generate(
-            state(WAKE, BEDTIME, List.of(sliver, viable), List.of(), List.of()));
-
-        assertThat(agenda.blocks()).extracting(AgendaBlock::executableId).containsExactly(viable.id());
-        assertThat(agenda.blocks()).allSatisfy(block ->
-            assertThat(block.durationMinutes()).isGreaterThanOrEqualTo(15));
-        assertThat(agenda.excluded()).anyMatch(e ->
-            e.executableId().equals(sliver.id()) && e.reason() == ExclusionReason.BELOW_MIN_BLOCK);
+    @DisplayName("the floor rejects a null state instead of planning an empty day by accident")
+    void a_null_state_is_rejected() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> floor().generate(null))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
-    @Test
-    @DisplayName("rule 4: same-context work is batched adjacently without breaking priority")
-    void batches_same_context_adjacently() {
-        HumanizationSettings settings = settings(0, List.of(), 0, 0.10, 1.0);
-        UUID cycleA = UUID.randomUUID();
-        UUID cycleB = UUID.randomUUID();
-        SchedulableExecutable a = task(cycleA, 0.90, 30);
-        SchedulableExecutable b = task(cycleB, 0.88, 30);
-        SchedulableExecutable c = task(cycleA, 0.86, 30);
+    // ── helpers ──────────────────────────────────────────────────────────────
 
-        Agenda agenda = floor(settings).generate(
-            state(WAKE, BEDTIME, List.of(a, b, c), List.of(), List.of()));
-
-        // Same-cycle A and C are placed adjacently (A, C), then B — all within one comparable band.
-        assertThat(agenda.blocks()).extracting(AgendaBlock::executableId)
-            .containsExactly(a.id(), c.id(), b.id());
-    }
-
-    @Test
-    @DisplayName("rule 6: the day is filled inside the 75–85% occupancy band, never packed to 100%")
-    void respects_occupancy_band() {
-        HumanizationSettings settings = settings(0, List.of(), 0, 0.0, 0.85);
-        // Sixteen 60-min tasks would fill the 960-min window to 100%; the cap trims it back.
-        List<SchedulableExecutable> ranked = IntStream.range(0, 16)
-            .mapToObj(i -> task(0.99 - i * 0.01, 60)).toList();
-
-        Agenda agenda = floor(settings).generate(
-            state(WAKE, BEDTIME, ranked, List.of(), List.of()));
-
-        long busy = agenda.blocks().stream().mapToLong(AgendaBlock::durationMinutes).sum();
-        double occupancy = busy / 960.0;
-        assertThat(occupancy).isBetween(0.75, 0.85);
-        assertThat(agenda.excluded()).anyMatch(e -> e.reason() == ExclusionReason.OVER_OCCUPANCY_CAP);
-    }
-
-    @Test
-    @DisplayName("ADR-026 D4: a habit's authorial anchor no longer seeds placement — it is placed by rank")
-    void habit_placement_is_authorial_independent() {
-        // Before ADR-026 D4 a habit was pinned to its authorial anchor via dueInstant. That coupling is
-        // retired: placement is now the Planner's own authorship (smart/stable placement returns with
-        // the ADR-029 cognitive layer). Here the habit is the highest-ranked item on both days (the
-        // ranked list is score-descending, mirroring the repository read), so it is placed FIRST at the
-        // window start (07:00) — driven by rank, never anchored to its late 20:00 due instant. The
-        // anchor still scopes WHICH day the habit is schedulable, never WHERE in the day.
-        HumanizationSettings settings = settings(0, List.of(), 0, 0.0, 1.0);
-        UUID habitId = UUID.randomUUID();
-
-        // Day 1: highest-ranked habit carries a late 20:00 authorial anchor, with lower-ranked clutter.
-        OffsetDateTime day1Anchor = OffsetDateTime.of(2026, 7, 10, 20, 0, 0, 0, ZoneOffset.UTC);
-        SchedulableExecutable habitDay1 = habit(habitId, day1Anchor, 45);
-        Agenda day1 = floor(settings).generate(state(WAKE, BEDTIME,
-            List.of(habitDay1, task(0.40, 30)), List.of(), List.of()));
-
-        // Day 2: same habit identity and anchor, a different amount and shape of lower-ranked clutter.
-        OffsetDateTime wake2 = WAKE.plusDays(1);
-        OffsetDateTime bedtime2 = BEDTIME.plusDays(1);
-        OffsetDateTime day2Anchor = OffsetDateTime.of(2026, 7, 11, 20, 0, 0, 0, ZoneOffset.UTC);
-        SchedulableExecutable habitDay2 = habit(habitId, day2Anchor, 45);
-        Agenda day2 = floor(settings).generate(state(wake2, bedtime2,
-            List.of(habitDay2, task(0.30, 30), task(0.20, 30), task(0.10, 30)), List.of(), List.of()));
-
-        // Placement is by rank, not by the authorial 20:00 anchor: the habit lands at the window start
-        // on both days, and never at hour 20.
-        assertThat(habitBlockLocalHour(day1, habitId)).isEqualTo(WAKE.getHour());
-        assertThat(habitBlockLocalHour(day2, habitId)).isEqualTo(wake2.getHour());
-        assertThat(habitBlockLocalHour(day1, habitId)).isNotEqualTo(day1Anchor.getHour());
-    }
-
-    // ─── helpers ───────────────────────────────────────────────────────────────
-
-    private static HumanizedAgendaFloor floor(HumanizationSettings settings) {
+    private static HumanizedAgendaFloor floor() {
+        HumanizationSettings settings = new HumanizationSettings(List.of(), 0.10);
         return new HumanizedAgendaFloor(
-            new ContextBatcher(),
-            new AgendaGenerator(PlannerConstraints.DEFAULT, settings),
-            new AgendaHumanizer(),
-            settings);
+            new ContextBatcher(), new AgendaGenerator(PlannerConstraints.DEFAULT), settings);
     }
 
-    private static int habitBlockLocalHour(Agenda agenda, UUID habitId) {
-        return agenda.blocks().stream()
-            .filter(b -> b.executableId().equals(habitId))
-            .findFirst()
-            .orElseThrow()
-            .start()
-            .getHour();
+    private static UUID cycleOf(List<SchedulableExecutable> ranked, UUID id) {
+        return ranked.stream().filter(e -> e.id().equals(id)).findFirst().orElseThrow().cycleId();
     }
 
-    private static PlannerDayState state(OffsetDateTime windowStart, OffsetDateTime windowEnd,
-                                         List<SchedulableExecutable> ranked, List<MciWig> wigs,
-                                         List<OccupiedInterval> occupied) {
-        return new PlannerDayState(
-            windowStart, windowEnd, ranked, wigs, new ArrayList<>(occupied), FULL_WINDOW, true);
+    private static PlannerDayState state(List<DayWindow> windows,
+                                         List<SchedulableExecutable> ranked) {
+        return new PlannerDayState(at(7), at(22), windows, ranked, List.of(), List.of(), NEUTRAL, true);
     }
 
-    private static HumanizationSettings settings(int buffer, List<com.hyperbrain.planner.domain.model.MealWindow> meals,
-                                                 int minBlock, double band, double occMax) {
-        double occMin = Math.min(0.0, occMax);
-        return new HumanizationSettings(buffer, meals, minBlock, band, occMin, occMax);
+    private static DayWindow window(String slotId, int startHour, int endHour, SlotPurpose purpose) {
+        return new DayWindow(
+            new TemplateSlot(slotId, startHour * 60, endHour * 60, purpose), at(startHour), at(endHour));
     }
 
-    private static SchedulableExecutable task(double priority, int minutes) {
-        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null,
-            null, 0, minutes, 0, null, null);
+    private static SchedulableExecutable task(double priority, UUID cycleId) {
+        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false,
+            null, null, 0, 60, 0, null, cycleId);
     }
 
-    private static SchedulableExecutable task(UUID cycleId, double priority, int minutes) {
-        return new SchedulableExecutable(UUID.randomUUID(), ExecutableType.TASK, priority, false, null,
-            null, 0, minutes, 0, null, cycleId);
-    }
-
-    private static SchedulableExecutable habit(UUID id, OffsetDateTime anchor, int minutes) {
-        return new SchedulableExecutable(id, ExecutableType.HABIT, 0.5, false, null,
-            null, 0, minutes, 0, anchor, null);
+    private static OffsetDateTime at(int hour) {
+        return DAY.atTime(hour, 0).atOffset(ZoneOffset.UTC);
     }
 }

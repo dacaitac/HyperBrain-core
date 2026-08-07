@@ -37,28 +37,22 @@ class DayTemplateTest {
     }
 
     @Test
-    @DisplayName("only the goal, work, whirlwind, free and personal-routine slots admit work")
-    void only_the_sanctioned_purposes_are_schedulable() {
+    @DisplayName("only the agenda bands are closed to the generator (Daniel, 2026-08-07)")
+    void only_the_agenda_bands_are_closed() {
         // When
-        List<String> schedulable = DayTemplate.DEFAULT.slots().stream()
-            .filter(TemplateSlot::schedulable)
+        List<String> closed = DayTemplate.DEFAULT.slots().stream()
+            .filter(slot -> !slot.schedulable())
             .map(TemplateSlot::id)
             .toList();
 
-        // Then
-        assertThat(schedulable).containsExactly(
-            "PERSONAL_ROUTINE", "GOAL_MORNING", "WORK_MORNING", "WHIRLWIND_LIGHT", "FREE_EVENING");
-    }
-
-    @Test
-    @DisplayName("the 19:00-21:00 household band is vetoed to the generator by decision (D19)")
-    void the_household_band_is_never_schedulable() {
-        // When
-        TemplateSlot household = slot("HOUSEHOLD");
-
-        // Then
-        assertThat(household.purpose()).isEqualTo(SlotPurpose.HOUSEHOLD);
-        assertThat(household.schedulable()).isFalse();
+        // Then: the single restriction is time already spoken for by an agenda element. Everything
+        // else — including the household band ADR-040 D19 had vetoed and the cushion after the
+        // stand-up — is placeable, and the user may put whatever he wants wherever he wants.
+        assertThat(closed).containsExactly("DAILY_STANDUP", "FIXED_MEETING");
+        assertThat(slot("HOUSEHOLD").schedulable()).isTrue();
+        assertThat(slot("MORNING_BUFFER").schedulable()).isTrue();
+        assertThat(slot("WIND_DOWN").schedulable()).isTrue();
+        assertThat(slot("MEETING_ZONE").schedulable()).isTrue();
     }
 
     @Test

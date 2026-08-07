@@ -3,59 +3,59 @@ package com.hyperbrain.planner.domain.model;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalTime;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@DisplayName("HumanizationSettings (H1 calibration)")
+@DisplayName("HumanizationSettings — what survives the retirement of the capacity discounts (ADR-040 D1)")
 class HumanizationSettingsTest {
 
     @Test
-    @DisplayName("the sanctioned defaults carry the ratified MVP values")
-    void defaults_carry_sanctioned_values() {
-        HumanizationSettings defaults = HumanizationSettings.DEFAULT;
-
-        assertThat(defaults.transitionBufferMinutes()).isEqualTo(5);
-        assertThat(defaults.minBlockMinutes()).isEqualTo(15);
-        assertThat(defaults.batchBandWidth()).isEqualTo(0.10);
-        assertThat(defaults.occupancyMinFraction()).isEqualTo(0.75);
-        assertThat(defaults.occupancyMaxFraction()).isEqualTo(0.85);
-        assertThat(defaults.mealWindows()).extracting(MealWindow::label)
-            .containsExactly("lunch", "dinner");
+    @DisplayName("the sanctioned defaults keep the two meal anchors and the batching band")
+    void defaults_keep_the_meals_and_the_band() {
+        // Then
+        assertThat(HumanizationSettings.DEFAULT.mealWindows())
+            .extracting(MealWindow::label).containsExactly("lunch", "dinner");
+        assertThat(HumanizationSettings.DEFAULT.batchBandWidth()).isEqualTo(0.10);
     }
 
     @Test
-    @DisplayName("the no-op instance leaves placement untouched (no buffer, no meals, full-window cap)")
-    void no_op_is_neutral() {
-        HumanizationSettings noOp = HumanizationSettings.NO_OP;
-
-        assertThat(noOp.transitionBufferMinutes()).isZero();
-        assertThat(noOp.minBlockMinutes()).isZero();
-        assertThat(noOp.batchBandWidth()).isZero();
-        assertThat(noOp.mealWindows()).isEmpty();
-        assertThat(noOp.occupancyMaxFraction()).isEqualTo(1.0);
+    @DisplayName("the no-op instance protects nothing and batches nothing — the raw floor")
+    void the_no_op_instance_is_bare() {
+        // Then
+        assertThat(HumanizationSettings.NO_OP.mealWindows()).isEmpty();
+        assertThat(HumanizationSettings.NO_OP.batchBandWidth()).isZero();
     }
 
     @Test
-    @DisplayName("rejects an occupancy max below the min")
-    void rejects_inverted_occupancy_band() {
-        assertThatThrownBy(() -> new HumanizationSettings(5, List.of(), 15, 0.10, 0.85, 0.75))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("occupancyMaxFraction");
+    @DisplayName("meal anchors are defensively copied: a caller cannot mutate the walls afterwards")
+    void meal_windows_are_copied() {
+        // Given
+        List<MealWindow> mutable = new java.util.ArrayList<>(
+            List.of(new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30))));
+        HumanizationSettings settings = new HumanizationSettings(mutable, 0.1);
+
+        // When
+        mutable.clear();
+
+        // Then
+        assertThat(settings.mealWindows()).hasSize(1);
     }
 
     @Test
-    @DisplayName("rejects a negative transition buffer")
-    void rejects_negative_buffer() {
-        assertThatThrownBy(() -> new HumanizationSettings(-1, List.of(), 15, 0.10, 0.75, 0.85))
+    @DisplayName("a batching band outside [0, 1] is rejected — it is a score tolerance, not a count")
+    void an_out_of_range_band_is_rejected() {
+        assertThatThrownBy(() -> new HumanizationSettings(List.of(), 1.5))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new HumanizationSettings(List.of(), -0.1))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    @DisplayName("rejects a batching band outside [0, 1]")
-    void rejects_out_of_range_band() {
-        assertThatThrownBy(() -> new HumanizationSettings(5, List.of(), 15, 1.5, 0.75, 0.85))
-            .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("a null meal list means no anchors, never a null pointer downstream")
+    void a_null_meal_list_degrades_to_empty() {
+        assertThat(new HumanizationSettings(null, 0.1).mealWindows()).isEmpty();
     }
 }

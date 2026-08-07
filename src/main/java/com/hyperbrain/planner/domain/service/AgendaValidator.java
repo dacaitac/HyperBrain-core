@@ -25,10 +25,12 @@ import java.util.List;
  *   <li>no block may fall outside the sleep frontier {@code [wake, bedtime]} (ADR-013 D2);</li>
  *   <li>no block may overlap a read-only AGENDA window (ADR-009);</li>
  *   <li>no block may overlap an occupied wall — the window of an existing time block, whatever its
- *       lifecycle state — or a previously accepted block;</li>
- *   <li>high-load blocks beyond the F6 quota are rejected — <b>except the WIG</b>, which F1 makes
- *       intocable (energy never trims it).</li>
+ *       lifecycle state — or a previously accepted block.</li>
  * </ol>
+ *
+ * <p>The high-load quota wall is gone with the quota itself (ADR-040 D1): it was one of four capacity
+ * discounts that, compounded, left about half the day unusable. What remains are walls on the time
+ * axis, which is where availability belongs.
  *
  * <p>A rejected block is stripped from the accepted set and reported as a
  * {@link ValidationViolation}; it is never silently dropped nor persisted. Accepted blocks are
@@ -61,29 +63,22 @@ public class AgendaValidator {
         List<AgendaBlock> accepted = new ArrayList<>();
         List<ValidationViolation> violations = new ArrayList<>();
         List<OccupiedInterval> walls = new ArrayList<>(context.occupied());
-        int highLoadUsed = 0;
 
         for (AgendaBlock block : ordered) {
-            Wall wall = firstWall(block, context, walls, highLoadUsed);
+            Wall wall = firstWall(block, context, walls);
             if (wall != null) {
                 violations.add(new ValidationViolation(block.executableId(), wall));
                 continue;
             }
             accepted.add(block);
             walls.add(new OccupiedInterval(block.executableId(), block.start(), block.end(), false));
-            if (block.highLoad()) {
-                highLoadUsed++;
-            }
         }
         return new ValidatedAgenda(accepted, violations);
     }
 
-    /**
-     * The first wall this block violates, or null when it clears them all. The WIG is exempt from the
-     * F6 quota only; it must still respect the frontier and never overlap.
-     */
+    /** The first wall this block violates, or null when it clears them all. */
     private static Wall firstWall(AgendaBlock block, ValidationContext context,
-                                  List<OccupiedInterval> walls, int highLoadUsed) {
+                                  List<OccupiedInterval> walls) {
         // Checked across the whole membership, not just the anchor (ADR-027 D1): a themed container
         // that smuggles a read-only AGENDA executable in as a companion is just as illegal as one
         // anchored on it.
@@ -96,9 +91,6 @@ public class AgendaValidator {
         OccupiedInterval clash = overlappingWall(block, walls);
         if (clash != null) {
             return clash.readOnlyAgenda() ? Wall.OVERLAPS_READ_ONLY_AGENDA : Wall.OVERLAPS_OCCUPIED;
-        }
-        if (block.highLoad() && !block.wig() && highLoadUsed >= context.highLoadQuota()) {
-            return Wall.HIGH_LOAD_QUOTA_EXCEEDED;
         }
         return null;
     }

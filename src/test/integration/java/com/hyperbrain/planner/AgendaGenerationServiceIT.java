@@ -128,10 +128,17 @@ class AgendaGenerationServiceIT {
 
         service.generate(USER, DAY, UTC, NOON, false);
 
-        // The earliest block belongs to the WIG lead measure, ahead of the higher-scored task.
-        UUID firstBlockExecutable = jdbcTemplate.queryForObject(
-            "SELECT executable_id FROM planner_blocks ORDER BY date_start LIMIT 1", UUID.class);
-        assertThat(firstBlockExecutable).isEqualTo(wig);
+        // The lead measure holds a goal window, and holds it ALONE: the band the template calls
+        // «Meta» is for the goal. It no longer has to be the earliest block of the day — under the
+        // window model the goal takes its band, not the first free minute.
+        UUID goalBlock = jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, wig);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT template_slot_id FROM core_executable WHERE id = ?", String.class, goalBlock))
+            .isEqualTo("GOAL_MORNING");
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE container_block_id = ?",
+            Integer.class, goalBlock)).isEqualTo(1);
     }
 
     @Test
@@ -452,8 +459,8 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("overdue task (due in the past) is replanned today, not filtered from every day")
-    void overdue_task_is_replanned_today() {
+    @DisplayName("admission: yesterday's leftovers are not dragged into today — the day-close sweep owns them")
+    void an_overdue_task_is_not_admitted() {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
         UUID overdue = insertTask("Overdue", 0.9, 30);
@@ -463,9 +470,12 @@ class AgendaGenerationServiceIT {
 
         service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, true);
 
-        Integer blocks = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM planner_blocks WHERE executable_id = ?", Integer.class, overdue);
-        assertThat(blocks).isEqualTo(1);
+        // The day takes what is dated FOR it plus the dateless bag, and nothing else (ADR-040 D3).
+        // What was left undone yesterday returns through the day-close sweep, which re-dates it to
+        // today; pulling it forward here as well would double-count it and undo the sweep's work.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, overdue))
+            .isNull();
     }
 
     @Test
@@ -562,19 +572,15 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("H1 humanized floor: buffers, meal protection, no slivers and an occupancy cap hold together")
-    void humanized_floor_invariants_hold_together() {
-        // A full day of work plus a sliver and a dated task, over the cold-start 07:00–23:00 window.
-        // The humanized floor must space, protect meals, drop the sliver and cap occupancy. Since
-        // ADR-026 D4 the authorial reminder hour no longer seeds placement — the dated task is placed
-        // by rank like any other, not anchored to its 15:00 due instant.
+    @DisplayName("the day stops being a wall of blocks: sixteen tasks become a handful of windows")
+    void a_full_day_yields_windows_not_a_wall_of_blocks() {
+        // The regression test for the failure that motivated ADR-040. In production the old engine
+        // turned a day like this into twenty-one flat blocks between 07:00 and 17:30 — a wall nobody
+        // executes, so the day gets abandoned and rebuilt by hand, which is exactly the failure the
+        // system exists to prevent.
         for (int i = 0; i < 16; i++) {
             insertTask("Work " + i, 0.99 - i * 0.01, 60);
         }
-        UUID sliver = insertTask("Sliver", 0.95, 10);
-        // Highest priority, so it is ranked first and placed at the window start by the cursor.
-        UUID dated = insertTaskDueAt("Reminder at 15:00", 0.999, 60,
-            OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
 
         service.generate(USER, DAY, UTC, NOON, false);
 
@@ -582,47 +588,54 @@ class AgendaGenerationServiceIT {
             "SELECT executable_id, date_start, date_end FROM planner_blocks "
                 + "WHERE origin = 'PLANNER' AND status = 'PLANNED' ORDER BY date_start");
 
-        // Rule 2 — no block invades either protected meal window (12:30–13:30, 19:00–20:00 UTC).
+        // One block per window, never one per task: the sixteen tasks live INSIDE the day's windows.
+        assertThat(blocks).hasSizeLessThan(16);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE container_block_id IS NOT NULL AND type = 'TASK'",
+            Integer.class)).isEqualTo(16);
+
+        // The meal anchors still wall — they are commitments on the time axis, which is the one place
+        // ADR-040 D1 allows availability to be expressed.
         assertNoBlockOverlaps(blocks,
             OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, UTC),
             OffsetDateTime.of(2026, 7, 10, 13, 30, 0, 0, UTC));
         assertNoBlockOverlaps(blocks,
             OffsetDateTime.of(2026, 7, 10, 19, 0, 0, 0, UTC),
             OffsetDateTime.of(2026, 7, 10, 20, 0, 0, 0, UTC));
-
-        // Rule 3 — no sub-minimum sliver survives; the 10-min task is left unscheduled.
-        assertThat(blocks).allSatisfy(row ->
-            assertThat(minutesBetween(row)).isGreaterThanOrEqualTo(15));
-        assertThat(blocks).noneMatch(row -> sliver.equals(row.get("executable_id")));
-
-        // Rule 6 — the day is never packed past the 85% occupancy cap of the 960-min window.
-        long busy = blocks.stream().mapToLong(AgendaGenerationServiceIT::minutesBetween).sum();
-        assertThat(busy).isLessThanOrEqualTo(Math.round(960 * 0.85));
-
-        // ADR-026 D4 — the dated task's placement is the Planner's own authorship: it is NOT anchored
-        // to its 15:00 reminder instant. Highest-ranked, it lands at the window start instead.
-        OffsetDateTime datedStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM planner_blocks WHERE executable_id = ?", OffsetDateTime.class, dated);
-        assertThat(datedStart).isNotEqualTo(OffsetDateTime.of(2026, 7, 10, 15, 0, 0, 0, UTC));
-        assertThat(datedStart).isEqualTo(OffsetDateTime.of(2026, 7, 10, 7, 0, 0, 0, UTC));
     }
 
     @Test
-    @DisplayName("H1 rule 1: consecutive cursor-placed blocks are spaced by the transition buffer")
-    void consecutive_blocks_carry_a_transition_buffer() {
-        insertTask("High", 0.9, 60);
-        insertTask("Low", 0.3, 60);
+    @DisplayName("nothing trims the tail of the day: the evening is planned like any other band")
+    void the_evening_is_no_longer_cut_off() {
+        for (int i = 0; i < 16; i++) {
+            insertTask("Work " + i, 0.99 - i * 0.01, 60);
+        }
 
         service.generate(USER, DAY, UTC, NOON, false);
 
-        List<OffsetDateTime> bounds = jdbcTemplate.queryForList(
-            "SELECT date_end FROM planner_blocks ORDER BY date_start", OffsetDateTime.class);
-        OffsetDateTime firstEnd = bounds.get(0);
-        OffsetDateTime secondStart = jdbcTemplate.queryForObject(
-            "SELECT date_start FROM planner_blocks ORDER BY date_start OFFSET 1 LIMIT 1",
-            OffsetDateTime.class);
-        // A 5-min transition buffer separates the two blocks (07:00–08:00 then 08:05–09:05).
-        assertThat(java.time.Duration.between(firstEnd, secondStart).toMinutes()).isEqualTo(5);
+        // The retired chaos margin was implemented as a cut to the TAIL of the day: with a 30% margin
+        // over 06:00-22:00 the placement limit fell to 17:12, so the afternoon was dead by side effect
+        // and not by decision. Daniel's 2026-08-07 directive reopens the evening bands on top of that.
+        OffsetDateTime latestEnd = jdbcTemplate.queryForObject(
+            "SELECT max(date_end) FROM planner_blocks WHERE origin = 'PLANNER'", OffsetDateTime.class);
+        assertThat(latestEnd).isAfter(OffsetDateTime.of(2026, 7, 10, 17, 12, 0, 0, UTC));
+    }
+
+    @Test
+    @DisplayName("two tasks share a window instead of being glued into two back-to-back blocks")
+    void two_tasks_share_a_window() {
+        UUID high = insertTask("High", 0.9, 60);
+        UUID low = insertTask("Low", 0.3, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // The five-minute cushion that used to separate two blocks is gone with the other capacity
+        // discounts (ADR-040 D1) — and it needs no successor, because the two tasks are no longer two
+        // blocks at all. The tail of the window itself is the transition.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, high)).isNotNull();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, low)).isNotNull();
     }
 
     private static void assertNoBlockOverlaps(List<Map<String, Object>> blocks,
