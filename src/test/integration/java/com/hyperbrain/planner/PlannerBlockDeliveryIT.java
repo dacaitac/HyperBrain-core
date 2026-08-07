@@ -134,14 +134,14 @@ class PlannerBlockDeliveryIT {
         // The id survived a member entering and another leaving — had identity been derived from the
         // membership, this would have minted a new id and duplicated the calendar event.
         assertThat(blockId()).isEqualTo(blockId);
-        List<JsonNode> commands = drainCommands();
-        assertThat(commands).isNotEmpty();
-        assertThat(commands).allSatisfy(command -> {
-            if (command.path("local_id_is_block").asBoolean(false)) {
-                assertThat(command.path("operation").asText()).isEqualTo("UPDATED");
-            }
-        });
+        // Exactly one command was logged against the block, and it UPDATEs the event it already had.
         assertThat(commandCountForLocalId(blockId)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForMap(
+            "SELECT command_type, operation, entity_id FROM sync_write_commands WHERE local_id = ?",
+            blockId))
+            .containsEntry("command_type", "CALENDAR_EVENT")
+            .containsEntry("operation", "UPDATED")
+            .containsEntry("entity_id", eventId);
     }
 
     @Test
