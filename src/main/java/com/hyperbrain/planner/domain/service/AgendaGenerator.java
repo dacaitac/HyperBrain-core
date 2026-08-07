@@ -111,7 +111,9 @@ public class AgendaGenerator {
 
         List<SchedulableExecutable> candidates =
             admissible(state.rankedExecutables(), placed, excluded, state);
-        deal(candidates, free, membership, placed);
+        // A replan starts from the plan that is already there, not from nothing (ADR-040 D8).
+        seedFromExistingPlan(state, free, membership, candidates, placed);
+        deal(remaining(candidates, placed), free, membership, placed);
 
         for (SchedulableExecutable candidate : candidates) {
             if (!placed.contains(candidate.id())) {
@@ -162,6 +164,48 @@ public class AgendaGenerator {
     }
 
     /**
+     * Re-seats in each window the work its block already holds — the heart of the conservative replan
+     * (ADR-040 D8). Grouping and intention survive; what is recomputed is the placement in time, which
+     * the window resolver has already done. Without this, the two cases that actually happen would both
+     * feel like the system fighting you: waking late would reshuffle a day you had already ordered the
+     * night before, and an interruption at eleven would rewrite what was left of the morning.
+     *
+     * <p>A member that is no longer a candidate — completed, closed, or moved to another day — is
+     * quietly dropped rather than re-seated: the plan is conserved, not frozen. Re-invoking the
+     * intelligent layer to regroup on every replan would be exactly the friction D8 exists to avoid,
+     * which is why nothing here consults it.
+     */
+    private static void seedFromExistingPlan(PlannerDayState state, List<DayWindow> free,
+                                             Map<DayWindow, List<UUID>> membership,
+                                             List<SchedulableExecutable> candidates, Set<UUID> placed) {
+        if (state.existingMembership().isEmpty()) {
+            return;
+        }
+        Set<UUID> admissible = new LinkedHashSet<>();
+        candidates.forEach(candidate -> admissible.add(candidate.id()));
+        for (DayWindow window : free) {
+            List<UUID> held = state.existingMembership().get(window.slotId());
+            if (held == null) {
+                continue;
+            }
+            List<UUID> survivors = held.stream()
+                .filter(admissible::contains)
+                .filter(id -> !placed.contains(id))
+                .toList();
+            if (!survivors.isEmpty()) {
+                membership.put(window, new ArrayList<>(survivors));
+                placed.addAll(survivors);
+            }
+        }
+    }
+
+    /** The candidates the seeding did not already re-seat, in rank order. */
+    private static List<SchedulableExecutable> remaining(List<SchedulableExecutable> candidates,
+                                                        Set<UUID> placed) {
+        return candidates.stream().filter(candidate -> !placed.contains(candidate.id())).toList();
+    }
+
+    /**
      * Deals the ranked candidates across the free windows in contiguous chunks: the earliest window
      * takes the top slice, the next one the following slice, and so on.
      *
@@ -186,14 +230,15 @@ public class AgendaGenerator {
             // a later one is overfull.
             int remainingWindows = windowCount - slot;
             int share = (total - index + remainingWindows - 1) / remainingWindows;
-            List<UUID> members = new ArrayList<>(share);
+            DayWindow window = free.get(slot);
+            List<UUID> members = membership.computeIfAbsent(window, key -> new ArrayList<>());
             for (int taken = 0; taken < share && index < total; taken++, index++) {
                 SchedulableExecutable candidate = candidates.get(index);
                 members.add(candidate.id());
                 placed.add(candidate.id());
             }
-            if (!members.isEmpty()) {
-                membership.put(free.get(slot), members);
+            if (members.isEmpty()) {
+                membership.remove(window);
             }
         }
     }

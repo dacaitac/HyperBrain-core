@@ -1,5 +1,6 @@
 package com.hyperbrain.core.domain.port.out;
 
+import com.hyperbrain.core.domain.model.BlockWindow;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
@@ -272,6 +273,46 @@ public interface ExecutableStateRepository {
      * @return true when the row was actually deleted
      */
     boolean deleteWithdrawnBlock(UUID blockId);
+
+    // ── ADR-040 D12: the recurrence clone is born with a block of its own day ─
+
+    /**
+     * Reads a {@code TIME_BLOCK} executable as a window.
+     *
+     * @param blockId the block; never null
+     * @return its window, or empty when the id is not a block
+     */
+    Optional<BlockWindow> findBlockWindow(UUID blockId);
+
+    /**
+     * Finds the block that realises a given template slot on a given local day — the reuse half of
+     * ADR-040 D12. Without it, every recurring occurrence would fabricate a block of its own and the
+     * day would be a wall again.
+     *
+     * @param userId         the owning user; never null
+     * @param templateSlotId the slot to look for; never null
+     * @param dayStart       the day's start instant (inclusive); never null
+     * @param dayEnd         the day's end instant (exclusive); never null
+     * @return the block that already holds that band of that day, or empty
+     */
+    Optional<UUID> findBlockOnDayBySlot(UUID userId, String templateSlotId, OffsetDateTime dayStart,
+                                        OffsetDateTime dayEnd);
+
+    /**
+     * Inserts a planner-authored {@code TIME_BLOCK} executable. Used when a recurrence clone lands on a
+     * day that has no block for its band yet.
+     *
+     * @param block the window to persist; never null
+     */
+    void insertBlock(BlockWindow block);
+
+    /**
+     * Reads the user's timezone, so a local day can be bounded without leaving this module.
+     *
+     * @param userId the owning user; never null
+     * @return the user's zone; never null
+     */
+    ZoneId findUserZone(UUID userId);
 
     // ── ADR-040 D4: the day-close sweep of what expired ───────────────────────
 

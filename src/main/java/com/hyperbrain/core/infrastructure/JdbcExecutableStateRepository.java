@@ -1,5 +1,6 @@
 package com.hyperbrain.core.infrastructure;
 
+import com.hyperbrain.core.domain.model.BlockWindow;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.model.FocusCandidate;
 import com.hyperbrain.core.domain.model.SnapshotSubtask;
@@ -328,6 +329,49 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
           AND NOT EXISTS (SELECT 1 FROM core_executable i WHERE i.imputed_block_id   = b.id)
         """;
 
+    private static final String FIND_BLOCK_WINDOW_SQL = """
+        SELECT id, user_id, name, description, start_time, end_time, template_slot_id
+        FROM core_executable
+        WHERE id = ? AND type = 'TIME_BLOCK'
+        """;
+
+    /**
+     * The block holding a given template band on a given local day. Scoped to planner-authored,
+     * still-open blocks: a closed one is history, and a USER block is the user's own arrangement, which
+     * a clone must not silently join.
+     */
+    private static final String FIND_BLOCK_ON_DAY_BY_SLOT_SQL = """
+        SELECT id
+        FROM core_executable
+        WHERE user_id = ?
+          AND type = 'TIME_BLOCK'
+          AND origin = 'PLANNER'
+          AND status = 'PLANNED'
+          AND template_slot_id = ?
+          AND start_time >= ?
+          AND start_time <  ?
+        ORDER BY start_time
+        LIMIT 1
+        """;
+
+    private static final String INSERT_BLOCK_SQL = """
+        INSERT INTO core_executable
+            (id, user_id, name, description, type, status, origin,
+             start_time, end_time, template_slot_id, system_generated)
+        VALUES (?, ?, ?, ?, 'TIME_BLOCK', 'PLANNED', 'PLANNER', ?, ?, ?, false)
+        """;
+
+    private static final String FIND_USER_ZONE_SQL = "SELECT timezone FROM sys_user WHERE id = ?";
+
+    private static final RowMapper<BlockWindow> BLOCK_WINDOW_MAPPER = (rs, rowNum) -> new BlockWindow(
+        rs.getObject("id", UUID.class),
+        rs.getObject("user_id", UUID.class),
+        rs.getString("name"),
+        rs.getString("description"),
+        toOffset(rs.getTimestamp("start_time")),
+        toOffset(rs.getTimestamp("end_time")),
+        rs.getString("template_slot_id"));
+
     private static final String CLOSE_AS_FAILED_SQL = """
         UPDATE core_executable
         SET status = 'FAILED'
@@ -533,6 +577,31 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     @Override
     public List<ExecutableSnapshot> findContainedBy(UUID blockId) {
         return jdbcTemplate.query(FIND_CONTAINED_BY_SQL, SNAPSHOT_MAPPER, blockId);
+    }
+
+    @Override
+    public Optional<BlockWindow> findBlockWindow(UUID blockId) {
+        return jdbcTemplate.query(FIND_BLOCK_WINDOW_SQL, BLOCK_WINDOW_MAPPER, blockId)
+            .stream().findFirst();
+    }
+
+    @Override
+    public Optional<UUID> findBlockOnDayBySlot(UUID userId, String templateSlotId,
+                                               OffsetDateTime dayStart, OffsetDateTime dayEnd) {
+        return jdbcTemplate.queryForList(FIND_BLOCK_ON_DAY_BY_SLOT_SQL, UUID.class,
+            userId, templateSlotId, toTimestamp(dayStart), toTimestamp(dayEnd)).stream().findFirst();
+    }
+
+    @Override
+    public void insertBlock(BlockWindow block) {
+        jdbcTemplate.update(INSERT_BLOCK_SQL,
+            block.blockId(), block.userId(), block.name(), block.description(),
+            toTimestamp(block.start()), toTimestamp(block.end()), block.templateSlotId());
+    }
+
+    @Override
+    public ZoneId findUserZone(UUID userId) {
+        return ZoneId.of(jdbcTemplate.queryForObject(FIND_USER_ZONE_SQL, String.class, userId));
     }
 
     @Override

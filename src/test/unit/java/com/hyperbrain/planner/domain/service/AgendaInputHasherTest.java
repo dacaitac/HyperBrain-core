@@ -136,7 +136,7 @@ class AgendaInputHasherTest {
     void distinct_when_wig_changes() {
         MciWig wig = new MciWig(UUID.fromString("22222222-2222-2222-2222-222222222222"),
             null, 0.4, 0.5, false, LocalDate.of(2026, 8, 1), false, 0);
-        PlannerDayState withWig = new PlannerDayState(WINDOW_START, WINDOW_END, List.of(),
+        PlannerDayState withWig = new PlannerDayState(WINDOW_START, WINDOW_END, List.of(), java.util.Map.of(),
             List.of(task(TASK, 0.9)), List.of(wig), List.of(), neutralEnergy(), true);
         PlannerDayState withoutWig = state(WINDOW_START, List.of(task(TASK, 0.9)));
 
@@ -148,11 +148,11 @@ class AgendaInputHasherTest {
     void distinct_when_the_windows_change() {
         // Given: the same candidates laid against two different shapes of the day.
         PlannerDayState morning = new PlannerDayState(WINDOW_START, WINDOW_END,
-            List.of(window("GOAL", 9, 11)), List.of(task(TASK, 0.9)), List.of(), List.of(),
-            neutralEnergy(), true);
+            List.of(window("GOAL", 9, 11)), java.util.Map.of(), List.of(task(TASK, 0.9)), List.of(),
+            List.of(), neutralEnergy(), true);
         PlannerDayState afternoon = new PlannerDayState(WINDOW_START, WINDOW_END,
-            List.of(window("GOAL", 14, 16)), List.of(task(TASK, 0.9)), List.of(), List.of(),
-            neutralEnergy(), true);
+            List.of(window("GOAL", 14, 16)), java.util.Map.of(), List.of(task(TASK, 0.9)), List.of(),
+            List.of(), neutralEnergy(), true);
 
         // Then: without this, editing the template in settings would leave the plan untouched, which
         // ADR-040 D14 rules out explicitly.
@@ -193,6 +193,7 @@ class AgendaInputHasherTest {
                                          EnergyProfile energy,
                                          List<OccupiedInterval> occupied) {
         return new PlannerDayState(
-            windowStart, WINDOW_END, List.of(), ranked, List.of(), occupied, energy, true);
+            windowStart, WINDOW_END, List.of(), java.util.Map.of(), ranked, List.of(), occupied,
+            energy, true);
     }
 }

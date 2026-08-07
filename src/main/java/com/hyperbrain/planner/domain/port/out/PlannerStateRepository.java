@@ -75,12 +75,21 @@ public interface PlannerStateRepository {
      * morning nothing is completed yet, so the guard is a no-op there.
      *
      * @param userId   the owning user
-     * @param dayStart the target day's start instant (inclusive), for the completed-today guard
-     * @param dayEnd   the target day's end instant (exclusive), for the completed-today guard
+     * <p>Work already held by a block this run may not re-time is not a candidate either: a
+     * {@code USER} block the user timed by hand, one already under way, or a planner block whose start
+     * has gone by. Containment is monovalent, so offering such an executable would silently pull it out
+     * of the block that holds it — the guard has to live in the admission, because by the time a block
+     * row is written the move has already happened.
+     *
+     * @param userId    the owning user
+     * @param dayStart  the target day's start instant (inclusive), for the completed-today guard
+     * @param dayEnd    the target day's end instant (exclusive), for the completed-today guard
+     * @param notBefore the earliest block start this run may still re-time; blocks older than it hold
+     *                  their members
      * @return the ranked schedulables; never null, may be empty
      */
     List<SchedulableExecutable> loadRankedExecutables(UUID userId, OffsetDateTime dayStart,
-                                                      OffsetDateTime dayEnd);
+                                                      OffsetDateTime dayEnd, OffsetDateTime notBefore);
 
     /**
      * Reads the day's WIG portfolio: the {@code ACTIVE MCI} cycles ({@code CoreCycle type=MCI}), each
@@ -120,13 +129,20 @@ public interface PlannerStateRepository {
      * there. Everything outside this set is untouchable: {@code USER} blocks, blocks already
      * {@code IN_PROGRESS} or closed, and the read-only agenda.
      *
+     * <p><b>{@code notBefore} is what makes "the past is never rewritten" an invariant rather than a
+     * convention.</b> A block whose start has already gone by is not regenerable: it is not re-timed,
+     * it is not withdrawn, and — because this same read feeds the wall subtraction — it keeps walling
+     * the time it took. A morning already lived is not a draft.
+     *
      * @param userId    the owning user; never null
      * @param targetDay the calendar day to read; never null
      * @param zone      the user's timezone used to bound the local day; never null
+     * @param notBefore the earliest start this run may still touch; never null
      * @return the day's regenerable blocks, chronologically ordered; never null, may be empty
      */
     List<PlannerBlockIdentity.PersistedBlock> loadRegenerableBlocks(UUID userId, LocalDate targetDay,
-                                                                    ZoneId zone);
+                                                                    ZoneId zone,
+                                                                    OffsetDateTime notBefore);
 
     /**
      * Inserts or re-times one planner block as a {@code TIME_BLOCK} executable (ADR-039: the block IS

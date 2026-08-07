@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
@@ -74,14 +75,16 @@ public class PlannerBlockMaterializer {
      * @param targetDay the calendar day being materialized; never null
      * @param zone      the user's timezone; never null
      * @param accepted  the blocks the plan wants for the day; never null, may be empty
+     * @param notBefore the earliest start this run may still touch — a block that already began is
+     *                  neither re-timed nor withdrawn, because the past is never rewritten; never null
      * @return the ids of the blocks actually withdrawn, so their calendar counterpart is deleted too;
      *         never null
      */
     @Transactional(propagation = Propagation.MANDATORY)
     public List<UUID> materialize(UUID userId, LocalDate targetDay, ZoneId zone,
-                                  List<AgendaBlock> accepted) {
+                                  List<AgendaBlock> accepted, OffsetDateTime notBefore) {
         PlannerBlockIdentity.Reconciliation reconciliation = PlannerBlockIdentity.reconcile(
-            accepted, repository.loadRegenerableBlocks(userId, targetDay, zone));
+            accepted, repository.loadRegenerableBlocks(userId, targetDay, zone, notBefore));
 
         List<UUID> withdrawn = new ArrayList<>();
         for (UUID blockId : reconciliation.removedBlockIds()) {

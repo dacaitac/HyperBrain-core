@@ -169,6 +169,25 @@ class PlannerBlockMembershipIT {
     }
 
     @Test
+    @DisplayName("a block that already started is neither re-timed nor withdrawn: the past is not rewritten")
+    void a_block_that_already_started_is_frozen() {
+        UUID task = insertTask("Write the report");
+        materialize(List.of(window(task, List.of(), 9, 11)));
+        UUID morning = blockId();
+
+        // A replan fired at 12:00 wants nothing at all. The morning block began at 09:00.
+        List<UUID> withdrawn = transactionTemplate.execute(status ->
+            materializer.materialize(USER, DAY, ZONE, List.of(), at(12)));
+
+        // It stands, untouched, and keeps holding its member: a morning already lived is not a draft.
+        assertThat(withdrawn).isEmpty();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE id = ?", OffsetDateTime.class, morning))
+            .isEqualTo(at(9));
+        assertThat(containmentOf(task)).isEqualTo(morning);
+    }
+
+    @Test
     @DisplayName("an activity is never contained: it already owns a calendar window of its own")
     void an_activity_is_refused_containment() {
         UUID activity = insertActivity("Gym");
@@ -184,7 +203,8 @@ class PlannerBlockMembershipIT {
 
     private List<UUID> materialize(List<AgendaBlock> blocks) {
         return transactionTemplate.execute(status ->
-            materializer.materialize(USER, DAY, ZONE, blocks));
+            materializer.materialize(
+                USER, DAY, ZONE, blocks, DAY.atStartOfDay(ZONE).toOffsetDateTime()));
     }
 
     private static AgendaBlock window(UUID anchor, List<UUID> additionalMembers, int startHour,

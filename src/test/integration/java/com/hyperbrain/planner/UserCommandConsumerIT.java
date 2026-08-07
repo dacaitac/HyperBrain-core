@@ -106,10 +106,13 @@ class UserCommandConsumerIT {
         UUID second = UUID.randomUUID();
         send(replanBody(second, HALF_PAST_NOON), second.toString());
 
-        // Then the day converges to a single regenerated set (delete-before-persist), from 12:30
+        // Then the day still holds exactly one block — the replan converges instead of duplicating.
+        // It is the SAME block, still at 12:00: its start had already gone by, so the second replan
+        // neither re-times it nor re-places the work inside it (ADR-040 D8, the past is never
+        // rewritten). A morning already under way is not a draft to be reshuffled at 12:30.
         await().atMost(TIMEOUT).untilAsserted(() ->
-            assertThat(earliestBlockStart()).isAfterOrEqualTo(HALF_PAST_NOON));
-        assertThat(countPlannedBlocks()).isEqualTo(1);
+            assertThat(countPlannedBlocks()).isEqualTo(1));
+        assertThat(earliestBlockStart()).isEqualTo(NOON);
     }
 
     @Test

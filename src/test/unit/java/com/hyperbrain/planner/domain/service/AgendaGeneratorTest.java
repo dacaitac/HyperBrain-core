@@ -138,6 +138,50 @@ class AgendaGeneratorTest {
     }
 
     @Test
+    @DisplayName("a replan re-seats what a window already held: the grouping survives, only the hours move")
+    void a_replan_conserves_the_existing_grouping() {
+        // Given: yesterday evening's plan put the two lower-ranked tasks in the afternoon window and
+        // the top one in the morning. Overnight nothing changed but the clock.
+        List<SchedulableExecutable> ranked = List.of(task(0.9), task(0.8), task(0.7));
+        List<DayWindow> windows = List.of(
+            window("MORNING", 9, 11, SlotPurpose.WORK),
+            window("AFTERNOON", 14, 16, SlotPurpose.WHIRLWIND));
+        java.util.Map<String, List<UUID>> existing = java.util.Map.of(
+            "MORNING", List.of(ranked.get(0).id()),
+            "AFTERNOON", List.of(ranked.get(1).id(), ranked.get(2).id()));
+
+        // When
+        Agenda agenda = generator.generate(state(windows, ranked, List.of(), existing));
+
+        // Then: the membership is exactly what it was. A fresh deal would have split them two and one.
+        assertThat(agenda.blocks().get(0).members()).containsExactly(ranked.get(0).id());
+        assertThat(agenda.blocks().get(1).members())
+            .containsExactly(ranked.get(1).id(), ranked.get(2).id());
+    }
+
+    @Test
+    @DisplayName("a replan drops what is no longer a candidate and deals what is new, without reshuffling")
+    void a_replan_drops_the_gone_and_admits_the_new() {
+        // Given: the morning window held a task that has since been completed (it is no longer ranked),
+        // plus one that survives; a brand-new task arrived during the day.
+        SchedulableExecutable surviving = task(0.9);
+        SchedulableExecutable arrived = task(0.4);
+        UUID completed = UUID.randomUUID();
+        List<DayWindow> windows = List.of(window("MORNING", 9, 11, SlotPurpose.WORK));
+        java.util.Map<String, List<UUID>> existing =
+            java.util.Map.of("MORNING", List.of(completed, surviving.id()));
+
+        // When
+        Agenda agenda = generator.generate(
+            state(windows, List.of(surviving, arrived), List.of(), existing));
+
+        // Then: the plan is conserved, not frozen — the completed one is gone, the survivor kept its
+        // place, and the newcomer joined after it rather than displacing it.
+        assertThat(agenda.blocks()).singleElement().satisfies(block ->
+            assertThat(block.members()).containsExactly(surviving.id(), arrived.id()));
+    }
+
+    @Test
     @DisplayName("a read-only agenda item is never scheduled; it is the floor the day is laid against")
     void a_read_only_agenda_item_is_never_scheduled() {
         // Given
@@ -229,7 +273,14 @@ class AgendaGeneratorTest {
 
     private static PlannerDayState state(List<DayWindow> windows, List<SchedulableExecutable> ranked,
                                          List<MciWig> wigs) {
-        return new PlannerDayState(at(7), at(22), windows, ranked, wigs, List.of(), NEUTRAL, true);
+        return state(windows, ranked, wigs, java.util.Map.of());
+    }
+
+    private static PlannerDayState state(List<DayWindow> windows, List<SchedulableExecutable> ranked,
+                                         List<MciWig> wigs,
+                                         java.util.Map<String, List<UUID>> existing) {
+        return new PlannerDayState(
+            at(7), at(22), windows, existing, ranked, wigs, List.of(), NEUTRAL, true);
     }
 
     private static DayWindow window(String slotId, int startHour, int endHour, SlotPurpose purpose) {

@@ -68,7 +68,7 @@ class RescheduleAndSlotAuthorityIT {
         contain(userBlock, task);
 
         List<SchedulableExecutable> ranked =
-            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd(), dayStart());
 
         // The task never reaches the floor, so no plan can quietly pull it out of the block the user
         // put it in. Containment is monovalent: had it been offered, placing it WOULD have moved it.
@@ -86,10 +86,27 @@ class RescheduleAndSlotAuthorityIT {
         contain(plannerBlock, task);
 
         List<SchedulableExecutable> ranked =
-            repository.loadRankedExecutables(USER, dayStart(), dayEnd());
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd(), dayStart());
 
         assertThat(ranked).singleElement().satisfies(executable ->
             assertThat(executable.id()).isEqualTo(task));
+    }
+
+    @Test
+    @DisplayName("D8: work inside a planner block that already started stays there — the past is not re-placed")
+    void work_in_a_started_block_is_not_a_candidate() {
+        UUID task = insertTask("Mid-morning task");
+        UUID started = insertPlannerBlock(at(2026, 7, 10, 9), at(2026, 7, 10, 11));
+        contain(started, task);
+
+        // A replan fired at 10:00 may not re-place what a block already under way is holding.
+        List<SchedulableExecutable> ranked =
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd(), at(2026, 7, 10, 10));
+
+        assertThat(ranked).isEmpty();
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, task))
+            .isEqualTo(started);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

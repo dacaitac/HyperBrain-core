@@ -43,7 +43,9 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -309,7 +311,7 @@ public class AgendaGenerationService {
         // from. Nothing else — an overdue item is not dragged forward here, because the day-close sweep
         // (D4) is what re-dates it; pulling the past into today as well would double-count it and undo
         // the sweep's work. A future-dated item waits for its own day.
-        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd)
+        List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd, window.lowerBound())
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
             .filter(e -> e.dueInstant() == null
@@ -331,7 +333,11 @@ public class AgendaGenerationService {
         // read-only AGENDA windows and the TIME_BLOCK executables that hold time (USER blocks, and the
         // ones already closed as DONE / FAILED). See withoutRegenerable for why the subtraction is inert
         // until the two sides read the same block model.
-        List<OccupiedInterval> planningWalls = withoutRegenerable(userId, targetDay, zone, occupied);
+        // The plan that already exists for this day, bounded to what this run may still touch: a block
+        // that already started is not regenerable, so it is neither re-placed nor un-walled (D8).
+        List<PlannerBlockIdentity.PersistedBlock> existingPlan =
+            repository.loadRegenerableBlocks(userId, targetDay, zone, window.lowerBound());
+        List<OccupiedInterval> planningWalls = withoutRegenerable(existingPlan, occupied);
 
         // The fallback window (07:00–23:00) is always a valid planning frontier; the
         // observed flag only distinguishes learned vs. default, not usable vs. unusable.
@@ -345,8 +351,8 @@ public class AgendaGenerationService {
             planningWalls);
 
         PlannerDayState state = new PlannerDayState(
-            window.lowerBound(), window.frontierEnd(), windows, ranked, wigPortfolio, planningWalls,
-            energy, dataComplete);
+            window.lowerBound(), window.frontierEnd(), windows, membershipBySlot(existingPlan), ranked,
+            wigPortfolio, planningWalls, energy, dataComplete);
         return new PreparedDay(state, window, planningWalls, energy.criterion());
     }
 
@@ -455,8 +461,8 @@ public class AgendaGenerationService {
 
         // Identity, withdrawal and containment all live in the materializer, where ADR-040 D10's
         // order-of-operations invariant is readable in one place.
-        List<UUID> removedBlockIds =
-            blockMaterializer.materialize(userId, targetDay, zone, validated.accepted());
+        List<UUID> removedBlockIds = blockMaterializer.materialize(
+            userId, targetDay, zone, validated.accepted(), window.lowerBound());
 
         if (!validated.accepted().isEmpty() || !removedBlockIds.isEmpty()) {
             stageAgendaBlockDelivery(
@@ -473,6 +479,22 @@ public class AgendaGenerationService {
 
         return new Agenda(validated.accepted(), agenda.excluded(), agenda.paused(),
             agenda.energyCriterion(), agenda.degraded());
+    }
+
+    /**
+     * What each template slot's block already holds, keyed by slot — the shape the generator needs to
+     * conserve a plan instead of rebuilding it. A block with no slot contributes nothing: it cannot be
+     * matched to a window, and guessing would re-seat work under a band it never belonged to.
+     */
+    private static Map<String, List<UUID>> membershipBySlot(
+        List<PlannerBlockIdentity.PersistedBlock> existingPlan) {
+        Map<String, List<UUID>> bySlot = new LinkedHashMap<>();
+        for (PlannerBlockIdentity.PersistedBlock block : existingPlan) {
+            if (block.templateSlotId() != null && !block.members().isEmpty()) {
+                bySlot.put(block.templateSlotId(), List.copyOf(block.members()));
+            }
+        }
+        return bySlot;
     }
 
     /**
@@ -573,9 +595,9 @@ public class AgendaGenerationService {
      * exact bug it exists to prevent: a replan walls itself out of today and pushes the whole day onto
      * tomorrow. The subtraction is by <b>block id</b>, which is now the only key either side speaks.
      */
-    private List<OccupiedInterval> withoutRegenerable(UUID userId, LocalDate targetDay, ZoneId zone,
-                                                      List<OccupiedInterval> occupied) {
-        Set<UUID> regenerable = repository.loadRegenerableBlocks(userId, targetDay, zone).stream()
+    private static List<OccupiedInterval> withoutRegenerable(
+        List<PlannerBlockIdentity.PersistedBlock> existingPlan, List<OccupiedInterval> occupied) {
+        Set<UUID> regenerable = existingPlan.stream()
             .map(PlannerBlockIdentity.PersistedBlock::blockId)
             .collect(Collectors.toSet());
         if (regenerable.isEmpty()) {

@@ -193,19 +193,24 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND (e.last_completed_at IS NULL
                OR e.last_completed_at <  ?
                OR e.last_completed_at >= ?)
-          -- Slot authority (ADR-026 D6, carried onto the deployed model). An executable already held
-          -- by a LIVE block outside the planner's regenerable universe — a USER block the user timed
-          -- by hand, or a block already under way — is not a candidate at all. Containment is
-          -- monovalent, so offering it would silently move it out of the block the user put it in:
-          -- your authority would last exactly until the next replan. Blocks the planner itself
-          -- authored and still holds as PLANNED are excluded from this guard, because those are
-          -- precisely the ones this run re-places.
+          -- Work already held by a block this run may NOT re-time is not a candidate at all.
+          -- Containment is monovalent, so merely offering it would silently move it out of the block
+          -- that holds it — and by the time a row is written the move has already happened, which is
+          -- why the guard has to live here and not in the persistence. Two cases:
+          --   * slot authority (ADR-026 D6): a USER block the user timed by hand, or a block already
+          --     under way. Otherwise your authority would last exactly until the next replan.
+          --   * the past is never rewritten (ADR-040 D8): a planner block whose start has already gone
+          --     by. A morning already lived is not a draft, and its members stay in it.
+          -- Planner blocks still ahead are deliberately NOT guarded: those are the ones this run
+          -- re-places, and walling them out would push the whole day onto tomorrow.
           AND NOT EXISTS (
               SELECT 1 FROM core_executable holder
               WHERE holder.id     = e.container_block_id
                 AND holder.type   = 'TIME_BLOCK'
                 AND holder.status IN ('PLANNED', 'IN_PROGRESS')
-                AND NOT (holder.origin = 'PLANNER' AND holder.status = 'PLANNED'))
+                AND NOT (holder.origin     = 'PLANNER'
+                     AND holder.status     = 'PLANNED'
+                     AND holder.start_time >= ?))
         ORDER BY e.priority_score DESC NULLS LAST, e.id
         """;
 
@@ -430,6 +435,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           AND b.status = 'PLANNED'
           AND b.start_time >= ?
           AND b.start_time <  ?
+          AND b.start_time >= ?
         ORDER BY b.start_time, b.id, m.container_ord NULLS LAST, m.id
         """;
 
@@ -508,7 +514,8 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
 
     @Override
     public List<SchedulableExecutable> loadRankedExecutables(UUID userId, OffsetDateTime dayStart,
-                                                             OffsetDateTime dayEnd) {
+                                                             OffsetDateTime dayEnd,
+                                                             OffsetDateTime notBefore) {
         return jdbcTemplate.query(RANKED_EXECUTABLES_SQL, (rs, rowNum) -> {
             UUID id = rs.getObject("id", UUID.class);
             int totalSubtasks = rs.getInt("total_subtasks");
@@ -525,7 +532,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 rs.getInt("settled_actual"),
                 rs.getObject("due_instant", OffsetDateTime.class),
                 rs.getObject("cycle_id", UUID.class));
-        }, userId, dayStart, dayEnd);
+        }, userId, dayStart, dayEnd, notBefore);
     }
 
     @Override
@@ -603,7 +610,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
 
     @Override
     public List<PlannerBlockIdentity.PersistedBlock> loadRegenerableBlocks(
-        UUID userId, LocalDate targetDay, ZoneId zone) {
+        UUID userId, LocalDate targetDay, ZoneId zone, OffsetDateTime notBefore) {
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
 
@@ -622,7 +629,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             if (memberId != null) {
                 accumulator.members().add(memberId);
             }
-        }, userId, dayStart, dayEnd);
+        }, userId, dayStart, dayEnd, notBefore);
 
         return accumulators.entrySet().stream()
             .map(entry -> new PlannerBlockIdentity.PersistedBlock(

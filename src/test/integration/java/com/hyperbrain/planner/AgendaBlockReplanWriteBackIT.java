@@ -262,7 +262,7 @@ class AgendaBlockReplanWriteBackIT {
     /** Runs the materializer inside a transaction: core's containment operation is MANDATORY. */
     private void materialize(List<AgendaBlock> blocks) {
         transactionTemplate.executeWithoutResult(status ->
-            blockMaterializer.materialize(USER, DAY, UTC, blocks));
+            blockMaterializer.materialize(USER, DAY, UTC, blocks, DAY.atStartOfDay(UTC).toOffsetDateTime()));
     }
 
     private UUID plannerBlockId() {

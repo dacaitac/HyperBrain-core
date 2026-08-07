@@ -297,8 +297,8 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
-    @DisplayName("reconciliation: a task added on the replan is inserted while the prior block keeps its id")
-    void regeneration_inserts_new_block_without_disturbing_survivors() {
+    @DisplayName("a replan admits new work into the window that already exists, keeping its id")
+    void a_replan_admits_new_work_without_disturbing_the_window() {
         UUID high = insertTask("High", 0.9, 60);
 
         service.generate(USER, DAY, UTC, NOON, false);
@@ -308,9 +308,12 @@ class AgendaGenerationServiceIT {
         UUID added = insertTask("Added", 0.5, 60);
         service.generate(USER, DAY, UTC, NOON, false);
 
-        // The prior block is untouched (same id); the new task gets its own fresh block.
+        // The window keeps its identity — so its calendar event is updated, never duplicated — and the
+        // newcomer joins it rather than opening a block of its own. The plan is conserved, not frozen.
         assertThat(blockId(high)).isEqualTo(highBlockFirst);
-        assertThat(blockId(added)).isNotNull().isNotEqualTo(highBlockFirst);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, added))
+            .isEqualTo(highBlockFirst);
         // Nothing was removed, so the staged event carries an empty removed list.
         Integer removedCount = jdbcTemplate.queryForObject(
             "SELECT jsonb_array_length(payload -> 'removed_block_ids') FROM outbox_events "

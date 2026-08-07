@@ -64,7 +64,8 @@ public class HumanizedAgendaFloor {
         }
         var batched = contextBatcher.batch(state.rankedExecutables(), settings.batchBandWidth());
         PlannerDayState batchedState = new PlannerDayState(
-            state.windowStart(), state.windowEnd(), state.windows(), batched, state.wigPortfolio(),
+            state.windowStart(), state.windowEnd(), state.windows(), state.existingMembership(),
+            batched, state.wigPortfolio(),
             state.occupied(), state.energyProfile(), state.dataComplete());
         return agendaGenerator.generate(batchedState);
     }
