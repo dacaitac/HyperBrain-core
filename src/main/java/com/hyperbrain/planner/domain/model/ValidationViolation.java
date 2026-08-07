@@ -16,7 +16,7 @@ public record ValidationViolation(UUID executableId, Wall wall) {
     public enum Wall {
         /** Placed outside the sleep frontier {@code [wake, bedtime]} (ADR-013 D2). */
         OUTSIDE_SLEEP_FRONTIER,
-        /** Overlapped an occupied/SETTLED block or another placed block. */
+        /** Overlapped an occupied wall — an existing time block's window — or another placed block. */
         OVERLAPS_OCCUPIED,
         /** Overlapped a read-only AGENDA window (ADR-009). */
         OVERLAPS_READ_ONLY_AGENDA,

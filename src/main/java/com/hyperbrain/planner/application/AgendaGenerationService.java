@@ -318,8 +318,10 @@ public class AgendaGenerationService {
         // would leave a replan of an already-materialized day (e.g. after the morning dispatch) no room
         // to re-place its own tasks — it would exclude them, and reconciliation would then delete their
         // blocks, pushing the tasks onto future days. Ignoring them lets the generator re-place the tasks
-        // fresh from now, and reconciliation converges them by stable id. Existing AGENDA / USER / FOCUS /
-        // ACTIVE / SETTLED blocks remain walls.
+        // fresh from now, and reconciliation converges them by stable id. Every other wall stands: the
+        // read-only AGENDA windows and the TIME_BLOCK executables that hold time (USER blocks, and the
+        // ones already closed as DONE / FAILED). See withoutRegenerable for why the subtraction is inert
+        // until the two sides read the same block model.
         List<OccupiedInterval> planningWalls = withoutRegenerable(userId, targetDay, zone, occupied);
 
         // The fallback window (07:00–23:00) is always a valid planning frontier; the
@@ -545,7 +547,22 @@ public class AgendaGenerationService {
      * generator and the idempotency hash must exclude them — the generator so a replan can re-place its
      * own tasks instead of walling itself out, and the hash so a redelivery of the same input digests
      * identically (folding in the run's own output would re-materialize on every redelivery). Existing
-     * non-regenerable blocks (AGENDA, USER/FOCUS, ACTIVE/SETTLED) are preserved.
+     * Every other wall is preserved: the read-only AGENDA windows and the {@code TIME_BLOCK}
+     * executables that hold time — {@code USER} blocks and blocks already closed ({@code DONE},
+     * {@code FAILED}) among them; {@code FOCUS}-origin rows never wall in the first place.
+     *
+     * <p><b>Inert by construction until the window model lands (ADR-040 step 3).</b> The two sides of
+     * this subtraction read <em>different</em> block models, so their keys can never meet: the
+     * regenerable set comes from the frozen {@code core_time_block} table and is keyed by each
+     * <b>member's</b> executable id, while the walls now come from {@code core_executable} and are
+     * keyed by the <b>block's own</b> id (ADR-039 — the block IS the executable). A TIME_BLOCK
+     * executable is never a member of a frozen planner block, so no wall is ever subtracted here today.
+     * That is harmless only because the Planner's switches are off <em>and</em> it still writes the
+     * frozen table; the migrated production blocks that already live in {@code core_executable} with
+     * {@code origin = 'PLANNER'} do wall, and this method cannot free them. <b>Both sides must move in
+     * the same commit</b> when step 3 makes the Planner write {@code TIME_BLOCK} executables —
+     * re-pointing the write path without re-pointing this subtraction re-opens the bug it exists to
+     * prevent (a replan walls itself out of today and pushes everything to tomorrow).
      */
     private List<OccupiedInterval> withoutRegenerable(UUID userId, LocalDate targetDay, ZoneId zone,
                                                       List<OccupiedInterval> occupied) {
