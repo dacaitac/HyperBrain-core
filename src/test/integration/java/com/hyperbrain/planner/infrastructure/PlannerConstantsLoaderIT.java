@@ -1,5 +1,6 @@
 package com.hyperbrain.planner.infrastructure;
 
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.EnergyThresholds;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.support.DataFixture;
@@ -73,6 +74,43 @@ class PlannerConstantsLoaderIT {
         EnergyThresholds thresholds = loader.resolveThresholds();
         assertThat(thresholds.highQuota()).isEqualTo(2);
         assertThat(thresholds.lowQuota()).isEqualTo(EnergyThresholds.DEFAULT.lowQuota());
+    }
+
+    @Test
+    @DisplayName("day template: the configured label is what a block of that band will be called")
+    void day_template_labels_come_from_settings() {
+        jdbcTemplate.update("""
+            UPDATE sys_user
+            SET settings = '{"planner_constants": {"day_template": {
+                "wake_anchor": "07:00",
+                "slots": [{"id": "GOAL_MORNING", "label": "Mi meta",
+                           "start": "08:30", "end": "10:30", "purpose": "GOAL"}]
+            }}}'::jsonb
+            WHERE id = ?
+            """, USER);
+
+        // Correcting how a block reads is a settings edit, never a deploy (ADR-040 D14).
+        assertThat(loader.resolveDayTemplate().labelOf("GOAL_MORNING")).contains("Mi meta");
+    }
+
+    @Test
+    @DisplayName("day template: a slot with no label borrows the sanctioned one, never the technical key")
+    void day_template_label_degrades_to_the_sanctioned_one() {
+        jdbcTemplate.update("""
+            UPDATE sys_user
+            SET settings = '{"planner_constants": {"day_template": {
+                "slots": [{"id": "GOAL_MORNING", "start": "08:30", "end": "10:30", "purpose": "GOAL"},
+                          {"id": "SIESTA", "start": "13:00", "end": "13:30", "purpose": "BREAK"}]
+            }}}'::jsonb
+            WHERE id = ?
+            """, USER);
+
+        DayTemplate template = loader.resolveDayTemplate();
+        // A settings blob written before labels existed still yields a readable day...
+        assertThat(template.labelOf("GOAL_MORNING"))
+            .isEqualTo(DayTemplate.DEFAULT.labelOf("GOAL_MORNING"));
+        // ...and a band the sanctioned table never had falls back to its key, the only case left.
+        assertThat(template.labelOf("SIESTA")).contains("SIESTA");
     }
 
     @Test

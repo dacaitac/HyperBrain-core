@@ -238,9 +238,20 @@ public interface ExecutableStateRepository {
     // ── ADR-040 D4: the day-close sweep of what expired ───────────────────────
 
     /**
-     * Loads the user's expired candidates for the day-close sweep: still-open, user-owned rows of
-     * a swept type whose window ({@code end_time}, falling back to {@code start_time}) lies on a
-     * local day <b>strictly before</b> {@code referenceDay}.
+     * Loads the user's expired candidates: still-open, user-owned rows of a swept type whose window
+     * closed <b>before {@code referenceInstant}</b>.
+     *
+     * <p><b>The bound is an instant, not a day</b> (Daniel, 2026-08-07): the sweep runs on every
+     * replan as well as at day close, and it closes everything behind the hour it fired at. A task
+     * scheduled for ten this morning and still open when the button is pressed at four in the
+     * afternoon is expired — under a day-granular predicate it was not, because its date was today,
+     * and that is precisely the work that used to sit stranded until midnight.
+     *
+     * <p><b>An hourless window expires when its day does.</b> A row whose {@code start_time} is the
+     * midnight placeholder of a date carries no hour, so it has not "passed" at four in the
+     * afternoon — it is due sometime today. Its window is therefore read as closing at the end of
+     * its local day, which is why the zone is still a parameter. Without this the first afternoon
+     * replan would fail every habit merely dated for today.
      *
      * <p>Two exclusions are part of the predicate, not accidents. Dateless rows are never
      * candidates — they are the bag the day draws from (ADR-040 D3), and they cannot expire.
@@ -248,14 +259,14 @@ public interface ExecutableStateRepository {
      * SYSTEM-owned hard copy of its container (DR-10), so sweeping it on its own would fight the
      * copy; it moves when its container moves.
      *
-     * @param userId       owning user
-     * @param types        the {@code core_executable.type} values the sweep acts on
-     * @param referenceDay the local day the sweep opens; everything before it has expired
-     * @param zone         the timezone the local day is reasoned in
+     * @param userId           owning user
+     * @param types            the {@code core_executable.type} values the sweep acts on
+     * @param referenceInstant the instant the sweep fired at; everything closed before it expired
+     * @param zone             the timezone an hourless window's day is bounded in
      * @return the expired candidates, oldest window first
      */
     List<ExecutableSnapshot> findOverdue(UUID userId, Collection<String> types,
-                                         LocalDate referenceDay, ZoneId zone);
+                                         OffsetDateTime referenceInstant, ZoneId zone);
 
     /**
      * Closes an expired executable as a sanctioned miss ({@code FAILED}). Conditional on the row

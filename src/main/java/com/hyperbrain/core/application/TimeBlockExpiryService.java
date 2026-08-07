@@ -2,6 +2,7 @@ package com.hyperbrain.core.application;
 
 import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.domain.model.TimeBlockExecutable;
+import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import org.slf4j.Logger;
@@ -22,6 +23,12 @@ import java.time.OffsetDateTime;
  * counters behind {@code progress} exclude it. A block that merely elapsed feeds no streak and no
  * success aggregate.
  *
+ * <p><b>A block that closes lets its work go.</b> Whatever it still held and nobody finished is retired
+ * through the ADR-040 D4 table (Daniel, 2026-08-07): habits close as a sanctioned miss, tasks are
+ * rescheduled onto the current day, purchases return to the dateless bag. Leaving them contained would
+ * strand them — the container is over, yet the members keep its window stamped on them and no later day
+ * admits work dated for a day that has gone.
+ *
  * <p><b>What this class no longer does.</b> It used to be the settlement of the focus register: it
  * froze the minutes really spent, stamped the last-execution mark, imputed the subtasks completed
  * inside the window and announced all of it with a published event. ADR-040 D13 retires the register
@@ -40,11 +47,17 @@ public class TimeBlockExpiryService {
 
     private final TimeBlockExecutableRepository timeBlockRepo;
     private final OutboxRepository outboxRepo;
+    private final OverdueSweepService sweepService;
+    private final ExecutableStateRepository stateRepo;
 
     public TimeBlockExpiryService(TimeBlockExecutableRepository timeBlockRepo,
-                                  OutboxRepository outboxRepo) {
+                                  OutboxRepository outboxRepo,
+                                  OverdueSweepService sweepService,
+                                  ExecutableStateRepository stateRepo) {
         this.timeBlockRepo = timeBlockRepo;
         this.outboxRepo = outboxRepo;
+        this.sweepService = sweepService;
+        this.stateRepo = stateRepo;
     }
 
     /**
@@ -62,6 +75,12 @@ public class TimeBlockExpiryService {
                 log.debug("Block {} no longer open; closing skipped", block.id());
                 continue;
             }
+            // A block that closes lets its unfinished work go, by the same table the sweep applies —
+            // otherwise the members stay contained in a container that is over, carrying its window as
+            // a hard copy, and no later day will ever admit them again (Daniel, 2026-08-07). The
+            // release is invoked here rather than in the domain chain because this closure never
+            // passes through it: it is a direct write.
+            sweepService.releaseMembersOf(block.id(), now, stateRepo.findUserZone(block.userId()));
             stageSatelliteMirror(block);
             closed++;
             log.info("Block {} elapsed and was closed as done", block.id());

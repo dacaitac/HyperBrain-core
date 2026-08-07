@@ -69,9 +69,13 @@ public final class PlannerBlockIdentity {
      *                       an empty one is still the same block
      * @param start          the persisted block start; never null
      * @param end            the persisted block end; never null
+     * @param name           the name the block currently carries; may be null. <b>No pass reads it</b>
+     *                       — identity is never the name, which is the whole reason renaming a block
+     *                       cannot duplicate its calendar event. It travels here only so the caller can
+     *                       tell a name somebody authored from a default the floor itself produced
      */
     public record PersistedBlock(UUID blockId, String templateSlotId, Set<UUID> members,
-                                 OffsetDateTime start, OffsetDateTime end) {
+                                 OffsetDateTime start, OffsetDateTime end, String name) {
 
         public PersistedBlock {
             if (blockId == null) {
@@ -83,6 +87,7 @@ public final class PlannerBlockIdentity {
             }
             templateSlotId = templateSlotId == null || templateSlotId.isBlank()
                 ? null : templateSlotId.strip();
+            name = name == null || name.isBlank() ? null : name.strip();
         }
     }
 

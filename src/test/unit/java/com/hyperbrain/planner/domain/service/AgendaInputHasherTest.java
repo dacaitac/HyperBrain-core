@@ -160,7 +160,7 @@ class AgendaInputHasherTest {
     private static com.hyperbrain.planner.domain.model.DayWindow window(String slotId, int startHour,
                                                                        int endHour) {
         return new com.hyperbrain.planner.domain.model.DayWindow(
-            new com.hyperbrain.planner.domain.model.TemplateSlot(slotId, startHour * 60, endHour * 60,
+            new com.hyperbrain.planner.domain.model.TemplateSlot(slotId, slotId, startHour * 60, endHour * 60,
                 com.hyperbrain.planner.domain.model.SlotPurpose.GOAL),
             WINDOW_START.withHour(startHour), WINDOW_START.withHour(endHour));
     }

@@ -32,9 +32,9 @@ import java.util.UUID;
  *
  * <p><b>Replan.</b> Reuses the delivery-slice path: the same {@link AgendaGenerationService} the
  * morning scheduler drives, but with {@code fromNow = true} and the command's {@code occurred_at}
- * as the reference instant (replan from when the user pressed the button). The regenerated blocks
- * reach iOS through the existing {@code AgendaBlockPlannedEvent} outbox path, and the per-user+day
- * delete-before-persist keeps repeats convergent. Unlike the morning dispatch there is no trigger
+ * as the reference instant (replan from when the user pressed the button). The regenerated blocks are
+ * executables, so they reach Apple and Notion through the standard outbox propagators, and the
+ * identity reconciliation keeps repeats convergent. Unlike the morning dispatch there is no trigger
  * minute or once-per-day guard: a manual button press always replans. <b>Staleness guard
  * (Daniel, 2026-07-11):</b> a replan whose {@code occurred_at} is older than
  * {@code app.user-commands.replan-staleness-hours} (default 2) against the injected {@link Clock}

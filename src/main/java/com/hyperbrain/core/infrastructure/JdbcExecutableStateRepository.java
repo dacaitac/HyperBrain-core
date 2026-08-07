@@ -211,7 +211,14 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
           AND e.parent_id IS NULL
           AND e.type = ANY (string_to_array(?, ','))
           AND e.start_time IS NOT NULL
-          AND (COALESCE(e.end_time, e.start_time) AT TIME ZONE ?)::date < ?::date
+          AND COALESCE(
+                  e.end_time,
+                  CASE WHEN (e.start_time AT TIME ZONE ?) = date_trunc('day', e.start_time AT TIME ZONE ?)
+                       THEN ((date_trunc('day', e.start_time AT TIME ZONE ?) + interval '1 day')
+                             AT TIME ZONE ?)
+                       ELSE e.start_time
+                  END
+              ) < ?
         ORDER BY COALESCE(e.end_time, e.start_time), e.id
         FOR UPDATE OF e SKIP LOCKED
         """;
@@ -485,12 +492,14 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
 
     @Override
     public List<ExecutableSnapshot> findOverdue(UUID userId, Collection<String> types,
-                                                LocalDate referenceDay, ZoneId zone) {
+                                                OffsetDateTime referenceInstant, ZoneId zone) {
         if (types.isEmpty()) {
             return List.of();
         }
+        String zoneId = zone.getId();
         return jdbcTemplate.query(FIND_OVERDUE_SQL, SNAPSHOT_MAPPER,
-            userId, String.join(",", types), zone.getId(), referenceDay.toString());
+            userId, String.join(",", types), zoneId, zoneId, zoneId, zoneId,
+            toTimestamp(referenceInstant));
     }
 
     @Override

@@ -3,6 +3,9 @@ package com.hyperbrain.core;
 import com.hyperbrain.core.application.OverdueSweepService;
 import com.hyperbrain.core.application.TimeBlockExpiryService;
 import com.hyperbrain.core.domain.model.OverdueSweepReport;
+import com.hyperbrain.core.domain.port.in.DomainChangeProcessor;
+import com.hyperbrain.shared.messaging.ExternalSystem;
+import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.IntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,6 +35,9 @@ class OverdueSweepIT {
     private static final ZoneId ZONE = ZoneId.of("America/Bogota");
     /** The sweep opens this day and closes the one before it. */
     private static final LocalDate REFERENCE_DAY = LocalDate.of(2026, 8, 7);
+    /** The day-close trigger: 03:00 local on the reference day. */
+    private static final OffsetDateTime DAY_CLOSE =
+        REFERENCE_DAY.atTime(3, 0).atZone(ZONE).toOffsetDateTime();
     /** 2026-08-06 14:30 in Bogota (UTC-5) — squarely inside the day that just closed. */
     private static final OffsetDateTime YESTERDAY_AFTERNOON =
         LocalDate.of(2026, 8, 6).atTime(14, 30).atZone(ZONE).toOffsetDateTime();
@@ -42,6 +48,7 @@ class OverdueSweepIT {
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private OverdueSweepService sweepService;
     @Autowired private TimeBlockExpiryService expiryService;
+    @Autowired private DomainChangeProcessor processor;
 
     private UUID userId;
     private UUID cycleId;
@@ -57,6 +64,9 @@ class OverdueSweepIT {
         try (var conn = jdbcTemplate.getDataSource().getConnection()) {
             userId = DataFixture.insertSystemUser(conn);
         }
+        // Pinned, not assumed: the release paths resolve the local day from the user's own timezone,
+        // and sibling suites re-point the shared fixture at UTC.
+        jdbcTemplate.update("UPDATE sys_user SET timezone = ? WHERE id = ?", ZONE.getId(), userId);
         cycleId = UUID.randomUUID();
         jdbcTemplate.update(
             "INSERT INTO core_cycle (id, user_id, name, type, status) VALUES (?, ?, 'C', 'PROJECT', 'ACTIVE')",
@@ -82,7 +92,7 @@ class OverdueSweepIT {
         UUID block = insert("Block", "TIME_BLOCK", "PLANNED",
             YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
 
-        OverdueSweepReport report = sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(report.closedAsFailed()).isEqualTo(4);
         assertThat(report.rescheduled()).isEqualTo(1);
@@ -113,11 +123,11 @@ class OverdueSweepIT {
         UUID task = insert("Task", "TASK", "TODO", YESTERDAY_AFTERNOON, null, null);
         insert("Milk", "BUYING", "TODO", YESTERDAY_AFTERNOON, null, null);
 
-        sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        sweepService.sweep(userId, DAY_CLOSE, ZONE);
         OffsetDateTime afterFirstRun = startTime(task);
         int eventsAfterFirstRun = outboxCount();
 
-        OverdueSweepReport second = sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        OverdueSweepReport second = sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(second.isEmpty()).isTrue();
         assertThat(startTime(task)).isEqualTo(afterFirstRun);
@@ -131,7 +141,7 @@ class OverdueSweepIT {
             YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
         UUID task = insert("Contained", "TASK", "TODO", YESTERDAY_AFTERNOON, null, block);
 
-        sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(containerOf(task)).isNull();
         assertThat(startTime(task))
@@ -147,7 +157,7 @@ class OverdueSweepIT {
             YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
         UUID buying = insert("Milk", "BUYING", "TODO", YESTERDAY_AFTERNOON, null, block);
 
-        sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(containerOf(buying)).isNull();
         assertThat(startTime(buying)).isNull();
@@ -159,7 +169,7 @@ class OverdueSweepIT {
         UUID task = insert("Parent", "TASK", "TODO", YESTERDAY_AFTERNOON, null, null);
         UUID subtask = insertChild("Subtask", task, YESTERDAY_AFTERNOON);
 
-        OverdueSweepReport report = sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         // Only the parent was a candidate; the subtask moved because its date is a hard copy.
         assertThat(report.rescheduled()).isEqualTo(1);
@@ -174,7 +184,7 @@ class OverdueSweepIT {
         UUID agenda = insertRecurring("Standup", "AGENDA", YESTERDAY_AFTERNOON, 1.0);
         UUID habit = insertRecurring("Gym", "HABIT", YESTERDAY_AFTERNOON, 1.0);
 
-        sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(status(agenda)).isEqualTo("FAILED");
         assertThat(status(habit)).isEqualTo("FAILED");
@@ -191,7 +201,7 @@ class OverdueSweepIT {
         jdbcTemplate.update(
             "UPDATE core_executable SET current_streak = 5, best_streak = 5 WHERE id = ?", habit);
 
-        sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(intColumn(habit, "current_streak")).isZero();
         assertThat(intColumn(habit, "best_streak")).isEqualTo(5);
@@ -213,12 +223,129 @@ class OverdueSweepIT {
         UUID habit = insertRecurring("Gym", "HABIT", YESTERDAY_AFTERNOON, 1.0);
         jdbcTemplate.update("UPDATE core_executable SET status = 'DONE' WHERE id = ?", habit);
 
-        OverdueSweepReport report = sweepService.sweep(userId, REFERENCE_DAY, ZONE);
+        OverdueSweepReport report = sweepService.sweep(userId, DAY_CLOSE, ZONE);
 
         assertThat(report.isEmpty()).isTrue();
         assertThat(status(habit)).isEqualTo("DONE");
         assertThat(clonesOf("Gym")).isEmpty();
         assertThat(outboxCount()).isZero();
+    }
+
+    // ── The intraday trigger and the block-closure release (Daniel, 2026-08-07) ──
+
+    @Test
+    @DisplayName("a replan at four in the afternoon reaches this morning's leftovers and puts them back on today")
+    void an_intraday_sweep_reaches_this_morning() {
+        OffsetDateTime thisAfternoon = REFERENCE_DAY.atTime(16, 4).atZone(ZONE).toOffsetDateTime();
+        UUID block = insert("This morning's block", "TIME_BLOCK", "DONE",
+            TODAY_MORNING, TODAY_MORNING.plusHours(2), null);
+        UUID stranded = insert("Left undone", "TASK", "TODO", TODAY_MORNING, null, block);
+        // Dated for today at an hour that has not arrived: still ahead of the trigger, so untouched.
+        UUID tonight = insert("Tonight", "TASK", "TODO",
+            REFERENCE_DAY.atTime(21, 0).atZone(ZONE).toOffsetDateTime(), null, null);
+        // Merely dated for today, with no hour of its own: it has not "passed" at four in the
+        // afternoon, and failing it would be the sweep inventing a miss.
+        UUID hourless = insert("Sometime today", "HABIT", "TODO",
+            REFERENCE_DAY.atStartOfDay(ZONE).toOffsetDateTime(), null, null);
+
+        OverdueSweepReport report = sweepService.sweep(userId, thisAfternoon, ZONE);
+
+        assertThat(report.rescheduled()).isEqualTo(1);
+        assertThat(containerOf(stranded)).isNull();
+        assertThat(startTime(stranded)).isEqualTo(REFERENCE_DAY.atStartOfDay(ZONE).toOffsetDateTime());
+        assertThat(startTime(tonight).atZoneSameInstant(ZONE).toLocalTime())
+            .isEqualTo(java.time.LocalTime.of(21, 0));
+        assertThat(status(hourless)).isEqualTo("TODO");
+    }
+
+    @Test
+    @DisplayName("two replans minutes apart retire the same work once: no second move, no second event")
+    void two_intraday_sweeps_retire_once() {
+        UUID block = insert("This morning's block", "TIME_BLOCK", "DONE",
+            TODAY_MORNING, TODAY_MORNING.plusHours(2), null);
+        UUID task = insert("Left undone", "TASK", "TODO", TODAY_MORNING, null, block);
+        insert("Missed habit", "HABIT", "TODO", YESTERDAY_AFTERNOON, null, null);
+
+        sweepService.sweep(userId, REFERENCE_DAY.atTime(16, 4).atZone(ZONE).toOffsetDateTime(), ZONE);
+        OffsetDateTime afterFirst = startTime(task);
+        int eventsAfterFirst = outboxCount();
+
+        OverdueSweepReport second = sweepService.sweep(
+            userId, REFERENCE_DAY.atTime(16, 10).atZone(ZONE).toOffsetDateTime(), ZONE);
+
+        assertThat(second.isEmpty()).isTrue();
+        assertThat(startTime(task)).isEqualTo(afterFirst);
+        assertThat(outboxCount()).isEqualTo(eventsAfterFirst);
+    }
+
+    @Test
+    @DisplayName("closing a block retires what it still held, by type — the stranding bug")
+    void closing_a_block_releases_its_members() {
+        UUID block = insert("Tonight's block", "TIME_BLOCK", "PLANNED",
+            TODAY_MORNING.plusHours(12), TODAY_MORNING.plusHours(15), null);
+        UUID task = insert("Unfinished", "TASK", "TODO", TODAY_MORNING.plusHours(12), null, block);
+        UUID habit = insertRecurring("Gym", "HABIT", TODAY_MORNING.plusHours(12), 1.0);
+        jdbcTemplate.update("UPDATE core_executable SET container_block_id = ? WHERE id = ?",
+            block, habit);
+        UUID done = insert("Already finished", "TASK", "DONE", TODAY_MORNING.plusHours(12), null, block);
+
+        // The block is closed while its own window is still ahead: no temporal predicate reaches its
+        // members, and they must come out all the same.
+        OverdueSweepReport report = sweepService.releaseMembersOf(block, DAY_CLOSE, ZONE);
+
+        assertThat(report.rescheduled()).isEqualTo(1);
+        assertThat(report.closedAsFailed()).isEqualTo(1);
+        assertThat(containerOf(task)).isNull();
+        assertThat(startTime(task)).isEqualTo(REFERENCE_DAY.atStartOfDay(ZONE).toOffsetDateTime());
+        assertThat(status(habit)).isEqualTo("FAILED");
+        assertThat(clonesOf("Gym")).hasSize(1);
+        // What was already finished is left exactly as it was.
+        assertThat(status(done)).isEqualTo("DONE");
+        assertThat(containerOf(done)).isEqualTo(block);
+    }
+
+    @Test
+    @DisplayName("ticking a block in Notion releases its members through the ingestion chain, and the echo does not repeat it")
+    void the_manual_road_releases_through_the_domain_chain() {
+        UUID block = insert("Tonight's block", "TIME_BLOCK", "PLANNED",
+            TODAY_MORNING.plusHours(12), TODAY_MORNING.plusHours(15), null);
+        UUID task = insert("Unfinished", "TASK", "TODO", TODAY_MORNING.plusHours(12), null, block);
+
+        // Daniel ticks the block in Notion: it arrives as an ordinary merge, not through the planner.
+        processor.process(blockSnapshot(block, "PLANNED"), blockSnapshot(block, "DONE"),
+            ExternalSystem.NOTION);
+        int eventsAfterClosure = outboxCount();
+
+        assertThat(containerOf(task)).isNull();
+        assertThat(startTime(task).atZoneSameInstant(ZONE).toLocalDate())
+            .isEqualTo(OffsetDateTime.now().atZoneSameInstant(ZONE).toLocalDate());
+
+        // Our write-back is projected to Notion and read straight back as closed → closed.
+        processor.process(blockSnapshot(block, "DONE"), blockSnapshot(block, "DONE"),
+            ExternalSystem.NOTION);
+
+        assertThat(outboxCount()).isEqualTo(eventsAfterClosure);
+    }
+
+    @Test
+    @DisplayName("the elapsed-window settlement releases the members too, and sweeping after it changes nothing")
+    void the_settlement_releases_and_the_sweep_does_not_repeat_it() {
+        UUID block = insert("Block", "TIME_BLOCK", "PLANNED",
+            YESTERDAY_AFTERNOON, YESTERDAY_AFTERNOON.plusHours(2), null);
+        UUID task = insert("Unfinished", "TASK", "TODO", YESTERDAY_AFTERNOON, null, block);
+
+        expiryService.expireDueBlocks(DAY_CLOSE);
+        int eventsAfterSettlement = outboxCount();
+        OffsetDateTime afterSettlement = startTime(task);
+
+        // Both selectors reach this member in the same run; the conditional writes absorb it.
+        OverdueSweepReport report = sweepService.sweep(userId, DAY_CLOSE, ZONE);
+
+        assertThat(status(block)).isEqualTo("DONE");
+        assertThat(containerOf(task)).isNull();
+        assertThat(afterSettlement).isEqualTo(REFERENCE_DAY.atStartOfDay(ZONE).toOffsetDateTime());
+        assertThat(report.isEmpty()).isTrue();
+        assertThat(outboxCount()).isEqualTo(eventsAfterSettlement);
     }
 
     @Test
@@ -286,6 +413,14 @@ class OverdueSweepIT {
             VALUES (?, ?, ?, ?, 'TASK', 'TODO', ?, false)
             """, id, userId, parentId, name, start);
         return id;
+    }
+
+    /** The block as the ingestion chain sees it, in a given status. */
+    private ExecutableSnapshot blockSnapshot(UUID id, String status) {
+        return new ExecutableSnapshot(id, userId, null, cycleId, "Tonight's block", null,
+            "TIME_BLOCK", status, null, null, null, false, null,
+            TODAY_MORNING.plusHours(12), TODAY_MORNING.plusHours(15), null,
+            null, null, null, false, null);
     }
 
     private String status(UUID id) {

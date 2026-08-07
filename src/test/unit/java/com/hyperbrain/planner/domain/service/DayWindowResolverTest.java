@@ -119,7 +119,7 @@ class DayWindowResolverTest {
     @DisplayName("an agenda band is never laid, even when it is completely free")
     void an_agenda_band_is_never_laid() {
         DayTemplate agendaOnly = new DayTemplate(7 * 60, List.of(
-            new TemplateSlot("STANDUP", 8 * 60, 8 * 60 + 20, SlotPurpose.AGENDA_ANCHOR)));
+            new TemplateSlot("STANDUP", "Daily", 8 * 60, 8 * 60 + 20, SlotPurpose.AGENDA_ANCHOR)));
 
         List<DayWindow> windows = new DayWindowResolver(agendaOnly)
             .resolve(DAY, BOGOTA, at(7, 0), at(7, 0), at(22, 0), List.of());

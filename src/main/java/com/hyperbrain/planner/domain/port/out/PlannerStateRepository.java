@@ -164,15 +164,14 @@ public interface PlannerStateRepository {
      * the executable), under the id the identity reconciliation assigned it — so a continued block keeps
      * its {@code sync_mapping} and its calendar event is <b>updated</b> rather than duplicated (#15).
      *
-     * <p>Two things are deliberately <b>not</b> written on an update:
-     * <ul>
-     *   <li><b>the name</b>, because grouping and naming are the LLM's work and they survive a replan
-     *       untouched (ADR-040 D8) — re-invoking the model on every replan would be precisely the
-     *       friction that decision exists to avoid;</li>
-     *   <li><b>anything at all when nothing moved</b>: the statement's own guard makes an unchanged
-     *       block a zero-row write, so a replan that changes two blocks announces two, not thirty
-     *       (ADR-040 D17).</li>
-     * </ul>
+     * <p><b>Nothing at all is written when nothing moved</b>: the statement's own guard makes an
+     * unchanged block a zero-row write, so a replan that changes two blocks announces two, not thirty
+     * (ADR-040 D17).
+     *
+     * <p>The row's name is persisted as given. Grouping and naming are the LLM's work and they survive
+     * a replan untouched (ADR-040 D8), but that is enforced by the caller — which passes the block's
+     * current name back in whenever it must not change — precisely so that a block published under a
+     * bad name can still be corrected in place.
      *
      * @param block the block row to persist; never null
      * @return true when the row was actually inserted or moved — the caller's signal to announce it

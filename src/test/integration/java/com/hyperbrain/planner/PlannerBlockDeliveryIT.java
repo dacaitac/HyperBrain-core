@@ -48,6 +48,8 @@ class PlannerBlockDeliveryIT {
     private static final ZoneOffset UTC = ZoneOffset.UTC;
     private static final LocalDate DAY = LocalDate.of(2026, 7, 10);
     private static final String SLOT = "GOAL_MORNING";
+    /** The sanctioned readable label of that band — what the block must be called, not its key. */
+    private static final String GOAL_LABEL = "Meta de la mañana";
     private static final String CRITERION = "Sleep Score 80 -> quota 3";
 
     @Autowired private OutboxWorker outboxWorker;
@@ -163,6 +165,68 @@ class PlannerBlockDeliveryIT {
     }
 
     @Test
+    @DisplayName("a block is published under the readable label of its band, never the technical key")
+    void a_block_is_published_under_the_slot_label() throws Exception {
+        UUID task = insertTask("Write the report");
+
+        materialize(List.of(block(task, List.of(), 9, 11)));
+        outboxWorker.drainBatch();
+
+        // The floor names nothing (D6) — it borrows the band's label, and the band's label is what a
+        // human reads. The slot key is identity, and identity has no business in a calendar title.
+        assertThat(blockName()).isEqualTo(GOAL_LABEL);
+        assertThat(firstCalendarCommand().path("payload").path("title").asText()).isEqualTo(GOAL_LABEL);
+    }
+
+    @Test
+    @DisplayName("a block published under the technical key is renamed in place: same event, UPDATE")
+    void a_block_published_under_the_slot_key_is_renamed_in_place() throws Exception {
+        UUID task = insertTask("Write the report");
+        materialize(List.of(block(task, List.of(), 9, 11)));
+        UUID blockId = blockId();
+        // The state production is in: the day was generated while the floor still borrowed the slot key.
+        jdbcTemplate.update("UPDATE core_executable SET name = ? WHERE id = ?", SLOT, blockId);
+        String eventId = "EKEvent-" + UUID.randomUUID();
+        mapToApple(blockId, eventId);
+        jdbcTemplate.update("DELETE FROM outbox_events");
+        drainQueue();
+
+        // A regeneration that moves nothing else: the name is the only thing that changed.
+        materialize(List.of(block(task, List.of(), 9, 11)));
+        outboxWorker.drainBatch();
+
+        // This is the proof that anchoring identity to the slot was the right call: renaming a block
+        // corrects the event Daniel already has instead of leaving a duplicate beside it.
+        assertThat(blockId()).isEqualTo(blockId);
+        assertThat(blockName()).isEqualTo(GOAL_LABEL);
+        JsonNode command = firstCalendarCommand();
+        assertThat(command.path("operation").asText()).isEqualTo("UPDATED");
+        assertThat(command.path("entity_id").asText()).isEqualTo(eventId);
+        assertThat(command.path("payload").path("title").asText()).isEqualTo(GOAL_LABEL);
+        assertThat(commandCountForLocalId(blockId)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("a name somebody chose survives the replan that would have recomputed a default")
+    void an_authored_name_is_never_overwritten() {
+        UUID task = insertTask("Write the report");
+        materialize(List.of(block(task, List.of(), 9, 11)));
+        UUID blockId = blockId();
+        // Either the LLM grouping this window (ADR-040 D8) or Daniel retitling the event by hand.
+        jdbcTemplate.update("UPDATE core_executable SET name = ? WHERE id = ?", "Cierre del reporte",
+            blockId);
+        jdbcTemplate.update("DELETE FROM outbox_events");
+        drainQueue();
+
+        materialize(List.of(block(task, List.of(), 9, 11)));
+        outboxWorker.drainBatch();
+
+        assertThat(blockName()).isEqualTo("Cierre del reporte");
+        // Nothing moved, so nothing is announced: the name that was left alone is not a change.
+        assertThat(drainCommands()).isEmpty();
+    }
+
+    @Test
     @DisplayName("a withdrawn block is DELETED on Apple, and its members survive it")
     void a_withdrawn_block_is_deleted() throws Exception {
         UUID task = insertTask("Write the report");
@@ -235,6 +299,12 @@ class PlannerBlockDeliveryIT {
         return jdbcTemplate.queryForObject(
             "SELECT id FROM core_executable WHERE type = 'TIME_BLOCK' AND origin = 'PLANNER'",
             UUID.class);
+    }
+
+    private String blockName() {
+        return jdbcTemplate.queryForObject(
+            "SELECT name FROM core_executable WHERE type = 'TIME_BLOCK' AND origin = 'PLANNER'",
+            String.class);
     }
 
     private UUID insertTask(String name) {

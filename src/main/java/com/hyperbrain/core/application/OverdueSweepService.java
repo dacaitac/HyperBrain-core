@@ -3,7 +3,7 @@ package com.hyperbrain.core.application;
 import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.RecurrenceCloneRule;
-import com.hyperbrain.core.domain.model.OverdueAction;
+import com.hyperbrain.core.domain.model.CompletionState;
 import com.hyperbrain.core.domain.model.OverduePolicy;
 import com.hyperbrain.core.domain.model.OverdueSweepReport;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
@@ -34,12 +34,25 @@ import java.util.UUID;
  */
 
 /**
- * ADR-040 D4 — the day-close sweep of what expired, dispatched by type.
+ * ADR-040 D4 — the retirement of work that is not going to happen, dispatched by type.
  *
- * <p><b>Why this runs before the window model.</b> The admission rule only lets today's items and
- * the dateless ones into a day (ADR-040 D3). Without this sweep an item left undone yesterday stays
- * stuck in the past and never becomes a candidate again. This is what leaves the bag the next day
- * draws from clean.
+ * <p><b>Why this runs before the window model.</b> The admission rule only lets the target day's
+ * items and the dateless ones into a day (ADR-040 D3). Without this an item left undone stays stuck
+ * in the past and never becomes a candidate again. This is what leaves the bag the next run draws
+ * from clean.
+ *
+ * <p><b>Two selectors, one policy</b> (Daniel, 2026-08-07). What is retired is chosen in two
+ * independent ways, and both hand the same candidates to the same table:
+ * <ul>
+ *   <li><b>By time</b> ({@link #sweep}) — everything whose window closed behind the instant the run
+ *       fired at. It fires at day close <em>and</em> on every replan, before the generation, so the
+ *       day is planned over a bag that is already clean. The bound is an instant and not a day
+ *       precisely so that an afternoon replan reaches this morning's leftovers.</li>
+ *   <li><b>By membership</b> ({@link #releaseMembersOf}) — the uncompleted members of a block that
+ *       just closed, whoever closed it. A member is retired <em>because its block closed</em>, not
+ *       because an hour went by: a block closed by hand while its window is still ahead must let its
+ *       work go all the same, and no temporal predicate would have caught that.</li>
+ * </ul>
  *
  * <p><b>What each type gets</b> is {@link OverduePolicy}'s table. Three behaviours implement it:
  * <ul>
@@ -55,9 +68,12 @@ import java.util.UUID;
  * </ul>
  *
  * <p><b>Idempotence</b> is a property of every write, not of a marker column: the candidate query
- * only sees open rows whose window lies in a past local day, the closure UPDATE is conditional on
- * the row still being open, and the window UPDATE is conditional on the value actually differing.
- * Running the sweep twice on the same day moves nothing and emits nothing the second time.
+ * only sees open rows, the closure UPDATE is conditional on the row still being open, and the window
+ * UPDATE is conditional on the value actually differing. Running twice moves nothing and emits
+ * nothing the second time — and that is also what absorbs the two selectors overlapping, which they
+ * routinely do: a member of a block that just closed usually also sits behind the trigger hour,
+ * because its date is a hard copy of the block's window. Whichever reaches it first does the work;
+ * the other writes nothing and announces nothing.
  *
  * <p><b>Satellites.</b> Every row the sweep touches gets one {@code ExecutableUpdatedEvent} with a
  * {@code SYSTEM} origin, so Apple and Notion both re-project it (the propagators re-read the row and
@@ -86,21 +102,75 @@ public class OverdueSweepService {
     }
 
     /**
-     * Sweeps everything of the user that expired before {@code referenceDay}. One transaction for
-     * the whole run: the domain writes and their outbox rows commit together or not at all
-     * (Transactional Outbox), and the daily volume is a handful of rows.
+     * Sweeps everything of the user whose window closed before {@code referenceInstant}. One
+     * transaction for the whole run: the domain writes and their outbox rows commit together or not
+     * at all (Transactional Outbox), and the volume is a handful of rows.
      *
-     * @param userId       the owning user
-     * @param referenceDay the local day the sweep opens — everything whose window closed before it
-     *                     has expired, and re-dated tasks land ON it (it is "the next day" relative
-     *                     to the day that just closed)
-     * @param zone         the timezone the local day is reasoned in
+     * <p><b>The re-dating target is the instant's own day.</b> A sweep that fires at four in the
+     * afternoon puts this morning's leftovers back on <em>today</em>, not on tomorrow, so the
+     * generation that runs behind it can place them in the windows the day has left. At the day-close
+     * run the same rule reads as "the next day", because the instant already belongs to it.
+     *
+     * @param userId           the owning user
+     * @param referenceInstant the instant the sweep fired at — everything closed behind it has
+     *                         expired, and retired work lands on the local day this instant falls in
+     * @param zone             the timezone the local day is reasoned in
      * @return what the run did, per behaviour
      */
     @Transactional
-    public OverdueSweepReport sweep(UUID userId, LocalDate referenceDay, ZoneId zone) {
-        List<ExecutableSnapshot> candidates =
-            stateRepo.findOverdue(userId, OverduePolicy.sweptTypes(), referenceDay, zone);
+    public OverdueSweepReport sweep(UUID userId, OffsetDateTime referenceInstant, ZoneId zone) {
+        LocalDate referenceDay = referenceInstant.atZoneSameInstant(zone).toLocalDate();
+        OverdueSweepReport report = retire(
+            stateRepo.findOverdue(userId, OverduePolicy.sweptTypes(), referenceInstant, zone),
+            referenceDay, zone);
+        if (!report.isEmpty()) {
+            log.info("Sweep at {} closed {} as FAILED, re-dated {} item(s) onto {} and cleared the "
+                    + "date of {} purchase(s)",
+                referenceInstant, report.closedAsFailed(), report.rescheduled(), referenceDay,
+                report.dateCleared());
+        }
+        return report;
+    }
+
+    /**
+     * Applies the same table to the uncompleted members of a block that has just closed, whether a
+     * human closed it in Notion or the elapsed-window settlement did (Daniel, 2026-08-07). Without
+     * this, closing a block strands its unfinished work inside it: the members keep the block's
+     * window stamped on them by the hard copy, and since a day only admits what is dated for it, they
+     * never become candidates again.
+     *
+     * <p><b>Selected by membership, deliberately.</b> Whether a member's own hour has gone by is not
+     * asked: it is being retired because the container it lived in is over.
+     *
+     * <p>Two exclusions mirror the temporal selector's, for the same reasons: a system-generated row
+     * is not the user's work, and a row with a parent moves with its parent (DR-10), never on its own.
+     *
+     * @param blockId          the block that closed; never null
+     * @param referenceInstant the instant the closure was observed at — retired work lands on its day
+     * @param zone             the timezone the local day is reasoned in
+     * @return what the release did, per behaviour
+     */
+    @Transactional
+    public OverdueSweepReport releaseMembersOf(UUID blockId, OffsetDateTime referenceInstant,
+                                               ZoneId zone) {
+        List<ExecutableSnapshot> members = stateRepo.findContainedBy(blockId).stream()
+            .filter(member -> !member.systemGenerated())
+            .filter(member -> member.parentId() == null)
+            .filter(member -> !CompletionState.isClosed(member.status()))
+            .toList();
+        OverdueSweepReport report =
+            retire(members, referenceInstant.atZoneSameInstant(zone).toLocalDate(), zone);
+        if (!report.isEmpty()) {
+            log.info("Block {} closed with unfinished work: {} closed as FAILED, {} re-dated, {} sent "
+                + "back to the dateless bag", blockId, report.closedAsFailed(), report.rescheduled(),
+                report.dateCleared());
+        }
+        return report;
+    }
+
+    /** The one dispatch both selectors feed: ADR-040 D4's table, applied row by row. */
+    private OverdueSweepReport retire(List<ExecutableSnapshot> candidates, LocalDate referenceDay,
+                                      ZoneId zone) {
         int closed = 0;
         int rescheduled = 0;
         int dateCleared = 0;
@@ -109,16 +179,10 @@ public class OverdueSweepService {
                 case CLOSE_AS_FAILED -> closed += closeAsFailed(candidate) ? 1 : 0;
                 case RESCHEDULE -> rescheduled += reschedule(candidate, referenceDay, zone) ? 1 : 0;
                 case CLEAR_DATE -> dateCleared += clearDate(candidate) ? 1 : 0;
-                case NONE -> { /* not swept; the candidate query already excludes these types */ }
+                case NONE -> { /* the type is outside the table: LEARNING_SESSION, a nested block */ }
             }
         }
-        OverdueSweepReport report = new OverdueSweepReport(closed, rescheduled, dateCleared);
-        if (!report.isEmpty()) {
-            log.info("Overdue sweep for {} closed {} as FAILED, re-dated {} task(s) to {} and "
-                    + "cleared the date of {} purchase(s)",
-                referenceDay, closed, rescheduled, referenceDay, dateCleared);
-        }
-        return report;
+        return new OverdueSweepReport(closed, rescheduled, dateCleared);
     }
 
     // ── Behaviours ────────────────────────────────────────────────────────────

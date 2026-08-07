@@ -1,6 +1,7 @@
 package com.hyperbrain.core.application;
 
 import com.hyperbrain.core.domain.model.TimeBlockExecutable;
+import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.core.domain.port.out.TimeBlockExecutableRepository;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -35,13 +36,17 @@ class TimeBlockExpiryServiceTest {
 
     private TimeBlockExecutableRepository timeBlockRepo;
     private OutboxRepository outboxRepo;
+    private OverdueSweepService sweepService;
     private TimeBlockExpiryService service;
 
     @BeforeEach
     void setUp() {
         timeBlockRepo = mock(TimeBlockExecutableRepository.class);
         outboxRepo = mock(OutboxRepository.class);
-        service = new TimeBlockExpiryService(timeBlockRepo, outboxRepo);
+        sweepService = mock(OverdueSweepService.class);
+        ExecutableStateRepository stateRepo = mock(ExecutableStateRepository.class);
+        when(stateRepo.findUserZone(USER)).thenReturn(ZoneOffset.UTC);
+        service = new TimeBlockExpiryService(timeBlockRepo, outboxRepo, sweepService, stateRepo);
     }
 
     @Test

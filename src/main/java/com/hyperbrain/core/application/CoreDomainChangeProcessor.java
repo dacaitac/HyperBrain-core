@@ -1,5 +1,6 @@
 package com.hyperbrain.core.application;
 
+import com.hyperbrain.core.application.rule.BlockClosureReleaseRule;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
 import com.hyperbrain.core.application.rule.ContainmentCopyRule;
@@ -47,7 +48,8 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         ContainmentCopyRule containmentCopyRule,
         ProgressRecalculationRule progressRecalculationRule,
         CompletionOutcomeRule completionOutcomeRule,
-        RecurrenceCloneRule recurrenceCloneRule
+        RecurrenceCloneRule recurrenceCloneRule,
+        BlockClosureReleaseRule blockClosureReleaseRule
     ) {
         // Order notes: the containment-eligibility rule runs right before the hard-copy rule so an
         // ineligible type (a calendar event / AGENDA) has its containment cleared before the copy could
@@ -60,6 +62,11 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         // opens a block, cuts the task that was running, leaves an instant snapshot subtask or flags a
         // re-estimation. The whole register produced a series nobody consumed once time estimation was
         // retired — with nothing to estimate there is nothing to learn.
+        //
+        // The block-closure release runs last of all, and after the hard-copy link on purpose: it lets
+        // the members of a block that just closed go, and it must see the row in its final merged
+        // shape. It is the manual half of a rule with two callers — the elapsed-window settlement
+        // invokes the same operation directly — which is the shape ADR-040 D11 asks for.
         this.rules = List.of(
             endTimeInvariantRule,
             completionReactivationRule,
@@ -67,7 +74,8 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
             containmentCopyRule,
             progressRecalculationRule,
             completionOutcomeRule,
-            recurrenceCloneRule);
+            recurrenceCloneRule,
+            blockClosureReleaseRule);
     }
 
     @Override

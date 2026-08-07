@@ -1,6 +1,7 @@
 package com.hyperbrain.planner.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.core.application.OverdueSweepService;
 import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.port.out.AgendaMaterializationLedger;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.ObjectProvider;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -31,10 +33,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * Unit test for the replan-window loop that moved from {@code UserCommandService} into
@@ -49,10 +53,17 @@ class AgendaGenerationServiceTest {
     private static final ZoneId BOGOTA = ZoneId.of("America/Bogota");
 
     private AgendaGenerationService service;
+    private OverdueSweepService sweepService;
 
     @BeforeEach
     void setUp() {
-        service = spy(new AgendaGenerationService(
+        sweepService = mock(OverdueSweepService.class);
+        service = spy(build(sweepService, false));
+    }
+
+    private static AgendaGenerationService build(OverdueSweepService sweepService,
+                                                 boolean sweepOnReplanEnabled) {
+        return new AgendaGenerationService(
             mock(PlannerStateRepository.class),
             mock(PlannerBlockMaterializer.class),
             new DayWindowResolver(com.hyperbrain.planner.domain.model.DayTemplate.DEFAULT),
@@ -67,7 +78,9 @@ class AgendaGenerationServiceTest {
             mock(AgendaMaterializationLedger.class),
             mock(OutboxRepository.class),
             new ObjectMapper(),
-            emptyProvider()));
+            emptyProvider(),
+            sweepService,
+            sweepOnReplanEnabled);
     }
 
     /** An {@link ObjectProvider} with no {@link AgendaProposer} — the LLM tier is off (H1/H2 path). */
@@ -95,5 +108,35 @@ class AgendaGenerationServiceTest {
             eq(USER), eq(LocalDate.of(2026, 7, 10)), eq(BOGOTA), eq(occurredAt), eq(true), any(Set.class));
         verify(service, times(3)).generateDay(
             eq(USER), any(LocalDate.class), eq(BOGOTA), eq(occurredAt), anyBoolean(), any(Set.class));
+    }
+
+    @Test
+    @DisplayName("with the sweep on, a replan retires what is behind its trigger BEFORE it plans anything")
+    void the_replan_sweeps_before_it_generates() {
+        AgendaGenerationService sweeping = spy(build(sweepService, true));
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
+        Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
+        doReturn(new AgendaGenerationService.DayResult(empty, List.of())).when(sweeping)
+            .generateDay(any(), any(), any(), any(), anyBoolean(), any());
+
+        sweeping.replanAcrossWindow(USER, occurredAt, BOGOTA);
+
+        // Order is the whole point: a day planned over the old bag is the defect this fixes.
+        InOrder order = inOrder(sweepService, sweeping);
+        order.verify(sweepService).sweep(USER, occurredAt, BOGOTA);
+        order.verify(sweeping, times(3)).generateDay(any(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    @DisplayName("the switch is off by default: a replan sweeps nothing until Daniel turns it on")
+    void the_sweep_is_off_by_default() {
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
+        Agenda empty = new Agenda(List.of(), List.of(), List.of(), "NEUTRAL", false);
+        doReturn(new AgendaGenerationService.DayResult(empty, List.of())).when(service)
+            .generateDay(any(), any(), any(), any(), anyBoolean(), any());
+
+        service.replanAcrossWindow(USER, occurredAt, BOGOTA);
+
+        verifyNoInteractions(sweepService);
     }
 }

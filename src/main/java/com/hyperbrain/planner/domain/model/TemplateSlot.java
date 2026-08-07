@@ -15,16 +15,29 @@ package com.hyperbrain.planner.domain.model;
  * template and never from the block's name, its user or its membership — precisely so that the LLM
  * renaming a block cannot duplicate its calendar event.
  *
+ * <p><b>{@code label} is what a human reads, and it is deliberately a separate value.</b> The id is a
+ * technical key and it must never reach a calendar event or a Notion page: a day whose blocks are
+ * titled {@code MEETING_ZONE} is not a day anybody recognises as his own. Naming a block well is the
+ * intelligent layer's work (ADR-040 D5); until it runs, the block borrows this label, so the degraded
+ * floor still produces a readable day (D6). Being part of the slot, the label travels with the rest of
+ * the template in {@code sys_user.settings} (D14) — correcting a name is a settings edit, never a
+ * deploy.
+ *
  * @param id      the stable slot key; never null nor blank
+ * @param label   the human-readable name of the band, as it reaches the calendar; never null nor blank
  * @param startMinute the slot start, in minutes from midnight of the template's reference day
  * @param endMinute   the slot end, in minutes from midnight; strictly after {@code startMinute}
  * @param purpose the slot's destination; never null
  */
-public record TemplateSlot(String id, int startMinute, int endMinute, SlotPurpose purpose) {
+public record TemplateSlot(String id, String label, int startMinute, int endMinute,
+                           SlotPurpose purpose) {
 
     public TemplateSlot {
         if (id == null || id.isBlank()) {
             throw new IllegalArgumentException("slot id must not be blank");
+        }
+        if (label == null || label.isBlank()) {
+            throw new IllegalArgumentException("slot label must not be blank: " + id);
         }
         if (purpose == null) {
             throw new IllegalArgumentException("purpose must not be null");
@@ -37,6 +50,7 @@ public record TemplateSlot(String id, int startMinute, int endMinute, SlotPurpos
                 "endMinute must be after startMinute: " + startMinute + " .. " + endMinute);
         }
         id = id.strip();
+        label = label.strip();
     }
 
     /** @return the slot duration in minutes */
