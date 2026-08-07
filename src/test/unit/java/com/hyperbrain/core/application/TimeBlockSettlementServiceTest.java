@@ -87,12 +87,12 @@ class TimeBlockSettlementServiceTest {
     }
 
     @Test
-    @DisplayName("expiry settles IN_PROGRESS blocks as FAILED with the planned window as actual")
+    @DisplayName("ADR-040 D4: expiry settles IN_PROGRESS blocks as DONE with the planned window as actual")
     void expiry_settles_active_block() {
         OffsetDateTime end = START.plusMinutes(60);
         TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_IN_PROGRESS, end);
         when(timeBlockRepo.lockOpenExpired(any())).thenReturn(List.of(block));
-        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_FAILED), eq(60), any()))
+        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_DONE), eq(60), any()))
             .thenReturn(true);
         when(stateRepo.imputeCompletedSubtasks(BLOCK_ID, START, end)).thenReturn(0);
 
@@ -103,23 +103,43 @@ class TimeBlockSettlementServiceTest {
     }
 
     @Test
-    @DisplayName("expiry settles never-executed PLANNED blocks as FAILED with a null actual duration")
+    @DisplayName("ADR-040 D4: a block that merely elapsed settles as DONE — never FAILED — with a null actual duration when it never ran")
     void expiry_settles_planned_block_with_null_actual() {
         OffsetDateTime end = START.plusMinutes(30);
         TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_PLANNED, end);
         when(timeBlockRepo.lockOpenExpired(any())).thenReturn(List.of(block));
-        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_FAILED),
+        when(timeBlockRepo.settle(eq(BLOCK_ID), eq(TimeBlockExecutable.STATUS_DONE),
             eq((Integer) null), any())).thenReturn(true);
         when(stateRepo.imputeCompletedSubtasks(any(), any(), any())).thenReturn(0);
 
         int settled = service.expireDueBlocks(end.plusHours(1));
 
         assertThat(settled).isEqualTo(1);
+        verify(timeBlockRepo, never())
+            .settle(any(), eq(TimeBlockExecutable.STATUS_FAILED), any(), any());
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo).append(captor.capture());
         assertThat(captor.getValue().payload())
             .contains("\"actual_duration_minutes\":null")
-            .contains("\"final_status\":\"FAILED\"");
+            .contains("\"final_status\":\"DONE\"");
+    }
+
+    @Test
+    @DisplayName("a settled block feeds no achievement: the sweep touches no streak and stamps no completion clock on the block itself")
+    void settled_block_never_feeds_a_streak() {
+        OffsetDateTime end = START.plusMinutes(30);
+        TimeBlockExecutable block = block(TimeBlockExecutable.STATUS_IN_PROGRESS, end);
+        when(timeBlockRepo.lockOpenExpired(any())).thenReturn(List.of(block));
+        when(timeBlockRepo.settle(any(), any(), any(), any())).thenReturn(true);
+        when(stateRepo.imputeCompletedSubtasks(any(), any(), any())).thenReturn(0);
+
+        service.expireDueBlocks(end.plusMinutes(1));
+
+        // "Closed" and "achieved" are separate predicates: a container of time that elapsed is not
+        // an achievement, so DONE here must never reach the streak pair or the closure clock.
+        verify(stateRepo, never()).recordAchievedStreak(any());
+        verify(stateRepo, never()).resetStreak(any());
+        verify(stateRepo, never()).markCompleted(any(), any());
     }
 
     private static TimeBlockExecutable block(String status, OffsetDateTime endTime) {

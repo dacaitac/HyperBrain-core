@@ -23,9 +23,9 @@ import java.util.UUID;
  * {@code actual_duration_minutes} and {@code last_completed_at}, imputes the user subtasks
  * completed inside the block window via {@code imputed_block_id} and emits a
  * {@code TimeBlockSettledEvent} through the Transactional Outbox. Shared by the focus-switch
- * rule ({@code DONE}, inside the ingestion transaction) and the expiry scheduler
- * ({@code FAILED}, own transaction). Settlement is race-safe: the conditional UPDATE plus
- * {@code FOR UPDATE SKIP LOCKED} on the expiry path guarantee a block settles exactly once.
+ * rule (inside the ingestion transaction) and the expiry scheduler (own transaction); since
+ * ADR-040 D4 both settle a block as {@code DONE}. Settlement is race-safe: the conditional UPDATE
+ * plus {@code FOR UPDATE SKIP LOCKED} on the expiry path guarantee a block settles exactly once.
  */
 @Service
 public class TimeBlockSettlementService {
@@ -70,11 +70,21 @@ public class TimeBlockSettlementService {
     }
 
     /**
-     * Expires every open block whose {@code end_time} passed (DR-08 cron path) as
-     * {@code FAILED}. Blocks that were never executed (still {@code PLANNED}) settle with a
-     * null actual duration: the honest datum is "nothing observed". {@code last_completed_at}
-     * is stamped on FAILED too (ADR-039 matrix: the intraday-replan guard needs the clock even
-     * on a sanctioned miss). No overrun event is emitted here — that is HU-02.
+     * Expires every open block whose {@code end_time} passed (the {@code TIME_BLOCK} row of the
+     * ADR-040 D4 dispatch table, on its own intraday cadence) as {@code DONE}. Blocks that were
+     * never executed (still {@code PLANNED}) settle with a null actual duration: the honest datum
+     * is "nothing observed". {@code last_completed_at} is stamped either way (the intraday-replan
+     * guard needs the clock). No overrun event is emitted here — that is HU-02.
+     *
+     * <p><b>ADR-040 D4 changes the terminal this path writes: {@code DONE}, not {@code FAILED}.</b>
+     * A block is not a commitment that was broken, it is a time container that elapsed. The change
+     * is safe because "closed" and "achieved" are separate predicates and every achievement
+     * aggregate already excludes blocks by construction: the closure-outcome rule (clock + streak)
+     * skips {@code TIME_BLOCK} outright, the WIG weighted progress filters
+     * {@code type <> 'TIME_BLOCK'}, the subtask counters behind {@code progress} exclude them, the
+     * settlement imputation credits only {@code DONE} <em>subtasks</em>, and the daily rollup's
+     * {@code wig_hit} keys on executed minutes, never on the block's status. A block that merely
+     * elapsed therefore still feeds no streak and no success aggregate.
      *
      * @param now the expiry boundary
      * @return how many blocks were settled by this run
@@ -86,7 +96,7 @@ public class TimeBlockSettlementService {
             Integer actual = TimeBlockExecutable.STATUS_IN_PROGRESS.equals(block.status())
                 ? grossMinutes(block.startTime(), block.endTime())
                 : null;
-            if (settleInternal(block, TimeBlockExecutable.STATUS_FAILED, block.endTime(), actual)) {
+            if (settleInternal(block, TimeBlockExecutable.STATUS_DONE, block.endTime(), actual)) {
                 settled++;
             }
         }

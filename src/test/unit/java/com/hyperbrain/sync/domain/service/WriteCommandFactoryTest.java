@@ -108,6 +108,43 @@ class WriteCommandFactoryTest {
     }
 
     @Test
+    @DisplayName("ADR-040 D4: a FAILED reminder is written back CHECKED OFF — closed in Apple, never deleted")
+    void failed_reminder_is_written_back_as_completed() {
+        // Given: the day-close sweep closed yesterday's habit as a sanctioned miss.
+        CoreExecutable habit = executable("HABIT", "FAILED", START, null, "Rutinas");
+
+        // When
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, habit, Operation.UPDATED, "ek-1");
+
+        // Then: it stops showing among the active reminders, and it is an UPDATE, not a DELETE.
+        assertThat(command).isPresent();
+        assertThat(command.get().operation()).isEqualTo(Operation.UPDATED);
+        assertThat(command.get().commandType()).isEqualTo(CommandType.REMINDER);
+        ReminderPayload payload = (ReminderPayload) command.get().payload();
+        assertThat(payload.completed()).isTrue();
+        assertThat(payload.dueDate()).isEqualTo(START);
+    }
+
+    @Test
+    @DisplayName("a BUYING whose date the sweep cleared writes back a reminder with no due date, still in the shopping list")
+    void dateless_buying_writes_back_without_due_date() {
+        // Given: the sweep sent the purchase back to the dateless bag.
+        CoreExecutable buying = executable("BUYING", "TODO", null, null, "Personal");
+
+        // When
+        Optional<WriteCommand> command = WriteCommandFactory.forUpsert(
+            COMMAND_ID, buying, Operation.UPDATED, "ek-2");
+
+        // Then
+        assertThat(command).isPresent();
+        ReminderPayload payload = (ReminderPayload) command.get().payload();
+        assertThat(payload.dueDate()).isNull();
+        assertThat(payload.completed()).isFalse();
+        assertThat(payload.listName()).isEqualTo("Compras");
+    }
+
+    @Test
     @DisplayName("ACTIVITY maps to a CALENDAR_EVENT command carrying start/end times")
     void activity_maps_to_calendar_event_command() {
         // Given

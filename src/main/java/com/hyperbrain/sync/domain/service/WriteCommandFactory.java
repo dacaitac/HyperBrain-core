@@ -58,9 +58,7 @@ public final class WriteCommandFactory {
         "AGENDA", CommandType.CALENDAR_EVENT);
 
     private static final String STATUS_DONE = "DONE";
-
-    /** The type of a settled time-block record whose EKEvent must survive completion (ADR-039). */
-    private static final String TIME_BLOCK_TYPE = "TIME_BLOCK";
+    private static final String STATUS_FAILED = "FAILED";
 
     /** Executable type whose reminders are gathered in the dedicated shopping list. */
     private static final String BUYING_TYPE = "BUYING";
@@ -168,10 +166,24 @@ public final class WriteCommandFactory {
             executable.name(),
             executable.description(),
             dueDate,
-            STATUS_DONE.equals(executable.status()),
+            isClosed(executable.status()),
             0,
             "",
             reminderListName(executable));
+    }
+
+    /**
+     * Projects a domain status onto EventKit's single completion flag: a reminder is checked off
+     * when the executable left the inventory, {@code DONE} <b>or</b> {@code FAILED} (ADR-039's two
+     * predicates, spelled out by ADR-040 D4). Marking something as a sanctioned miss deletes
+     * nothing on the Apple side — the reminder is simply <em>closed</em> and stops showing among
+     * the active ones, which is the whole point of failing yesterday's habit.
+     *
+     * @param status the {@code core_executable.status} value
+     * @return the {@code completed} flag to write
+     */
+    private static boolean isClosed(String status) {
+        return STATUS_DONE.equals(status) || STATUS_FAILED.equals(status);
     }
 
     /**

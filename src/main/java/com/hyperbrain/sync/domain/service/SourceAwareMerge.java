@@ -202,14 +202,23 @@ public final class SourceAwareMerge {
     }
 
     /**
-     * Applies the Apple completed flag with the loss-aware rule: {@code completed=false}
-     * projects from every non-DONE status, so it only regresses an actual {@code DONE}.
+     * Applies the Apple completed flag with the loss-aware rule, in both directions.
+     *
+     * <p>{@code completed=true} projects from every closed status now that the write-back checks
+     * off a {@code FAILED} reminder too (ADR-040 D4), so an <b>echo of our own closure never
+     * rewrites a sanctioned miss into an achievement</b> — the richer domain status is kept. It
+     * only closes a genuinely open row, and then as {@code DONE}: a human checking a reminder off
+     * in Apple means "done", never "failed".
+     *
+     * <p>{@code completed=false} projects from every open status, so it only regresses an actual
+     * closure. Unchecking a closed reminder is the reopen signal, symmetric with Notion's
+     * Complete-authoritative reopen.
      */
     static String mergeCompletedFlag(String currentStatus, boolean completed) {
         if (completed) {
-            return STATUS_DONE;
+            return isClosed(currentStatus) ? currentStatus : STATUS_DONE;
         }
-        return STATUS_DONE.equals(currentStatus) ? STATUS_TODO : currentStatus;
+        return isClosed(currentStatus) ? STATUS_TODO : currentStatus;
     }
 
     /**
