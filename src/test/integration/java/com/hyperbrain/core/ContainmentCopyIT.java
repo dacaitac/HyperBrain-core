@@ -216,10 +216,16 @@ class ContainmentCopyIT {
         // set is narrower than this guard on purpose — it also demands the block be still ahead — and
         // reading that extra condition into the hand-over would let the next replan take apart the
         // membership he just arranged, which is the exact defect this closes.
+        //
+        // The hour is taken relative to now, not from the fixture's fixed instant: "already gone by" is
+        // a statement about the clock the guard would read, so the only way the case keeps its meaning
+        // on every run is for the window to be behind whatever «now» is. The assertion itself stays
+        // deterministic — the statement has no clock in it, which is precisely what is being pinned.
+        OffsetDateTime past = OffsetDateTime.now(ZoneOffset.UTC).minusDays(1);
         UUID block = insertBlock();
         jdbcTemplate.update(
             "UPDATE core_executable SET start_time = ?, end_time = ? WHERE id = ?",
-            BLOCK_START.minusDays(1), BLOCK_END.minusDays(1), block);
+            past, past.plusHours(1), block);
         UUID task = insertTask("Facturas", null, null, null);
 
         processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);

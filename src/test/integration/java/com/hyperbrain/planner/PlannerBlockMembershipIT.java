@@ -188,6 +188,31 @@ class PlannerBlockMembershipIT {
     }
 
     @Test
+    @DisplayName("the delivery read answers for the planner's windows only, and that filter is deliberate")
+    void the_delivery_read_answers_only_for_the_planners_windows() {
+        UUID task = insertTask("Write the report");
+        materialize(List.of(window(task, List.of(), 9, 11)));
+        UUID plannerBlock = blockId();
+
+        // The three windows whose authorship is not the planner's: one it handed over when Daniel
+        // arranged it by hand (still PLANNED — only the origin differs from the block above), one he
+        // created himself in Notion (no origin at all, TODO as the ordinary ingestion leaves it) and a
+        // focus row. Each holds a member, so each would be delivered if the filter ever widened.
+        insertHeldBlock("USER", "PLANNED", 14, insertTask("Facturas"));
+        insertHeldBlock(null, "TODO", 16, insertTask("Hyperbrain"));
+        insertHeldBlock("FOCUS", "IN_PROGRESS", 18, insertTask("Repasar el informe"));
+
+        // Authorship is the right question *here*, unlike in the goal signals, where a window is a
+        // window whoever laid it: this read asks which of the day's windows are the planner's to
+        // deliver. One that is already his reaches his satellites through the ordinary executable
+        // mirror — since ADR-039 a TIME_BLOCK is an executable and routes to the calendar on its own —
+        // so delivering it again would hand him back his own arrangement.
+        assertThat(plannedBlocks())
+            .extracting(PlannedBlockRecord::blockId)
+            .containsExactly(plannerBlock);
+    }
+
+    @Test
     @DisplayName("an activity is never contained: it already owns a calendar window of its own")
     void an_activity_is_refused_containment() {
         UUID activity = insertActivity("Gym");
@@ -278,8 +303,22 @@ class PlannerBlockMembershipIT {
         return id;
     }
 
-    /** Kept to assert the write-back projection still reads the day whole. */
-    @SuppressWarnings("unused")
+    /**
+     * A window of somebody else's authorship, holding one member — the shape the delivery read must
+     * leave alone.
+     */
+    private void insertHeldBlock(String origin, String status, int startHour, UUID member) {
+        UUID blockId = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, origin, start_time, end_time)
+            VALUES (?, ?, ?, 'TIME_BLOCK', ?, ?, ?, ?)
+            """, blockId, USER, "Ventana suya", status, origin, at(startHour), at(startHour + 1));
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            blockId, member);
+    }
+
+    /** The write-back projection of the day, read exactly as the delivery would read it. */
     private List<PlannedBlockRecord> plannedBlocks() {
         return repository.loadPlannedBlocksForDay(USER, DAY, ZONE);
     }
