@@ -202,7 +202,7 @@ class NotionTaskSyncServiceTest {
         when(syncMappingRepo.findByExternalSystemAndId("NOTION", PAGE_ID))
             .thenReturn(Optional.of(mapping("any", EDITED_AT)));
         when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(new CoreExecutable(
-            LOCAL_ID, USER_ID, "Write tests", null, "ACTIVITY", "TODO", null, null, null, false)));
+            LOCAL_ID, USER_ID, "Write tests", null, "ACTIVITY", "TODO", null, null, null, false, null)));
 
         // When
         SyncOutcome outcome = service.apply(new NotionTaskPage(PAGE_ID, EDITED_AT, true,

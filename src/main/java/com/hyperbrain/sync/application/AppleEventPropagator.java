@@ -43,6 +43,8 @@ import java.util.UUID;
  *   <li>The effective operation follows the {@code sync_mapping}: mapped → UPDATED against the
  *       EventKit id; unmapped → CREATED with a null id, closed later by the
  *       {@code WriteCommandResult} (ADR-010).
+ *   <li>A {@code DONE} executable is deleted from Apple rather than checked off, unless it is a
+ *       time record ({@link CoreExecutable#isTimeRecord()}), which is upserted like any other state.
  * </ul>
  *
  * <p>The {@code commandId} is derived deterministically from the outbox event id, so a retried
@@ -61,8 +63,6 @@ public class AppleEventPropagator implements IEventPropagator {
     private static final String COMMAND_ID_NAMESPACE = "hyperbrain-write-command:";
     private static final String STATUS_PENDING = "PENDING";
     private static final String STATUS_DONE = "DONE";
-    /** ADR-039: a settled block keeps its EKEvent (it is a time record), never deleted on completion. */
-    private static final String TIME_BLOCK_TYPE = "TIME_BLOCK";
 
     /** Outbox aggregate types that represent a {@code core_executable} change. */
     private static final Set<String> EXECUTABLE_AGGREGATES = Set.of("CORE_EXECUTABLE", "TASK");
@@ -154,12 +154,12 @@ public class AppleEventPropagator implements IEventPropagator {
         // in sync with PG's authoritative state and avoids accumulating "completed" reminders.
         // The WriteCommandResult handler cleans up the sync_mapping on DELETE applied.
         //
-        // ADR-039 exception: a settled TIME_BLOCK (DONE from a focus switch, FAILED from expiry) is
-        // a time-accounting record — its EKEvent must SURVIVE completion, not be deleted. So blocks
-        // skip the delete path entirely and fall through to the normal upsert, which UPDATES the
-        // calendar event with the frozen window instead of removing it.
-        if (STATUS_DONE.equals(executable.get().status())
-            && !TIME_BLOCK_TYPE.equals(executable.get().type())) {
+        // Time records are exempt (CoreExecutable#isTimeRecord): a settled TIME_BLOCK (ADR-039) and
+        // an observed episode such as a recorded nap are accounts of time that already passed, so
+        // their EKEvent must SURVIVE completion. They skip the delete path entirely and fall through
+        // to the normal upsert — CREATED at birth for the episode that is born DONE, UPDATED on every
+        // re-observation, so a re-timing moves the calendar event instead of removing it.
+        if (STATUS_DONE.equals(executable.get().status()) && !executable.get().isTimeRecord()) {
             if (mapping.isEmpty()) {
                 log.debug("Executable {} is DONE with no Apple mapping; skipping", localId);
                 return;

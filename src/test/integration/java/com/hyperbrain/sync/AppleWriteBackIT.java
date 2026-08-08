@@ -187,8 +187,8 @@ class AppleWriteBackIT {
     }
 
     @Test
-    @DisplayName("an ACTIVITY born DONE reaches no calendar: delete-on-DONE claims it before it exists")
-    void an_episode_recorded_after_the_fact_reaches_no_apple_calendar() {
+    @DisplayName("an ACTIVITY born DONE reaches the calendar: the episode is created, not swallowed by delete-on-DONE")
+    void an_episode_recorded_after_the_fact_reaches_the_apple_calendar() throws Exception {
         // Given a nap the system observed and recorded (NapActivityRecorder): an ACTIVITY born DONE
         // over the window it really happened in, not system_generated, announced through the standard
         // outbox exactly like any other executable — and meant to show up in Daniel's calendar as
@@ -199,38 +199,58 @@ class AppleWriteBackIT {
         // When the outbox drains
         outboxWorker.drainBatch();
 
-        // Then nothing at all is written to Apple. propagateUpsert routes every DONE executable that
-        // is not a TIME_BLOCK to the delete-on-DONE path (so Apple never accumulates completed
-        // reminders), and a row born DONE has no sync_mapping yet, so that branch returns having
-        // emitted nothing. The exemption that saves a settled TIME_BLOCK — its EKEvent is a time
-        // record and must survive completion — is the same argument a recorded episode has, and it
-        // does not cover it.
-        //
-        // Pinned as it behaves today, deliberately: the gate stays honest, the gap stays visible, and
-        // the fix has somewhere to land. WHICH executables keep their Apple entity on DONE is a
-        // src/main decision (it changes the behaviour of every ACTIVITY and LEARNING_SESSION that is
-        // completed normally), not something a test may settle.
+        // Then a CALENDAR_EVENT CREATE carries the episode to the HyperBrain calendar. The delete-on-
+        // DONE path (which keeps Apple free of checked-off reminders) exempts it for the same reason
+        // it exempts a settled TIME_BLOCK: both are records of time that already passed, and a row
+        // born DONE would otherwise be deleted at birth, before it ever existed on the Apple side.
+        Message<String> message = receiveOne(COMMANDS_QUEUE).orElseThrow();
+        JsonNode command = objectMapper.readTree(message.getPayload());
+        assertThat(command.path("command_type").asText()).isEqualTo("CALENDAR_EVENT");
+        assertThat(command.path("operation").asText()).isEqualTo("CREATED");
+        assertThat(command.path("entity_id").isNull()).isTrue();
+        assertThat(command.path("payload").path("title").asText()).isEqualTo("Siesta");
+        assertThat(command.path("payload").path("calendar_name").asText()).isEqualTo("HyperBrain");
+        // The window it really happened in travels with it — not the instant it was recorded.
+        assertThat(command.path("payload").path("start_time").asText()).isNotBlank();
+        assertThat(command.path("payload").path("end_time").asText()).isNotBlank();
+        // Exactly one command: the episode is created once, not created and then deleted.
         assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
-        Integer commands = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM sync_write_commands", Integer.class);
-        assertThat(commands).isZero();
-        // And it fails silently: the event drains clean, so nothing retries and nothing reaches a DLQ.
-        Integer unprocessed = jdbcTemplate.queryForObject(
-            "SELECT count(*) FROM outbox_events WHERE processed_at IS NULL", Integer.class);
-        assertThat(unprocessed).isZero();
     }
 
     @Test
-    @DisplayName("and if it ever were mapped, re-timing it would DELETE the event, not move it")
-    void a_mapped_episode_is_deleted_rather_than_retimed() throws Exception {
-        // The complement of the case above, and what makes the gap structural rather than a one-off
-        // miss: as soon as the episode HAS an Apple entity, the same delete-on-DONE path removes it.
-        // Repairing only the missing create would therefore not hold — the first re-timing of the nap
-        // (the watch revises its staging on every replan) would delete the event again.
+    @DisplayName("re-timing the episode UPDATES its event: the watch revising the nap must not delete it")
+    void a_mapped_episode_is_retimed_rather_than_deleted() throws Exception {
+        // The complement of the case above, and what made the defect structural rather than a missing
+        // CREATE: once the episode HAS an Apple entity it is still DONE, so the delete-on-DONE path
+        // would claim it on every re-observation. The watch revises its staging on each replan, so
+        // repairing only the create would have had the second replan of the day delete the very event
+        // the first one placed.
         UUID nap = insertRecordedNap();
         String entityId = "EKEvent-" + UUID.randomUUID();
         insertMapping(nap, entityId);
         insertOutboxEvent(nap, "ExecutableUpdatedEvent", "SYSTEM", "{}");
+
+        outboxWorker.drainBatch();
+
+        Message<String> message = receiveOne(COMMANDS_QUEUE).orElseThrow();
+        JsonNode command = objectMapper.readTree(message.getPayload());
+        assertThat(command.path("operation").asText()).isEqualTo("UPDATED");
+        assertThat(command.path("command_type").asText()).isEqualTo("CALENDAR_EVENT");
+        assertThat(command.path("entity_id").asText()).isEqualTo(entityId);
+        assertThat(command.path("payload").path("title").asText()).isEqualTo("Siesta");
+        assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("an ordinary ACTIVITY the user completes still has its event deleted: the exemption did not widen")
+    void a_user_completed_activity_still_loses_its_event() throws Exception {
+        // The boundary of the exemption, pinned. This ACTIVITY carries no origin — nobody in the
+        // system authored it — so completing it keeps removing its calendar event, exactly as before.
+        // Whether that is right for a normally completed ACTIVITY is a wider decision, and Daniel's.
+        UUID localId = insertExecutable("ACTIVITY", "DONE");
+        String entityId = "EKEvent-" + UUID.randomUUID();
+        insertMapping(localId, entityId);
+        insertOutboxEvent(localId, "ExecutableUpdatedEvent", "NOTION", "{}");
 
         outboxWorker.drainBatch();
 

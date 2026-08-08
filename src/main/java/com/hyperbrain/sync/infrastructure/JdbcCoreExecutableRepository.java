@@ -34,7 +34,7 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
 
     private static final String FIND_BY_ID_SQL = """
         SELECT id, user_id, name, description, type, status, start_time, end_time, source_calendar,
-               system_generated
+               system_generated, origin
         FROM core_executable
         WHERE id = ?
         """;
@@ -88,7 +88,8 @@ class JdbcCoreExecutableRepository implements CoreExecutableRepository {
             startTs != null ? startTs.toInstant().atOffset(java.time.ZoneOffset.UTC) : null,
             endTs   != null ? endTs.toInstant().atOffset(java.time.ZoneOffset.UTC)   : null,
             rs.getString("source_calendar"),
-            rs.getBoolean("system_generated"));
+            rs.getBoolean("system_generated"),
+            rs.getString("origin"));
     };
 
     private final JdbcTemplate jdbcTemplate;

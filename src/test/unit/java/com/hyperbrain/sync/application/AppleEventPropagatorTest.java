@@ -236,6 +236,77 @@ class AppleEventPropagatorTest {
     }
 
     @Test
+    @DisplayName("an episode born DONE reaches the calendar: CREATE, not the delete-on-DONE path")
+    void recorded_episode_is_created_on_the_calendar() {
+        // Given the nap the system observed and recorded: born DONE and never mapped, since it is
+        // announced by the very event that created it
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(recordedNap()));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID)).thenReturn(Optional.empty());
+        when(commandLogRepo.findPendingCreateByLocalId(LOCAL_ID)).thenReturn(Optional.empty());
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableCreatedEvent", "SYSTEM"));
+
+        // Then a CALENDAR_EVENT CREATE carrying the window it really happened in — the exemption a
+        // settled TIME_BLOCK has (its event is a record of time) covers the episode too
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq(LOCAL_ID.toString()));
+        WriteCommand command = captor.getValue();
+        assertThat(command.operation()).isEqualTo(Operation.CREATED);
+        assertThat(command.commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(command.entityId()).isNull();
+        CalendarEventPayload payload = (CalendarEventPayload) command.payload();
+        assertThat(payload.title()).isEqualTo("Siesta");
+        assertThat(payload.startTime()).isEqualTo(START);
+        assertThat(payload.endTime()).isEqualTo(START.plusHours(1));
+        assertThat(payload.calendarName()).isEqualTo("HyperBrain");
+    }
+
+    @Test
+    @DisplayName("re-timing a recorded episode UPDATES its event: the watch revising the nap must not delete it")
+    void recorded_episode_is_updated_not_deleted_when_retimed() {
+        // Given the same episode, now mapped: the watch revises its staging on every replan, so the
+        // recorder re-times the row and announces it again — still DONE
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(recordedNap()));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-nap-1")));
+        when(commandLogRepo.findLastWrittenCommandTypeByLocalId(LOCAL_ID))
+            .thenReturn(Optional.of(CommandType.CALENDAR_EVENT));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "SYSTEM"));
+
+        // Then the event is moved, never removed — repairing only the CREATE would have left the
+        // second replan of the day deleting the very event the first one placed
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-nap-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.UPDATED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(captor.getValue().entityId()).isEqualTo("EK-nap-1");
+    }
+
+    @Test
+    @DisplayName("an ordinary ACTIVITY the user completes still has its event deleted (the exemption did not widen)")
+    void user_completed_activity_still_deletes_its_event() {
+        // Given an ACTIVITY that was planned and later marked done — no planner origin on it, which
+        // is what separates it from an episode the system observed
+        when(executableRepo.findById(LOCAL_ID)).thenReturn(Optional.of(executable("ACTIVITY", "DONE")));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", LOCAL_ID))
+            .thenReturn(Optional.of(mapping("EK-activity-1")));
+
+        // When
+        service.propagate(event("CORE_EXECUTABLE", "ExecutableUpdatedEvent", "NOTION"));
+
+        // Then the delete-on-DONE behaviour is untouched: whether a normally completed ACTIVITY
+        // should keep its calendar event is a wider decision, and it is Daniel's to make
+        ArgumentCaptor<WriteCommand> captor = ArgumentCaptor.forClass(WriteCommand.class);
+        verify(commandPublisher).publish(captor.capture(), eq("EK-activity-1"));
+        assertThat(captor.getValue().operation()).isEqualTo(Operation.DELETED);
+        assertThat(captor.getValue().commandType()).isEqualTo(CommandType.CALENDAR_EVENT);
+        assertThat(captor.getValue().entityId()).isEqualTo("EK-activity-1");
+    }
+
+    @Test
     @DisplayName("core#65: a mapped AGENDA edited (NOTION origin) write-backs a CALENDAR_EVENT on the 'DanielC' calendar")
     void mapped_agenda_writes_back_to_danielc() {
         // Given an AGENDA already synced from Google, edited (e.g. in Notion) — a non-Apple origin
@@ -497,7 +568,16 @@ class AppleEventPropagatorTest {
 
     private static CoreExecutable executable(String type, String status, boolean systemGenerated) {
         return new CoreExecutable(LOCAL_ID, USER_ID, "Buy groceries", null, type, status, START, null,
-            "HyperBrain", systemGenerated);
+            "HyperBrain", systemGenerated, null);
+    }
+
+    /**
+     * The nap the recorder writes: an {@code ACTIVITY} born {@code DONE} over the window it really
+     * happened in, authored by the planner and explicitly not internal accounting.
+     */
+    private static CoreExecutable recordedNap() {
+        return new CoreExecutable(LOCAL_ID, USER_ID, "Siesta", null, "ACTIVITY", "DONE",
+            START, START.plusHours(1), null, false, "PLANNER");
     }
 
     private static SyncMapping mapping(String externalId) {
