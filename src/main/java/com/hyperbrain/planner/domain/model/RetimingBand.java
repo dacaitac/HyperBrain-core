@@ -15,11 +15,12 @@ import java.time.OffsetDateTime;
  * proposal leaves is a wall breach, and the day degrades to the deterministic floor.
  *
  * <p><b>Where a band comes from.</b> Two sources, one rule. An ordinary band is the template slot
- * resolved onto the day (displaced by the real wake, clamped to the planning bounds). A <b>meal</b>
- * band is that same band widened to the meal's plausible hours — breakfast in the morning, lunch
- * around midday, dinner in the evening — because a meal legitimately floats within a sensible stretch
- * while nothing makes breakfast at three in the afternoon sensible. The width is configuration
- * ({@link MealWindow}); the rule that a block never leaves its band is not.
+ * resolved onto the day (displaced by the real wake, clamped to the planning bounds). A band that
+ * <b>holds a meal</b> — whatever else that band is for — is that same band widened to the meal's
+ * plausible hours, breakfast in the morning, lunch around midday, dinner in the evening, because a
+ * meal legitimately floats within a sensible stretch while nothing makes breakfast at three in the
+ * afternoon sensible. The width is configuration ({@link MealWindow}); the rule that a block never
+ * leaves its band is not.
  *
  * <p>A band is a <b>bound on movement, never a permission to overlap</b>: the sleep frontier, the
  * read-only AGENDA windows and the blocks somebody already owns keep walling independently, so being
