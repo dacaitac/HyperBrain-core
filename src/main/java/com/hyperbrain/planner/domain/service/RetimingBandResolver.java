@@ -6,12 +6,13 @@ import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.MealWindow;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.RetimingBand;
-import com.hyperbrain.planner.domain.model.SlotPurpose;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /*
@@ -27,13 +28,17 @@ import java.util.Map;
  * (Daniel, 2026-08-07). One rule, two sources of width:
  *
  * <ul>
- *   <li><b>An ordinary band</b> is its {@link com.hyperbrain.planner.domain.model.TemplateSlot}
+ *   <li><b>A band no meal sits in</b> is its {@link com.hyperbrain.planner.domain.model.TemplateSlot}
  *       resolved onto the day — displaced by the real wake like every window (ADR-040 D2) — and
- *       nothing more. Tolerance zero: «Casa» is the evening.</li>
- *   <li><b>A meal band</b> is that same band <em>widened</em> to the plausible hours of the meal it
- *       holds ({@link MealWindow}), because a meal legitimately floats around its hour while nothing
- *       makes it plausible at any hour. The meal is matched to the band it actually sits in — by
- *       overlap on the day, never by name — so moving either one in configuration keeps them paired.</li>
+ *       nothing more. Tolerance zero: «Reuniones» is the afternoon.</li>
+ *   <li><b>A band that holds a meal</b> is that same band <em>widened</em> to the meal's plausible
+ *       hours ({@link MealWindow}), because a meal legitimately floats around its hour while nothing
+ *       makes it plausible at any hour. <b>Whatever that band is for:</b> under the sanctioned
+ *       template breakfast lives inside «Rutina personal» and dinner inside «Casa», and only lunch
+ *       has a band of its own — keying the widening on the slot's purpose would have left the
+ *       configured hours of two meals out of three inert. The meal is matched to the band it
+ *       actually sits in — by overlap on the day, never by name — so moving either one in
+ *       configuration keeps them paired.</li>
  * </ul>
  *
  * <p>Every band is finally clamped to the run's planning bounds, so a band can never authorize a move
@@ -80,11 +85,14 @@ public class RetimingBandResolver {
             || lowerBound == null || upperBound == null) {
             throw new IllegalArgumentException("day, zone, wake and bounds must not be null");
         }
+        List<DayWindow> windows = template.resolve(targetDay, zone, wake);
+        Map<String, RetimingBand> plausibleHours = plausibleHoursBySlot(windows, targetDay, zone);
         Map<String, RetimingBand> bands = new LinkedHashMap<>();
-        for (DayWindow window : template.resolve(targetDay, zone, wake)) {
+        for (DayWindow window : windows) {
             RetimingBand band = new RetimingBand(window.slot().label(), window.start(), window.end());
-            if (window.slot().purpose() == SlotPurpose.MEAL) {
-                band = widenedToMeal(band, window, targetDay, zone);
+            RetimingBand plausible = plausibleHours.get(window.slotId());
+            if (plausible != null) {
+                band = band.spanning(plausible.start(), plausible.end());
             }
             RetimingBand bounded = band.clampedTo(lowerBound, upperBound);
             if (bounded != null) {
@@ -95,19 +103,60 @@ public class RetimingBandResolver {
     }
 
     /**
-     * The band widened to the plausible hours of the meal that sits in it, or the band untouched when
-     * no configured meal falls in this window (a MEAL band the user has not configured a meal for is
-     * simply a band like any other).
+     * The plausible hours each band inherits from the meals that sit in it, keyed by slot id — empty
+     * for every band no configured meal lands in, which is then a band like any other.
+     *
+     * <p>A band holding <b>more than one meal</b> takes the union of their plausible hours: a band
+     * narrower than that is a band one of its own meals could be pushed out of, and each meal's hours
+     * are a statement about that stretch of the day, not a competing one. Union is the only reading
+     * consistent with a widening that never narrows.
      */
-    private RetimingBand widenedToMeal(RetimingBand band, DayWindow window, LocalDate targetDay,
-                                       ZoneId zone) {
+    private Map<String, RetimingBand> plausibleHoursBySlot(List<DayWindow> windows, LocalDate targetDay,
+                                                           ZoneId zone) {
+        Map<String, RetimingBand> plausible = new LinkedHashMap<>();
         for (MealWindow meal : humanization.mealWindows()) {
-            OccupiedInterval anchor = meal.toWall(targetDay, zone);
-            if (anchor.overlaps(window.start(), window.end())) {
-                RetimingBand plausible = meal.toBand(targetDay, zone);
-                return band.spanning(plausible.start(), plausible.end());
+            DayWindow home = homeOf(meal, windows, targetDay, zone);
+            if (home != null) {
+                RetimingBand hours = meal.toBand(targetDay, zone);
+                plausible.merge(home.slotId(), hours,
+                    (held, added) -> held.spanning(added.start(), added.end()));
             }
         }
-        return band;
+        return plausible;
+    }
+
+    /**
+     * The one band a meal sits in — the band it shares the most of itself with — or null when the meal
+     * falls outside the template altogether (the day slid, and the meal stayed on the wall clock).
+     *
+     * <p><b>Why one and not every band it touches.</b> The sanctioned lunch runs 12:30–13:30, across
+     * «Oficio» and «Almuerzo». Widening both would let a work block slide into the afternoon on the
+     * strength of the meal beside it — the loss of form the band exists to prevent — so the meal widens
+     * only the band that holds most of it. The overlap is half-open: a meal that merely ends where a
+     * band opens does not sit in it. A meal split evenly between two bands goes to the later one, by
+     * that same convention — an instant on the edge belongs to what starts there — which is what pairs
+     * the sanctioned lunch with «Almuerzo».
+     */
+    private static DayWindow homeOf(MealWindow meal, List<DayWindow> windows, LocalDate targetDay,
+                                    ZoneId zone) {
+        OccupiedInterval anchor = meal.toWall(targetDay, zone);
+        DayWindow home = null;
+        Duration widest = Duration.ZERO;
+        // The windows are chronological, so accepting an equal share hands a tie to the later band.
+        for (DayWindow window : windows) {
+            Duration shared = sharedTime(anchor, window);
+            if (!shared.isZero() && shared.compareTo(widest) >= 0) {
+                widest = shared;
+                home = window;
+            }
+        }
+        return home;
+    }
+
+    /** The time a meal anchor and a window share; zero when they only touch at an edge. */
+    private static Duration sharedTime(OccupiedInterval anchor, DayWindow window) {
+        OffsetDateTime from = anchor.start().isAfter(window.start()) ? anchor.start() : window.start();
+        OffsetDateTime to = anchor.end().isBefore(window.end()) ? anchor.end() : window.end();
+        return to.isAfter(from) ? Duration.between(from, to) : Duration.ZERO;
     }
 }

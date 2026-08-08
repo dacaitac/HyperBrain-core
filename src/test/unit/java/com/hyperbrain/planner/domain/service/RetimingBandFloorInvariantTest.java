@@ -85,6 +85,30 @@ class RetimingBandFloorInvariantTest {
         assertInvariant(narrow, at(7, 0), at(7, 0), at(22, 0), List.of());
     }
 
+    @Test
+    @DisplayName("an early wake slides the template under the meals, which widen whatever band they land in")
+    void an_early_wake_holds_the_invariant() {
+        // The meals stay on the wall clock while the template slides, so on a displaced day a meal
+        // lands in a band it does not normally sit in (breakfast at 07:00 falls in the standup once the
+        // day starts at 06:15). Three bands are widened at once and the widening only ever widens, so
+        // every window stays inside its band and the guard may keep judging a MOVE by the band alone.
+        assertInvariant(HumanizationSettings.DEFAULT, at(6, 15), at(6, 15), at(21, 30), List.of());
+    }
+
+    @Test
+    @DisplayName("two meals sharing one band union their hours without pulling the band off the window")
+    void two_meals_in_one_band_hold_the_invariant() {
+        HumanizationSettings twoInOne = new HumanizationSettings(
+            List.of(
+                new MealWindow("lunch", LocalTime.of(13, 0), LocalTime.of(13, 30),
+                    LocalTime.of(12, 0), LocalTime.of(14, 0)),
+                new MealWindow("snack", LocalTime.of(13, 30), LocalTime.of(13, 50),
+                    LocalTime.of(13, 30), LocalTime.of(13, 50))),
+            0.10);
+
+        assertInvariant(twoInOne, at(7, 0), at(7, 0), at(22, 0), List.of());
+    }
+
     /**
      * Lays the day exactly as the generation service does — meal anchors folded into the walls, both
      * resolvers reading the same day, zone, wake and bounds — and asserts every surviving window is
