@@ -93,6 +93,33 @@ class AgendaProposalPromptBuilderTest {
     }
 
     @Test
+    @DisplayName("the windows keep the order they happened in, and a nap is never dressed up as a wall")
+    void the_slept_windows_are_context_and_not_occupancy() {
+        // Two ways this could go wrong quietly: rendering them out of order (the model reads the day as
+        // a sequence) and letting them leak into the wall lists, where they would amputate the whole
+        // afternoon. The nap here is deliberately given the same geometry a wall would have.
+        SleepSession night = new SleepSession(
+            OffsetDateTime.of(2026, 7, 9, 23, 30, 0, 0, ZoneOffset.UTC),
+            OffsetDateTime.of(2026, 7, 10, 5, 30, 0, 0, ZoneOffset.UTC), 20400);
+        SleepSession nap = new SleepSession(
+            OffsetDateTime.of(2026, 7, 10, 9, 20, 0, 0, ZoneOffset.UTC),
+            OffsetDateTime.of(2026, 7, 10, 13, 56, 0, 0, ZoneOffset.UTC), 90);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(),
+            List.of(night, nap));
+
+        String user = builder.build(context).user();
+
+        assertThat(user.indexOf(night.start().toString()))
+            .isLessThan(user.indexOf(nap.start().toString()));
+        // A minute and a half of sleep is a minute, floored — never rounded up into a claim.
+        assertThat(user).contains("\"asleep_minutes\" : 1");
+        // Both wall lists stay empty: the sleep is guidance, and the guard re-imposes nothing from it.
+        assertThat(user).contains("\"agenda_walls\" : [ ]").contains("\"occupied_blocks\" : [ ]");
+    }
+
+    @Test
     @DisplayName("a day with no recorded sleep says nothing, rather than saying he did not sleep")
     void a_day_without_recorded_sleep_carries_no_windows() {
         // An empty array is a claim — «he slept nothing» — and a much louder one than «no device

@@ -144,6 +144,41 @@ class UserCommandConsumerIT {
     }
 
     @Test
+    @DisplayName("a napping day is scored on ALL of its sleep, keeps the night's hours, and keeps its naps")
+    void replan_with_a_nap_sums_the_day_and_preserves_both_sessions() {
+        // The production defect, end to end. The dump held the night AND an afternoon nap; the parser
+        // kept the most recent session and called it the night, so the day was scored on the nap alone
+        // (189 min → 13, against the 74-82 of the nights around it). Everything that had to change to
+        // fix that meets in this one row, so it is asserted as one thing.
+        insertTask("Deep work", 0.9, 60);
+
+        UUID commandId = UUID.randomUUID();
+        send(replanWithNightAndNapBody(commandId, NOON), commandId.toString());
+
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+        Map<String, Object> row = jdbcTemplate.queryForMap("""
+            SELECT duration_minutes, sleep_score FROM tel_sleep_record WHERE user_id = ?
+            """, USER);
+        // Scored on the whole day: 450 min of night + 116 of nap. The nap alone would be 116.
+        assertThat(row.get("duration_minutes")).isEqualTo(566);
+        assertThat((Integer) row.get("sleep_score")).isGreaterThan(50);
+        // The row's two instant columns are the chronotype the sleep frontier takes its wake median
+        // from, so they stay the NIGHT's: a nap that ended at 11:56 must never become the learned wake.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 9, 23, 0, 0, 0, ZoneOffset.UTC));
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT end_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 6, 40, 0, 0, ZoneOffset.UTC));
+
+        // And both sessions survive into the row and come back out through the planner's own port —
+        // which is what lets the day know WHEN he slept, not only how much.
+        assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON))
+            .extracting(session -> session.start().toString() + ".." + session.end().toString())
+            .containsExactly("2026-07-09T23:00Z..2026-07-10T06:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
+    }
+
+    @Test
     @DisplayName("SLEEP_SCORE upserts one row per day: a second score for the same day updates in place")
     void sleep_score_upserts_single_daily_row() {
         // When the user reports 85 for the day
@@ -312,6 +347,31 @@ class UserCommandConsumerIT {
               "origin": "USER",
               "occurred_at": "%s",
               "payload": null
+            }
+            """.formatted(commandId, occurredAt);
+    }
+
+    /**
+     * The same night as {@link #replanWithSleepBody} plus the nap that broke production. The nap starts
+     * 3 h 20 after the night ends, so the clusterer sees two sessions rather than one long one.
+     */
+    private static String replanWithNightAndNapBody(UUID commandId, OffsetDateTime occurredAt) {
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "10/07/2026 at 12:05 PM",
+                "sample": [
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
+                  {"stage":"Deep","startDate":"10/07/2026 at 5:00 AM","endDate":"10/07/2026 at 6:00 AM","duration":"1:00:00"},
+                  {"stage":"REM","startDate":"10/07/2026 at 6:00 AM","endDate":"10/07/2026 at 6:30 AM","duration":"30:00"},
+                  {"stage":"Awake","startDate":"10/07/2026 at 6:30 AM","endDate":"10/07/2026 at 6:40 AM","duration":"10:00"},
+                  {"stage":"Core","startDate":"10/07/2026 at 10:00 AM","endDate":"10/07/2026 at 11:56 AM","duration":"1:56:00"}
+                ]
+              }
             }
             """.formatted(commandId, occurredAt);
     }

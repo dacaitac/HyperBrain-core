@@ -175,6 +175,66 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("a commitment re-timed by this run walls where it LANDED — the day is not laid twice")
+    void a_rescued_commitment_walls_at_its_new_hour() {
+        // Both halves of the fix meet here. The study session at 09:00 was run over by the interruption
+        // the replan is a response to, so the rescue sends it a later hour of its own day; the lunch at
+        // 14:30 is still ahead, so nobody touches it. Whatever the rescue decides, the day must end up
+        // with nothing sitting on either of them — the one at its NEW hour, the other where it stands.
+        UUID study = insertCommitment("Repaso", "LEARNING_SESSION", at(9, 0), at(10, 0));
+        UUID lunch = insertCommitment("Almuerzo", "ACTIVITY", at(14, 30), at(15, 30));
+        for (int i = 0; i < 10; i++) {
+            insertTask("Tarea " + i, 0.9 - i * 0.01, 45);
+        }
+
+        service.generate(USER, DAY, UTC, NOON, true);
+
+        // The study session kept its day and lost only its hour.
+        OffsetDateTime movedStart = jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE id = ?", OffsetDateTime.class, study);
+        OffsetDateTime movedEnd = jdbcTemplate.queryForObject(
+            "SELECT end_time FROM core_executable WHERE id = ?", OffsetDateTime.class, study);
+        assertThat(movedStart).isAfterOrEqualTo(NOON).isBefore(at(23, 59));
+        assertThat(java.time.Duration.between(movedStart, movedEnd)).isEqualTo(java.time.Duration.ofHours(1));
+        // The lunch still ahead was never touched: recovering the hour is not a licence to rearrange
+        // a calendar the user wrote.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE id = ?", OffsetDateTime.class, lunch))
+            .isEqualTo(at(14, 30));
+        // And nothing this run planned stands on either window — the new one included, which is the
+        // whole point of a move rewriting its own wall.
+        assertThat(blocksOverlapping(movedStart, movedEnd)).isEmpty();
+        assertThat(blocksOverlapping(at(14, 30), at(15, 30))).isEmpty();
+        // The day really was planned; an empty day would satisfy the above for the wrong reason.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'PLANNER'", Integer.class))
+            .isGreaterThan(3);
+    }
+
+    @Test
+    @DisplayName("a settled commitment gives its hour back to the day instead of walling it")
+    void a_settled_commitment_releases_its_window() {
+        // The one place a commitment parts ways with a block, which walls in every state: the user can
+        // settle a commitment ahead of its hour, and an activity already done does not occupy the
+        // future. A whitelist of open states would have kept the hour reserved for nothing.
+        insertCommitment("Desayunar", "ACTIVITY", "DONE", at(10, 30), at(11, 30));
+        for (int i = 0; i < 14; i++) {
+            insertTask("Tarea " + i, 0.9 - i * 0.01, 30);
+        }
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(blocksOverlapping(at(10, 30), at(11, 30))).isNotEmpty();
+    }
+
+    /** The themes of the run's blocks standing on the given window — named so a failure reads back. */
+    private List<String> blocksOverlapping(OffsetDateTime start, OffsetDateTime end) {
+        return jdbcTemplate.queryForList("""
+            SELECT theme FROM planner_blocks WHERE date_start < ? AND date_end > ?
+            """, String.class, end, start);
+    }
+
+    @Test
     @DisplayName("F1: the WIG lead measure of the active MCI is reserved first")
     void reserves_wig_first() {
         UUID mci = insertCycle("MCI", "ACTIVE",
@@ -813,6 +873,21 @@ class AgendaGenerationServiceIT {
             INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
             VALUES (?, ?, ?, 'ACTIVITY', 'TODO', ?, ?)
             """, UUID.randomUUID(), USER, name, start, end);
+    }
+
+    /** An open commitment of the given kind: still to be done, and holding its own window. */
+    private UUID insertCommitment(String name, String type, OffsetDateTime start, OffsetDateTime end) {
+        return insertCommitment(name, type, "TODO", start, end);
+    }
+
+    private UUID insertCommitment(String name, String type, String status,
+                                  OffsetDateTime start, OffsetDateTime end) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, id, USER, name, type, status, start, end);
+        return id;
     }
 
     private static OffsetDateTime at(int hour, int minute) {

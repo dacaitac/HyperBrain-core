@@ -8,6 +8,7 @@ import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.RetimingBand;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -324,6 +325,25 @@ class ProposalWallGuardTest {
         assertThat(result.breaches()).extracting(ProposalWallGuard.WallBreach::wall)
             .containsExactlyInAnyOrder(
                 ProposalWall.BAND_CONFINEMENT, ProposalWall.SLEEP_FRONTIER);
+    }
+
+    @Test
+    @DisplayName("a block placed over a window he slept through is accepted: sleep informs, it never walls")
+    void a_slept_window_is_not_a_wall() {
+        // The sessions travel to the model as context for the ORDER of the day — a nap that ended at
+        // 13:56 is the reason not to offer deep work at 14:00 — and the guard deliberately re-imposes
+        // nothing about them. If it ever did, an afternoon nap would silently become a second sleep
+        // frontier and amputate the day, which is the opposite of what the signal is for.
+        SleepSession nap = new SleepSession(WAKE.plusHours(2), WAKE.plusHours(6), 3 * 3600);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), WAKE, BEDTIME, List.of(), List.of(),
+            Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of(nap));
+
+        // Straight on top of the nap.
+        WallGuardResult result = guard.check(
+            new AgendaPropuesta(List.of(move(A, WAKE.plusHours(3), WAKE.plusHours(4)))), context);
+
+        assertThat(result.clean()).isTrue();
     }
 
     private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,

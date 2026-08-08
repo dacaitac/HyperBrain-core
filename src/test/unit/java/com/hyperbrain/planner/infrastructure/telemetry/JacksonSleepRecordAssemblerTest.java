@@ -3,12 +3,14 @@ package com.hyperbrain.planner.infrastructure.telemetry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.service.SleepScoreCalculator;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -68,6 +70,67 @@ class JacksonSleepRecordAssemblerTest {
 
         assertThat(record.sleepScore()).isGreaterThan(0);
         assertThat(record.stagesJson()).contains("\"low_confidence\":true");
+    }
+
+    @Test
+    @DisplayName("the totals' window is spent on durations only — never on the row's hours")
+    void the_duration_carrying_window_never_becomes_a_clock() {
+        // The one thing about the aggregate that is not literally true: when a night and a nap are
+        // summed, the totals' window opens at the night's start and lasts the SUMMED time in bed, so it
+        // ends at an instant nobody was ever asleep at. This is the assertion that keeps that fiction
+        // out of everything downstream — the row's two instant columns are the chronotype the sleep
+        // frontier learns its wake median from, and the sessions array is what the model is shown.
+        OffsetDateTime nightStart = OffsetDateTime.parse("2026-07-10T23:00:00Z");
+        OffsetDateTime nightEnd = OffsetDateTime.parse("2026-07-11T05:00:00Z");   // 6 h in bed
+        OffsetDateTime napStart = OffsetDateTime.parse("2026-07-11T14:00:00Z");
+        OffsetDateTime napEnd = OffsetDateTime.parse("2026-07-11T16:00:00Z");     // 2 h in bed
+        SleepSession night = new SleepSession(nightStart, nightEnd, 5 * 3600);
+        SleepSession nap = new SleepSession(napStart, napEnd, 2 * 3600);
+        // 8 h of summed time in bed hung off the night's start: the carrier ends at 07:00, an hour at
+        // which he was awake and at his desk.
+        OffsetDateTime fictitiousEnd = nightStart.plusHours(8);
+        SleepStageSample totals =
+            new SleepStageSample(nightStart, fictitiousEnd, 0, 18000, 3600, 3600, 0, 1800);
+
+        DeviceSleepRecord record = assembler.assemble(
+            new AggregatedSleep(totals, night, List.of(night, nap)), COLLECTED, null);
+
+        // The row's hours are the main session's, to the second — not the carrier's.
+        assertThat(record.startTime()).isEqualTo(nightStart);
+        assertThat(record.endTime()).isEqualTo(nightEnd);
+        assertThat(record.endTime()).isNotEqualTo(fictitiousEnd);
+        // And the fictitious instant appears nowhere in what is persisted: the sessions array carries
+        // the real hours of both sleeps, so no later reader can mistake the carrier for a clock.
+        assertThat(record.stagesJson())
+            .doesNotContain(fictitiousEnd.toString())
+            .contains(nightStart.toString(), nightEnd.toString(), napStart.toString(), napEnd.toString())
+            .contains("\"asleep_seconds\":18000")
+            .contains("\"asleep_seconds\":7200");
+        // The durations, meanwhile, ARE read off the carrier: 7 h of sleep over 8 h of summed bed time.
+        assertThat(record.durationMinutes()).isEqualTo(7 * 60);
+        assertThat(record.stagesJson()).contains("\"efficiency\":0.875");
+    }
+
+    @Test
+    @DisplayName("every session survives into the stored breakdown, in the order they happened")
+    void the_sessions_survive_into_the_stored_breakdown() {
+        // The row has exactly two instant columns and the main session owns them, so this array is the
+        // only place a nap exists once the dump is gone — and the only thing the day can later read to
+        // know WHEN he slept.
+        SleepSession night = new SleepSession(START, END, 6 * 3600);
+        SleepSession nap = new SleepSession(
+            END.plusHours(6), END.plusHours(7), 3000);
+        SleepStageSample totals = new SleepStageSample(
+            START, START.plusHours(9), 0, 17280, 5184, 6336, 0, 600);
+
+        DeviceSleepRecord record = assembler.assemble(
+            new AggregatedSleep(totals, night, List.of(night, nap)), COLLECTED, null);
+
+        assertThat(record.stagesJson()).contains(
+            "\"sessions\":["
+                + "{\"start\":\"" + START + "\",\"end\":\"" + END + "\",\"asleep_seconds\":21600},"
+                + "{\"start\":\"" + nap.start() + "\",\"end\":\"" + nap.end()
+                + "\",\"asleep_seconds\":3000}]");
     }
 
     @Test

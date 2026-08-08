@@ -149,6 +149,176 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
+    @DisplayName("the 18:00 that opens the sleep day is the USER's 18:00, not UTC's")
+    void the_period_opens_at_eighteen_hundred_in_the_users_zone() {
+        // Bogota is UTC-5 all year, so an 18:00 boundary read in UTC lands at 13:00 local and sweeps in
+        // five hours of the previous afternoon. The provider's strings carry no zone at all, which is
+        // precisely why the zone has to be applied on both sides — to the samples AND to the boundary.
+        ZoneId bogota = ZoneId.of("America/Bogota");
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 4:00 PM", "09/07/2026 at 5:00 PM"),   // 16:00-17:00 local
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"))); // last night, local
+
+        AggregatedSleep sleep = parser
+            .parse(dump, bogota, OffsetDateTime.parse("2026-07-10T13:00:00Z")) // 08:00 local
+            .sleep();
+
+        // The afternoon nap ends at 22:00Z, before the period opens at 09 Jul 18:00 local = 23:00Z. Read
+        // the boundary in UTC (18:00Z) and it would have been swallowed into the night's row.
+        assertThat(sleep.sessions()).hasSize(1);
+        assertThat(sleep.sessions().getFirst().start())
+            .isEqualTo(OffsetDateTime.parse("2026-07-10T04:00:00Z"));
+    }
+
+    @Test
+    @DisplayName("a session that ends exactly as the period opens is out; a minute later it is in")
+    void the_period_boundary_is_half_open() {
+        // The boundary decides which row a nap lands on, so which side owns the instant itself is not a
+        // detail: an inclusive bound would put the same nap on two consecutive days.
+        AggregatedSleep flushWithTheBoundary = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 3:00 PM", "09/07/2026 at 6:00 PM"),    // ends AT 18:00
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"))),
+            ZONE, reference()).sleep();
+
+        AggregatedSleep aMinuteInside = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 3:00 PM", "09/07/2026 at 6:01 PM"),    // ends 18:01
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"))),
+            ZONE, reference()).sleep();
+
+        assertThat(flushWithTheBoundary.sessions()).hasSize(1);
+        assertThat(aMinuteInside.sessions()).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("the same nap is kept or dropped by the HOUR the replan ran, not by the day it belongs to")
+    void the_verdict_on_an_early_evening_nap_depends_on_when_the_run_happens() {
+        // A nap at 19:00 on the 9th sits inside the sleep day the 18:00 rule opens for the 10th. Whether
+        // it is counted depends entirely on when the dump is captured, because the 24 h clamp is measured
+        // from the anchor rather than from the sleep day: a morning run reaches back to 18:00 and keeps
+        // it, an evening run only reaches back 24 h and cuts it off. Same night, same nap, two rows.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),
+            sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 6:00 AM")));
+
+        AggregatedSleep morningRun =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T08:00:00Z")).sleep();
+        AggregatedSleep eveningRun =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T22:00:00Z")).sleep();
+
+        assertThat(morningRun.sessions()).hasSize(2);
+        assertThat(eveningRun.sessions()).hasSize(1);
+        // And the sleep the day is scored on differs by the whole nap, on identical raw data.
+        assertThat(morningRun.totals().totalSleepSeconds())
+            .isEqualTo(eveningRun.totals().totalSleepSeconds() + 3600);
+    }
+
+    @Test
+    @DisplayName("a nap taken after 18:00 is summed into this run's row AND into tomorrow's")
+    void an_evening_nap_is_counted_by_two_consecutive_sleep_days() {
+        // The other half of the same asymmetry. A 19:00 nap on the 10th is inside the 24 h an evening
+        // run reaches back over, and it is also inside the sleep day the 18:00 rule opens for the 11th —
+        // so an evening replan and the next morning's replan both count it, on two different rows.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 6:00 AM"),  // the night
+            sample("Core", "10/07/2026 at 7:00 PM", "10/07/2026 at 8:00 PM"))); // the evening nap
+
+        AggregatedSleep tonight =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T22:00:00Z")).sleep();
+        AggregatedSleep tomorrowMorning =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-11T08:00:00Z")).sleep();
+
+        SleepSession nap = new SleepSession(OffsetDateTime.parse("2026-07-10T19:00:00Z"),
+            OffsetDateTime.parse("2026-07-10T20:00:00Z"), 3600);
+        assertThat(tonight.sessions()).contains(nap);
+        assertThat(tomorrowMorning.sessions()).containsExactly(nap);
+    }
+
+    @Test
+    @DisplayName("the longest session gives the row its hours; on a tie the earlier one keeps them")
+    void the_main_session_is_the_longest_and_the_earliest_on_a_tie() {
+        // The row's two instant columns are the chronotype the sleep frontier learns its wake median
+        // from, so a nap of exactly the night's length must not carry the day's wake time into the
+        // afternoon. Ties resolve to the earlier session, which is the night.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 1:00 AM"),   // 2 h night
+            sample("Core", "10/07/2026 at 9:00 AM", "10/07/2026 at 11:00 AM"))); // 2 h nap
+
+        AggregatedSleep sleep =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        assertThat(sleep.mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
+        assertThat(sleep.mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T01:00:00Z"));
+    }
+
+    @Test
+    @DisplayName("a zero-length reading is dropped without taking the rest of the dump with it")
+    void a_degenerate_session_is_dropped_not_fatal() {
+        // A provider sometimes emits an instantaneous sample. On its own it is a session with no time
+        // at all, which SleepSession would refuse — so it has to be dropped before it is built, and
+        // dropping it must not cost the night.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"),
+            sample("Core", "10/07/2026 at 10:00 AM", "10/07/2026 at 10:00 AM")));
+
+        AggregatedSleep sleep =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        assertThat(sleep.sessions()).hasSize(1);
+        assertThat(sleep.sessions().getFirst().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T06:00:00Z"));
+    }
+
+    @Test
+    @DisplayName("a stretch of pure wakefulness still becomes a session — with no sleep in it")
+    void an_awake_only_cluster_becomes_a_zero_sleep_session() {
+        // Pinned rather than endorsed: an Awake cluster far from the night carries no sleep, yet it is
+        // summed as time in bed (sinking efficiency) and reaches the model as a slept window of zero
+        // minutes. Harmless on Apple Watch data, where Awake only appears inside a session; it is the
+        // behaviour a different provider would expose.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
+            sample("Awake", "10/07/2026 at 10:00 AM", "10/07/2026 at 10:30 AM")));
+
+        AggregatedSleep sleep =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        assertThat(sleep.sessions()).hasSize(2);
+        assertThat(sleep.sessions().getLast().asleepSeconds()).isZero();
+        assertThat(sleep.totals().totalSleepSeconds()).isEqualTo(6 * 3600);
+        // The window carries both spans, so the awake half-hour counts as time in bed.
+        assertThat(Duration.between(sleep.totals().start(), sleep.totals().end()).toSeconds())
+            .isEqualTo(6 * 3600 + 1800);
+    }
+
+    @Test
+    @DisplayName("a run without a dump, a zone or an anchor is refused rather than guessed")
+    void required_arguments_are_refused_when_absent() {
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM")));
+
+        assertThatThrownBy(() -> parser.parse(null, ZONE, reference()))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("dump, zone and reference");
+        assertThatThrownBy(() -> parser.parse(dump, null, reference()))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> parser.parse(dump, ZONE, null))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("a gap that does not separate anything is refused at construction")
+    void the_session_gap_must_be_a_positive_duration() {
+        // A zero or negative gap would split every sample into its own session and every night would
+        // become a string of naps — the failure would show up as a bad score, far from its cause.
+        assertThatThrownBy(() -> new SleepSampleSessionParser(null))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("positive duration");
+        assertThatThrownBy(() -> new SleepSampleSessionParser(Duration.ZERO))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new SleepSampleSessionParser(Duration.ofMinutes(-1)))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     @DisplayName("a night that began before the period opens is summed whole, not truncated")
     void keeps_a_session_that_straddles_the_period_boundary() {
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(

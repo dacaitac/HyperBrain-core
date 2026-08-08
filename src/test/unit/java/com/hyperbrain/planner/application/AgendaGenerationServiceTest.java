@@ -11,6 +11,7 @@ import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlanningWindow;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.model.ValidatedAgenda;
 import com.hyperbrain.planner.domain.port.out.AgendaMaterializationLedger;
@@ -47,6 +48,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -204,6 +206,59 @@ class AgendaGenerationServiceTest {
         assertThat(context.getValue().occupiedWalls())
             .extracting(OccupiedInterval::executableId)
             .containsExactly(activity);
+    }
+
+    @Test
+    @DisplayName("the day being lived is told when he slept — night and nap, as the model sees them")
+    void the_slept_windows_reach_the_model_for_today() {
+        // The energy criterion says how rested the day is; only these say WHEN, which is the half that
+        // decides the ORDER — the difference between offering deep work at 14:00 to someone fresh from
+        // the morning and to someone who has just got up from a nap.
+        SleepSession night = new SleepSession(at(0, 0).minusHours(1), at(5, 30), 19800);
+        SleepSession nap = new SleepSession(at(9, 20), at(11, 0), 6000);
+        givenAFullDay(List.of());
+        AgendaProposer proposer = givenAProposer();
+        when(repository.loadRecentSleepSessions(eq(USER), any())).thenReturn(List.of(night, nap));
+
+        service.generateDay(USER, DAY, ZoneOffset.UTC, at(12, 0), false, Set.of());
+
+        assertThat(capturedContext(proposer).sleepSessions()).containsExactly(night, nap);
+    }
+
+    @Test
+    @DisplayName("a later day of the same replan carries no sleep: last night is not tomorrow's night")
+    void a_later_day_carries_no_slept_windows() {
+        // One replan lays several days. Last night's hours say something about today's ordering and
+        // nothing at all about tomorrow — handing them over would have the model read them as that
+        // day's own, so the later day is told nothing rather than told something false.
+        givenAFullDay(List.of());
+        AgendaProposer proposer = givenAProposer();
+
+        // Anchored the evening before: the day being planned is the one after the run's own day.
+        service.generateDay(USER, DAY, ZoneOffset.UTC, at(21, 0).minusDays(1), false, Set.of());
+
+        assertThat(capturedContext(proposer).sleepSessions()).isEmpty();
+        verify(repository, never()).loadRecentSleepSessions(any(), any());
+    }
+
+    /** The least stubbing that lets a run reach the proposer with a single accepted block. */
+    private AgendaProposer givenAProposer() {
+        AgendaBlock block = aBlockAt(at(8, 30), at(10, 30));
+        when(humanizedAgendaFloor.generate(any()))
+            .thenReturn(new Agenda(List.of(block), List.of(), List.of(), "NEUTRAL", false));
+        when(agendaValidator.validate(any(), any()))
+            .thenReturn(new ValidatedAgenda(List.of(block), List.of()));
+        AgendaProposer proposer = mock(AgendaProposer.class);
+        when(proposerProvider.getIfAvailable()).thenReturn(proposer);
+        return proposer;
+    }
+
+    /** The read model the run actually handed the LLM. */
+    private static AgendaProposalContext capturedContext(AgendaProposer proposer) {
+        ArgumentCaptor<AgendaProposalContext> context =
+            ArgumentCaptor.forClass(AgendaProposalContext.class);
+        verify(proposer).propose(context.capture());
+        return context.getValue();
     }
 
     /**
