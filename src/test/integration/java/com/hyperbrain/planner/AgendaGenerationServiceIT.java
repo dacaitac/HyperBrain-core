@@ -2,6 +2,8 @@ package com.hyperbrain.planner;
 
 import com.hyperbrain.planner.application.AgendaGenerationService;
 import com.hyperbrain.planner.domain.model.Agenda;
+import com.hyperbrain.planner.domain.model.HumanizationSettings;
+import com.hyperbrain.planner.domain.model.MealWindow;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
@@ -12,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -19,6 +22,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * Verifies the deterministic agenda-generation pipeline (#6a) against a real PostgreSQL: the
@@ -37,6 +41,25 @@ class AgendaGenerationServiceIT {
 
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private AgendaGenerationService service;
+    @Autowired private HumanizationSettings humanizationSettings;
+
+    @Test
+    @DisplayName("the deployed application.yml really binds a plausible band onto every meal anchor")
+    void the_deployed_meal_bands_are_bound() {
+        // The keys are optional and their absence is silent — an unbound band-start simply makes the
+        // meal rigid — so the shipped configuration is asserted against the running context rather
+        // than against the record's defaults.
+        assertThat(humanizationSettings.mealWindows())
+            .extracting(MealWindow::label, MealWindow::start, MealWindow::end,
+                MealWindow::bandStart, MealWindow::bandEnd)
+            .containsExactly(
+                tuple("breakfast", LocalTime.of(7, 0), LocalTime.of(7, 30),
+                    LocalTime.of(5, 30), LocalTime.of(10, 0)),
+                tuple("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+                    LocalTime.of(11, 30), LocalTime.of(14, 30)),
+                tuple("dinner", LocalTime.of(19, 0), LocalTime.of(20, 0),
+                    LocalTime.of(18, 0), LocalTime.of(21, 30)));
+    }
 
     @BeforeEach
     void cleanState() throws Exception {
@@ -401,11 +424,14 @@ class AgendaGenerationServiceIT {
         int tomorrowBlocks = localDayCount(bogota, 2026, 7, 23);
         // Today gets the bulk (its full window lies ahead), tomorrow only the overflow.
         assertThat(todayBlocks).isGreaterThan(tomorrowBlocks);
-        // The first block opens at the local wake (07:00 Bogota), never in the pre-wake hours.
+        // The day opens at 07:30 Bogota, never in the pre-wake hours: the personal-routine band runs
+        // 07:00–08:00 from the local wake, and the breakfast anchor (07:00–07:30) takes its first half
+        // hour, so work starts when breakfast ends. Pinned to the minute on purpose — this hour is the
+        // one the meal anchors actually move.
         OffsetDateTime firstStartLocal = jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE origin = 'PLANNER'", OffsetDateTime.class)
             .atZoneSameInstant(bogota).toOffsetDateTime();
-        assertThat(firstStartLocal.toLocalTime()).isEqualTo(java.time.LocalTime.of(7, 0));
+        assertThat(firstStartLocal.toLocalTime()).isEqualTo(java.time.LocalTime.of(7, 30));
         assertThat(firstStartLocal.toLocalDate()).isEqualTo(java.time.LocalDate.of(2026, 7, 22));
     }
 

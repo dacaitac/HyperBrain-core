@@ -262,13 +262,26 @@ app:
       # they calibrated: availability lives on the time axis, and nothing trims the tail of the day.
       # Protected meal anchors the floor plans around. Local wall-clock times,
       # resolved against the user's zone (America/Bogota in prod).
+      # start/end   = the hour the floor keeps free of work.
+      # band-start / band-end = the hours that meal may PLAUSIBLY sit at. The band of the day holding
+      # the meal is widened to them, so the intelligent layer may slide the meal inside the band and
+      # can never take it outside — breakfast at 15:00 was a real day this prevents.
       meals:
+        - label: breakfast
+          start: "07:00"
+          end:   "07:30"
+          band-start: "05:30"
+          band-end:   "10:00"
         - label: lunch
           start: "12:30"
           end:   "13:30"
+          band-start: "11:30"
+          band-end:   "14:30"
         - label: dinner
           start: "19:00"
           end:   "20:00"
+          band-start: "18:00"
+          band-end:   "21:30"
       # DOMAIN FORMULA (pending Daniel): priority-score band within which same-context work is
       # regrouped adjacently, so it tends to land in the same window. A tie-break inside a band,
       # never a reordering across priority bands.

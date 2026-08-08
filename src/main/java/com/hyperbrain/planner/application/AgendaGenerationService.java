@@ -17,6 +17,7 @@ import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlanningWindow;
 import com.hyperbrain.planner.domain.model.PlannerDayState;
+import com.hyperbrain.planner.domain.model.RetimingBand;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.model.ValidatedAgenda;
@@ -30,6 +31,7 @@ import com.hyperbrain.planner.domain.service.DayWindowResolver;
 import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
+import com.hyperbrain.planner.domain.service.RetimingBandResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
 import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
@@ -80,6 +82,7 @@ public class AgendaGenerationService {
     private final PlannerStateRepository repository;
     private final PlannerBlockMaterializer blockMaterializer;
     private final DayWindowResolver dayWindowResolver;
+    private final RetimingBandResolver retimingBandResolver;
     private final MovedCommitmentRescuer commitmentRescuer;
     private final SleepFrontierCalculator sleepFrontierCalculator;
     private final EnergyResolver energyResolver;
@@ -99,6 +102,7 @@ public class AgendaGenerationService {
         PlannerStateRepository repository,
         PlannerBlockMaterializer blockMaterializer,
         DayWindowResolver dayWindowResolver,
+        RetimingBandResolver retimingBandResolver,
         MovedCommitmentRescuer commitmentRescuer,
         SleepFrontierCalculator sleepFrontierCalculator,
         EnergyResolver energyResolver,
@@ -116,6 +120,7 @@ public class AgendaGenerationService {
         this.repository = repository;
         this.blockMaterializer = blockMaterializer;
         this.dayWindowResolver = dayWindowResolver;
+        this.retimingBandResolver = retimingBandResolver;
         this.commitmentRescuer = commitmentRescuer;
         this.sleepFrontierCalculator = sleepFrontierCalculator;
         this.energyResolver = energyResolver;
@@ -371,10 +376,17 @@ public class AgendaGenerationService {
             targetDay, zone, window.frontierStart(), window.lowerBound(), window.frontierEnd(),
             planningWalls);
 
+        // The bands of the day: what each block may be retimed within on the LLM road. Resolved from
+        // the same template and the same wake the windows were laid against — the guard and the prompt
+        // have to be looking at the same geometry — and deliberately NOT clipped by the walls: a band is
+        // a bound on movement, and the walls keep walling on their own.
+        Map<String, RetimingBand> bands = retimingBandResolver.resolve(
+            targetDay, zone, window.frontierStart(), window.lowerBound(), window.frontierEnd());
+
         PlannerDayState state = new PlannerDayState(
             window.lowerBound(), window.frontierEnd(), windows, membershipBySlot(existingPlan), ranked,
             wigPortfolio, planningWalls, energy, dataComplete);
-        return new PreparedDay(state, window, planningWalls, energy.criterion());
+        return new PreparedDay(state, window, planningWalls, energy.criterion(), bands);
     }
 
     /**
@@ -423,6 +435,11 @@ public class AgendaGenerationService {
      * never walls the model out of the very windows it is being asked to arrange. The synthetic meal
      * anchors carry no executable and stay out: they are a rhythm the deterministic floor protects, not
      * somebody's commitment, and shaping the day around them is the model's authority.
+     *
+     * <p><b>The bands travel too, keyed by block.</b> They are not walls — nothing is forbidden from
+     * overlapping a band — but the bound of the retiming the model may do to each block: the band of
+     * the day it was born in, widened to plausible hours when that band holds a meal. A block from no
+     * band simply carries no entry and stays unconfined.
      */
     private AgendaProposalContext buildProposalContext(PreparedDay prepared, Agenda floorAgenda) {
         List<OccupiedInterval> agendaWalls = prepared.occupied().stream()
@@ -447,7 +464,29 @@ public class AgendaGenerationService {
             wigIds,
             prepared.state().energyProfile().highLoadQuota(),
             floorAgenda.energyCriterion(),
-            repository.loadExecutableTitles(candidateIds));
+            repository.loadExecutableTitles(candidateIds),
+            blockBands(floorAgenda, prepared.bands()));
+    }
+
+    /**
+     * The band of each candidate block, keyed by block id — the cognitive tier's view of a rule the
+     * planner owns, so it never has to know what a template slot is. A block whose slot resolved no
+     * band for this run (its band lies entirely outside the planning bounds) is left unconfined rather
+     * than confined to something invented.
+     */
+    private static Map<UUID, RetimingBand> blockBands(Agenda floorAgenda,
+                                                      Map<String, RetimingBand> bandsBySlot) {
+        Map<UUID, RetimingBand> bands = new LinkedHashMap<>();
+        for (AgendaBlock block : floorAgenda.blocks()) {
+            if (block.templateSlotId() == null) {
+                continue; // an immutable map rejects a null key, and a slot-less block has no band
+            }
+            RetimingBand band = bandsBySlot.get(block.templateSlotId());
+            if (band != null) {
+                bands.put(block.executableId(), band);
+            }
+        }
+        return bands;
     }
 
     /**
@@ -634,13 +673,15 @@ public class AgendaGenerationService {
      * The resolved, side-effect-free inputs the floor and the finalize step share for one day.
      * {@code state} is null when the day has no plannable forward window (a replan at/after bedtime);
      * {@link #plannable()} guards that case and {@code energyCriterion} still carries the readable
-     * criterion for the empty agenda.
+     * criterion for the empty agenda. {@code bands} is the day's retiming bands by slot — only the LLM
+     * road reads them, but they are resolved here so the whole day comes from one snapshot.
      */
     private record PreparedDay(
         PlannerDayState state,
         PlanningWindow window,
         List<OccupiedInterval> occupied,
-        String energyCriterion
+        String energyCriterion,
+        Map<String, RetimingBand> bands
     ) {
         /** @return true when a forward window exists to plan (state is present) */
         boolean plannable() {
@@ -649,7 +690,7 @@ public class AgendaGenerationService {
 
         /** An unplannable day (zero-width forward window): no state, no walls, criterion preserved. */
         static PreparedDay unplannable(PlanningWindow window, String energyCriterion) {
-            return new PreparedDay(null, window, List.of(), energyCriterion);
+            return new PreparedDay(null, window, List.of(), energyCriterion, Map.of());
         }
     }
 

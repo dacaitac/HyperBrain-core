@@ -2,6 +2,7 @@ package com.hyperbrain.planner.domain.service;
 
 import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.DayWindow;
+import com.hyperbrain.planner.domain.model.HumanizationSettings;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.SlotPurpose;
 import com.hyperbrain.planner.domain.model.TemplateSlot;
@@ -116,6 +117,42 @@ class DayWindowResolverTest {
     }
 
     @Test
+    @DisplayName("the breakfast anchor leaves the personal-routine band with its second half hour")
+    void the_breakfast_anchor_halves_the_personal_routine_band() {
+        // Given: the sanctioned breakfast anchor (07:00–07:30) folded in as a wall, exactly as the
+        // generation service does, on a day the user gets up at the template's own anchor hour.
+        OccupiedInterval breakfast = mealWall("breakfast");
+
+        // When
+        List<DayWindow> windows = resolve(at(7, 0), at(7, 0), at(22, 0), List.of(breakfast));
+
+        // Then: «Rutina personal» is 07:00–08:00 in the template and comes out as its clear remainder,
+        // half an hour of usable band — the deliberate cost of protecting breakfast, and the reason
+        // the band is not simply dropped: it keeps its slot, and therefore the block's identity.
+        DayWindow routine = window(windows, "PERSONAL_ROUTINE");
+        assertThat(routine.start()).isEqualTo(at(7, 30));
+        assertThat(routine.end()).isEqualTo(at(8, 0));
+        assertThat(routine.durationMinutes()).isEqualTo(30);
+        // And nothing the floor lays touches the meal it protects.
+        assertThat(windows).noneSatisfy(w ->
+            assertThat(breakfast.overlaps(w.start(), w.end())).isTrue());
+    }
+
+    @Test
+    @DisplayName("a meal anchor keeps its wall-clock hour while the bands ride the wake, so a late "
+        + "wake slides the routine band clear of breakfast")
+    void a_late_wake_slides_the_routine_band_clear_of_breakfast() {
+        // A meal is a civil-time anchor by design (it is the same hour every day regardless of DST),
+        // while every band rides the real wake. Getting up an hour late therefore hands the personal
+        // routine its full hour back: the protection is of the meal's hour, never of a share of the band.
+        List<DayWindow> windows = resolve(at(8, 0), at(8, 0), at(22, 0), List.of(mealWall("breakfast")));
+
+        DayWindow routine = window(windows, "PERSONAL_ROUTINE");
+        assertThat(routine.start()).isEqualTo(at(8, 0));
+        assertThat(routine.end()).isEqualTo(at(9, 0));
+    }
+
+    @Test
     @DisplayName("an agenda band is never laid, even when it is completely free")
     void an_agenda_band_is_never_laid() {
         DayTemplate agendaOnly = new DayTemplate(7 * 60, List.of(
@@ -132,6 +169,15 @@ class DayWindowResolverTest {
     private List<DayWindow> resolve(OffsetDateTime wake, OffsetDateTime lowerBound,
                                     OffsetDateTime upperBound, List<OccupiedInterval> walls) {
         return resolver.resolve(DAY, BOGOTA, wake, lowerBound, upperBound, walls);
+    }
+
+    /** The sanctioned anchor of one meal, resolved onto the day exactly as the generation service does. */
+    private static OccupiedInterval mealWall(String label) {
+        return HumanizationSettings.DEFAULT.mealWindows().stream()
+            .filter(meal -> meal.label().equals(label))
+            .findFirst()
+            .orElseThrow()
+            .toWall(DAY, BOGOTA);
     }
 
     private static DayWindow window(List<DayWindow> windows, String slotId) {

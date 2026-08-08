@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.cognitive.domain.model.LlmPrompt;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.application.AgendaGenerationService;
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.TemplateSlot;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
@@ -172,29 +174,43 @@ class AgendaProposalCycleIT {
     }
 
     @Test
-    @DisplayName("bypass: an accepted LLM arrangement with overlapping blocks materializes as-is "
+    @DisplayName("bypass: an accepted arrangement materializes exactly as proposed, overlaps and all "
         + "(the floor validator never re-shuffles it)")
-    void accepted_llm_overlap_materializes_as_is() {
-        insertTask("First", 0.9, 60);
-        insertTask("Second", 0.3, 60);
-        // The LLM moves both blocks into overlapping windows (09:00–10:00 and 09:30–10:30). Block-vs-block
-        // overlap is the LLM's arrangement authority — not a bounded wall — so the guard accepts it and
-        // the floor's AgendaValidator is bypassed. The deterministic floor would instead strip the second.
-        gateway.respondWith(this::moveOverlapping);
+    void accepted_llm_arrangement_materializes_as_is() {
+        // Enough work that the day reaches its midday bands, whose hours overlap once the lunch band is
+        // widened to the plausible hours of the meal it holds. The model then pushes every block to the
+        // earliest instant its own band allows — a legal arrangement that yields overlapping blocks.
+        // Block-vs-block overlap is the model's authority, not a bounded wall, so the guard accepts it
+        // and the AgendaValidator is bypassed; the deterministic floor would have stripped the second.
+        for (int i = 0; i < 8; i++) {
+            insertTask("Task " + i, 0.90 - i * 0.01, 30);
+        }
+        gateway.respondWith(this::moveEachToItsBandStart);
 
         service.generate(USER, DAY, UTC, NOON, false);
 
-        List<OffsetDateTime> starts = jdbcTemplate.queryForList(
-            "SELECT date_start FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED' "
-                + "ORDER BY date_start", OffsetDateTime.class);
-        List<OffsetDateTime> ends = jdbcTemplate.queryForList(
-            "SELECT date_end FROM planner_blocks WHERE origin = 'PLANNER' AND status = 'PLANNED' "
-                + "ORDER BY date_start", OffsetDateTime.class);
-        // Both blocks survive at their overlapping windows — nothing was stripped.
-        assertThat(starts).containsExactly(
-            OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC),
-            OffsetDateTime.of(2026, 7, 10, 9, 30, 0, 0, UTC));
-        assertThat(starts.get(1)).isBefore(ends.get(0)); // they genuinely overlap
+        List<OccupiedInterval> windows = plannerBlockWindows();
+        assertThat(windows).hasSizeGreaterThan(5);
+        assertThat(windows).anySatisfy(window -> assertThat(windows)
+            .anyMatch(other -> other != window && other.overlaps(window.start(), window.end())));
+    }
+
+    @Test
+    @DisplayName("a block moved out of the band it was born in degrades the day to the floor")
+    void accepted_llm_may_not_leave_the_band() {
+        // Production case (2026-08-08): «Casa» — the evening band — came out at seven in the morning,
+        // the band travelling with the movement, so the day was named after a shape it had lost. The
+        // model may retime a block anywhere inside its band; leaving it is a wall breach.
+        insertTask("Work", 0.9, 60);
+        OffsetDateTime bandLess = OffsetDateTime.of(2026, 7, 10, 21, 30, 0, 0, UTC);
+        gateway.respondWith(prompt -> moveAllOnto(prompt, bandLess, bandLess.plusMinutes(30)));
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // The day still materializes — degraded to the floor, which never places outside a band.
+        assertThat(plannerBlockWindows())
+            .isNotEmpty()
+            .noneMatch(window -> window.start().isEqual(bandLess));
     }
 
     @Test
@@ -240,20 +256,84 @@ class AgendaProposalCycleIT {
         assertThat(blockStart).isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
     }
 
+    @Test
+    @DisplayName("two runs over the same state, with the same model, produce the same day")
+    void the_cycle_is_deterministic_across_runs() {
+        // Bands are resolved per run from the template, the wake and the bounds — nothing about them is
+        // carried over — so a redelivery of the same morning must converge instead of walking the day
+        // forward one band at a time.
+        for (int i = 0; i < 6; i++) {
+            insertTask("Task " + i, 0.90 - i * 0.01, 30);
+        }
+        gateway.respondWith(this::moveEachToItsBandStart);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+        List<OccupiedInterval> first = sortedPlannerBlockWindows();
+        service.generate(USER, DAY, UTC, NOON, false);
+        List<OccupiedInterval> second = sortedPlannerBlockWindows();
+
+        assertThat(first).isNotEmpty();
+        assertThat(second).usingRecursiveComparison().isEqualTo(first);
+    }
+
+    @Test
+    @DisplayName("every candidate reaches the model with the band it was born in, and the band holds "
+        + "the placement the floor already made")
+    void every_candidate_carries_a_band_that_holds_its_own_window() {
+        // The invariant the guard leans on, end to end and through the real wiring: if a band ever came
+        // out narrower than the window the floor laid, the model would be told a rule it cannot obey
+        // without moving the block off the hours the floor chose, and any faithful proposal would
+        // degrade the day. Asserted on the prompt, which is the only place both are stated together.
+        for (int i = 0; i < 6; i++) {
+            insertTask("Task " + i, 0.90 - i * 0.01, 30);
+        }
+        List<JsonNode> stated = new java.util.ArrayList<>();
+        gateway.respondWith(prompt -> {
+            stated.addAll(candidateBlocks(prompt, new ObjectMapper()));
+            return keepAll(prompt, COACH_NOTE);
+        });
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(stated).isNotEmpty();
+        assertThat(stated).allSatisfy(candidate -> {
+            JsonNode band = candidate.get("band");
+            assertThat(band).as("band of block %s", candidate.get("block_id").asText()).isNotNull();
+            assertThat(OffsetDateTime.parse(band.get("earliest_start").asText()))
+                .isBeforeOrEqualTo(OffsetDateTime.parse(candidate.get("start").asText()));
+            assertThat(OffsetDateTime.parse(band.get("latest_end").asText()))
+                .isAfterOrEqualTo(OffsetDateTime.parse(candidate.get("end").asText()));
+        });
+        // The band is named as a human reads the day, never by the technical slot key.
+        List<String> readableLabels = DayTemplate.DEFAULT.slots().stream()
+            .map(TemplateSlot::label).toList();
+        assertThat(stated).extracting(candidate -> candidate.get("band").get("name").asText())
+            .isSubsetOf(readableLabels);
+    }
+
     // ─── stub proposal builders (read the run's block ids from the prompt's control data) ─────────
 
-    private String moveOverlapping(LlmPrompt prompt) {
+    /**
+     * Every candidate pushed to the earliest instant its own band allows, keeping its duration — a
+     * legal arrangement no floor would produce, and the shape of a model using its full retiming
+     * authority without ever leaving a band.
+     */
+    private String moveEachToItsBandStart(LlmPrompt prompt) {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode root = mapper.createObjectNode();
         ArrayNode decisions = root.putArray("decisions");
-        List<java.util.UUID> ids = candidateIds(prompt, mapper);
-        for (int i = 0; i < ids.size(); i++) {
-            OffsetDateTime start = OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC).plusMinutes(30L * i);
+        for (JsonNode candidate : candidateBlocks(prompt, mapper)) {
+            JsonNode band = candidate.get("band");
+            OffsetDateTime start = OffsetDateTime.parse(candidate.get("start").asText());
+            OffsetDateTime end = OffsetDateTime.parse(candidate.get("end").asText());
+            OffsetDateTime bandStart = band == null
+                ? start : OffsetDateTime.parse(band.get("earliest_start").asText());
             ObjectNode decision = decisions.addObject();
-            decision.put("block_id", ids.get(i).toString());
+            decision.put("block_id", candidate.get("block_id").asText());
             decision.put("placement", "MOVE");
-            decision.put("start", start.toString());
-            decision.put("end", start.plusMinutes(60).toString());
+            decision.put("start", bandStart.toString());
+            decision.put("end", bandStart.plusMinutes(
+                java.time.Duration.between(start, end).toMinutes()).toString());
         }
         try {
             return mapper.writeValueAsString(root);
@@ -310,17 +390,24 @@ class AgendaProposalCycleIT {
     }
 
     private List<java.util.UUID> candidateIds(LlmPrompt prompt, ObjectMapper mapper) {
+        List<java.util.UUID> ids = new java.util.ArrayList<>();
+        for (JsonNode block : candidateBlocks(prompt, mapper)) {
+            ids.add(java.util.UUID.fromString(block.get("block_id").asText()));
+        }
+        return ids;
+    }
+
+    /** The run's candidate blocks as the prompt states them: geometry, flags and band. */
+    private List<JsonNode> candidateBlocks(LlmPrompt prompt, ObjectMapper mapper) {
         try {
             String user = prompt.user();
             String controlData = user.substring(user.indexOf('{'), user.lastIndexOf('}') + 1);
             JsonNode root = mapper.readTree(controlData);
-            List<java.util.UUID> ids = new java.util.ArrayList<>();
-            for (JsonNode block : root.get("candidate_blocks")) {
-                ids.add(java.util.UUID.fromString(block.get("block_id").asText()));
-            }
-            return ids;
+            List<JsonNode> blocks = new java.util.ArrayList<>();
+            root.get("candidate_blocks").forEach(blocks::add);
+            return blocks;
         } catch (Exception ex) {
-            throw new IllegalStateException("stub could not read candidate ids from the prompt", ex);
+            throw new IllegalStateException("stub could not read the candidates from the prompt", ex);
         }
     }
 
@@ -356,6 +443,14 @@ class AgendaProposalCycleIT {
             (rs, rowNum) -> new OccupiedInterval(null,
                 rs.getObject("date_start", OffsetDateTime.class),
                 rs.getObject("date_end", OffsetDateTime.class), false));
+    }
+
+    /** The persisted windows in a stable order, so two runs can be compared as whole days. */
+    private List<OccupiedInterval> sortedPlannerBlockWindows() {
+        return plannerBlockWindows().stream()
+            .sorted(java.util.Comparator.comparing(OccupiedInterval::start)
+                .thenComparing(OccupiedInterval::end))
+            .toList();
     }
 
     private void insertAgendaEvent(OffsetDateTime start, OffsetDateTime end) {

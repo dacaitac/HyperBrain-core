@@ -15,6 +15,7 @@ import com.hyperbrain.planner.domain.service.EnergyResolver;
 import com.hyperbrain.planner.domain.service.HumanizedAgendaFloor;
 import com.hyperbrain.planner.domain.service.MorningTriggerCalculator;
 import com.hyperbrain.planner.domain.service.PlanningWindowResolver;
+import com.hyperbrain.planner.domain.service.RetimingBandResolver;
 import com.hyperbrain.planner.domain.service.SleepFrontierCalculator;
 import com.hyperbrain.planner.domain.service.SleepSampleSessionParser;
 import org.springframework.beans.factory.annotation.Value;
@@ -103,6 +104,17 @@ class PlannerConfig {
     @Bean
     DayWindowResolver dayWindowResolver(DayTemplate dayTemplate) {
         return new DayWindowResolver(dayTemplate);
+    }
+
+    /**
+     * The band each block may be retimed within (Daniel, 2026-08-07): the template's own bands, and a
+     * meal's widened to its plausible hours. Depends on both calibration seams — the shape of the day
+     * and the meal anchors — because a meal band is the two of them combined.
+     */
+    @Bean
+    RetimingBandResolver retimingBandResolver(DayTemplate dayTemplate,
+                                              HumanizationSettings humanizationSettings) {
+        return new RetimingBandResolver(dayTemplate, humanizationSettings);
     }
 
     @Bean

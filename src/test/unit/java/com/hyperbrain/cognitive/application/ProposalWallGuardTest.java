@@ -7,6 +7,7 @@ import com.hyperbrain.cognitive.application.ProposalWallGuard.WallGuardResult;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.RetimingBand;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -193,16 +194,154 @@ class ProposalWallGuardTest {
         assertThat(guard.check(new AgendaPropuesta(List.of(drop(A))), context).clean()).isTrue();
     }
 
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a block moved out of its band is rejected")
+    void moved_out_of_band_rejected() {
+        // The production case: «Casa» is the evening band, and the model moved it to seven in the
+        // morning — the band travelling with the movement, so the day was named after a shape it had
+        // lost.
+        RetimingBand household = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(14));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE.plusHours(12), WAKE.plusHours(13))), Map.of(A, household));
+        AgendaPropuesta propuesta = new AgendaPropuesta(List.of(move(A, WAKE, WAKE.plusMinutes(60))));
+
+        assertThat(guard.check(propuesta, context).breaches()).singleElement()
+            .satisfies(w -> {
+                assertThat(w.blockId()).isEqualTo(A);
+                assertThat(w.wall()).isEqualTo(ProposalWall.BAND_CONFINEMENT);
+            });
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a block moved anywhere inside its band passes — retiming is the model's")
+    void moved_within_band_passes() {
+        RetimingBand goal = new RetimingBand("Meta de la mañana", WAKE, WAKE.plusHours(3));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Map.of(A, goal));
+        AgendaPropuesta propuesta = new AgendaPropuesta(List.of(
+            move(A, WAKE.plusMinutes(90), WAKE.plusMinutes(150))));
+
+        assertThat(guard.check(propuesta, context).clean()).isTrue();
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a block that spills over its band's edge is rejected")
+    void moved_across_the_band_edge_rejected() {
+        RetimingBand goal = new RetimingBand("Meta de la mañana", WAKE, WAKE.plusHours(2));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Map.of(A, goal));
+        AgendaPropuesta propuesta = new AgendaPropuesta(List.of(
+            move(A, WAKE.plusMinutes(90), WAKE.plusMinutes(150))));
+
+        assertThat(guard.check(propuesta, context).breaches()).singleElement()
+            .satisfies(w -> assertThat(w.wall()).isEqualTo(ProposalWall.BAND_CONFINEMENT));
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a KEPT block is never judged against its band")
+    void kept_block_is_not_band_checked() {
+        // The floor's own placement is not the model's doing: degrading a day for it would be a
+        // self-inflicted outage. Here the candidate sits outside the band it was given.
+        RetimingBand narrow = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(13));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Map.of(A, narrow));
+
+        assertThat(guard.check(new AgendaPropuesta(List.of(keep(A))), context).clean()).isTrue();
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a block that belongs to no band may be moved anywhere within the walls")
+    void unbanded_block_moves_freely() {
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Map.of());
+        AgendaPropuesta propuesta = new AgendaPropuesta(List.of(
+            move(A, WAKE.plusHours(9), WAKE.plusHours(10))));
+
+        assertThat(guard.check(propuesta, context).clean()).isTrue();
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: dropping a block is a disposition, never a retiming")
+    void dropping_a_banded_block_passes() {
+        RetimingBand household = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(14));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE.plusHours(12), WAKE.plusHours(13))), Map.of(A, household));
+
+        assertThat(guard.check(new AgendaPropuesta(List.of(drop(A))), context).clean()).isTrue();
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a proposal that moves nothing can never breach a band, whatever "
+        + "the bands say")
+    void a_proposal_that_moves_nothing_never_breaches_a_band() {
+        // The self-inflicted-outage guard, at the scale of a whole day: every candidate sits outside
+        // the band it carries — a state the resolvers make impossible, and which must still not degrade
+        // a day when the model proposes no movement at all.
+        RetimingBand evening = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(14));
+        RetimingBand night = new RetimingBand("Cierre del día", WAKE.plusHours(14), WAKE.plusHours(15));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60)),
+                block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
+            Map.of(A, evening, B, night));
+
+        WallGuardResult result = guard.check(new AgendaPropuesta(List.of(keep(A), keep(B))), context);
+
+        assertThat(result.clean()).isTrue();
+        assertThat(result.breaches()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a MOVE is judged by the verb, not by whether the geometry changed")
+    void a_move_echoing_the_floor_is_still_judged() {
+        // The guard trusts the resolvers' invariant (a floor window always sits inside its band) rather
+        // than re-deriving it: a MOVE onto the block's own hours is checked like any other. If a band
+        // ever came out narrower than the window the floor laid, this is the shape the outage would
+        // take — a day degrading over the floor's own placement echoed back by the model.
+        RetimingBand narrow = new RetimingBand("Casa", WAKE.plusMinutes(15), WAKE.plusMinutes(45));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Map.of(A, narrow));
+
+        WallGuardResult result = guard.check(
+            new AgendaPropuesta(List.of(move(A, WAKE, WAKE.plusMinutes(60)))), context);
+
+        assertThat(result.breaches()).singleElement()
+            .satisfies(w -> assertThat(w.wall()).isEqualTo(ProposalWall.BAND_CONFINEMENT));
+    }
+
+    @Test
+    @DisplayName("BAND_CONFINEMENT: a block that leaves both its band and the day is charged with both")
+    void leaving_the_band_and_the_frontier_reports_both() {
+        // The breaches are diagnosis, not control flow — the day degrades either way — so a decision
+        // that breaks two walls must name both of them in the telemetry.
+        RetimingBand morning = new RetimingBand("Meta de la mañana", WAKE, WAKE.plusHours(3));
+        AgendaProposalContext context = context(
+            List.of(block(A, WAKE, WAKE.plusMinutes(60))), Map.of(A, morning));
+
+        WallGuardResult result = guard.check(
+            new AgendaPropuesta(List.of(move(A, BEDTIME.plusMinutes(30), BEDTIME.plusMinutes(90)))),
+            context);
+
+        assertThat(result.breaches()).extracting(ProposalWallGuard.WallBreach::wall)
+            .containsExactlyInAnyOrder(
+                ProposalWall.BAND_CONFINEMENT, ProposalWall.SLEEP_FRONTIER);
+    }
+
     private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
                                                  List<OccupiedInterval> agendaWalls) {
         return context(candidates, wigIds, agendaWalls, List.of());
+    }
+
+    private static AgendaProposalContext context(List<AgendaBlock> candidates,
+                                                 Map<UUID, RetimingBand> bands) {
+        return new AgendaProposalContext(candidates, WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3,
+            "NEUTRAL", Map.of(), bands);
     }
 
     private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
                                                  List<OccupiedInterval> agendaWalls,
                                                  List<OccupiedInterval> occupiedWalls) {
         return new AgendaProposalContext(candidates, WAKE, BEDTIME, agendaWalls, occupiedWalls, wigIds, 3,
-            "NEUTRAL", Map.of());
+            "NEUTRAL", Map.of(), Map.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {

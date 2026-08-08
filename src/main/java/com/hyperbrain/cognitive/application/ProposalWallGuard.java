@@ -5,6 +5,7 @@ import com.hyperbrain.cognitive.application.AgendaPropuesta.Placement;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.RetimingBand;
 import org.springframework.stereotype.Component;
 
 import java.time.OffsetDateTime;
@@ -30,8 +31,20 @@ import java.util.UUID;
  *   <li>{@code SLEEP_FRONTIER} — every surviving block stays inside {@code [wake, bedtime]} (ADR-013 D2);</li>
  *   <li>{@code AGENDA_READ_ONLY} — no surviving block overlaps a read-only AGENDA window (ADR-009);</li>
  *   <li>{@code OCCUPIED_BLOCK} — no surviving block overlaps a window somebody already owns: a block the
- *       user created himself, one already closed, or one this run may no longer re-time.</li>
+ *       user created himself, one already closed, or one this run may no longer re-time;</li>
+ *   <li>{@code BAND_CONFINEMENT} — no <b>moved</b> block leaves the band of the day it was born in
+ *       ({@link com.hyperbrain.planner.domain.model.RetimingBand}).</li>
  * </ol>
+ *
+ * <p><b>Why the band is a wall</b> (Daniel, 2026-08-07). Retiming is the model's authority and stays
+ * so — inside the band. The band itself is the shape of the day the template gives it, and a proposal
+ * that takes a block out of its band does not rearrange the day, it dissolves its form: production
+ * produced «Casa» at seven in the morning, the band travelling with the movement, so the day came out
+ * named after a shape it no longer had. Tolerance is zero by decision. The same rule bounds a meal,
+ * whose band is widened to plausible hours precisely so that it can float around its hour and still
+ * never land at three in the afternoon. Only {@code MOVE} is checked: {@code KEEP} is the floor's own
+ * placement, and degrading a day over a placement the model never made would be a self-inflicted
+ * outage.
  *
  * <p><b>Why the last wall is a wall and not arrangement.</b> Two blocks of the same run overlapping each
  * other is a plan the model composed, and composing the plan is its authority. A block landing on a
@@ -49,7 +62,7 @@ import java.util.UUID;
 public class ProposalWallGuard {
 
     /**
-     * Re-imposes the four bounded walls on a proposal.
+     * Re-imposes the bounded walls on a proposal.
      *
      * @param propuesta the parsed LLM proposal; never null
      * @param context   the run's read model (candidates, frontier, AGENDA walls, WIG ids); never null
@@ -89,7 +102,7 @@ public class ProposalWallGuard {
         return breaches;
     }
 
-    /** The frontier / AGENDA / occupancy / WIG walls for one decision. */
+    /** The band / frontier / AGENDA / occupancy / WIG walls for one decision. */
     private static List<WallBreach> blockBreaches(BlockDecision decision, AgendaProposalContext context) {
         UUID id = decision.blockId();
         if (decision.placement() == Placement.DROP) {
@@ -103,10 +116,15 @@ public class ProposalWallGuard {
             // An invented id already produced a STRUCTURAL breach; nothing more to check geometrically.
             return List.of();
         }
-        OffsetDateTime start = decision.placement() == Placement.MOVE ? decision.start() : candidate.start();
-        OffsetDateTime end = decision.placement() == Placement.MOVE ? decision.end() : candidate.end();
+        boolean moved = decision.placement() == Placement.MOVE;
+        OffsetDateTime start = moved ? decision.start() : candidate.start();
+        OffsetDateTime end = moved ? decision.end() : candidate.end();
 
         List<WallBreach> breaches = new ArrayList<>();
+        RetimingBand band = context.band(id);
+        if (moved && band != null && !band.contains(start, end)) {
+            breaches.add(new WallBreach(id, ProposalWall.BAND_CONFINEMENT));
+        }
         if (start.isBefore(context.frontierStart()) || end.isAfter(context.frontierEnd())) {
             breaches.add(new WallBreach(id, ProposalWall.SLEEP_FRONTIER));
         }
@@ -129,6 +147,8 @@ public class ProposalWallGuard {
         AGENDA_READ_ONLY,
         /** A proposed block landed on a window somebody already owns (a user, closed or started block). */
         OCCUPIED_BLOCK,
+        /** A moved block left the band of the day it was born in (the shape of the day, and meals). */
+        BAND_CONFINEMENT,
         /** The WIG block was dropped or expelled — F1 is a hard floor. */
         WIG_PROTECTED,
         /** An invented, duplicated, or silently dropped block id (identity diff, anti-hallucination). */

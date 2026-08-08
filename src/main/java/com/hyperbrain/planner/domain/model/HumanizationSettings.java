@@ -17,8 +17,8 @@ import java.util.List;
  * <p>Two calibrations survive because neither discounts anything:
  *
  * @param mealWindows    the protected meal anchors, which enter the run as walls like any other
- *                       commitment; never null, may be empty; defaults lunch 12:30–13:30 and dinner
- *                       19:00–20:00, resolved against the run's zone
+ *                       commitment and carry the plausible band they may float within; never null, may
+ *                       be empty; resolved against the run's zone
  * @param batchBandWidth the priority-score tolerance within which adjacent executables count as
  *                       comparable and may be regrouped by context, so same-context work tends to land
  *                       in the same window — a tie-break inside a band, never a reordering across
@@ -26,11 +26,24 @@ import java.util.List;
  */
 public record HumanizationSettings(List<MealWindow> mealWindows, double batchBandWidth) {
 
-    /** The sanctioned MVP defaults: lunch 12:30–13:30, dinner 19:00–20:00, a 0.10 batching band. */
+    /**
+     * The sanctioned MVP defaults: breakfast, lunch and dinner, each with the plausible band it may
+     * float within (Daniel, 2026-08-07), and a 0.10 batching band.
+     *
+     * <p>The anchors are deliberately short and the bands deliberately wide: the anchor is the time
+     * the floor keeps free of work, the band is where that time may plausibly sit. Breakfast is here
+     * because it is the meal production got wrong — it was placed at three in the afternoon — and a
+     * meal with no anchor has no band to be judged against. Every value is configuration
+     * ({@code app.planner.humanize.meals}), so correcting an hour is a settings edit, never a deploy.
+     */
     public static final HumanizationSettings DEFAULT = new HumanizationSettings(
         List.of(
-            new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30)),
-            new MealWindow("dinner", LocalTime.of(19, 0), LocalTime.of(20, 0))),
+            new MealWindow("breakfast", LocalTime.of(7, 0), LocalTime.of(7, 30),
+                LocalTime.of(5, 30), LocalTime.of(10, 0)),
+            new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+                LocalTime.of(11, 30), LocalTime.of(14, 30)),
+            new MealWindow("dinner", LocalTime.of(19, 0), LocalTime.of(20, 0),
+                LocalTime.of(18, 0), LocalTime.of(21, 30))),
         0.10);
 
     /** A no-op instance: no meal walls and no batching — the raw floor. */

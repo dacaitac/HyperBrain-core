@@ -12,6 +12,7 @@ import com.hyperbrain.planner.domain.model.Agenda;
 import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.RetimingBand;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -160,7 +161,7 @@ class AgendaProposalServiceTest {
             UUID.randomUUID(), WAKE.plusMinutes(120), WAKE.plusMinutes(180), true);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
-            WAKE, BEDTIME, List.of(agendaWall), List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(agendaWall), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -181,7 +182,7 @@ class AgendaProposalServiceTest {
             UUID.randomUUID(), WAKE.plusMinutes(120), WAKE.plusMinutes(180), false);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
-            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -193,6 +194,53 @@ class AgendaProposalServiceTest {
 
         assertThat(result).isEmpty();
         assertThat(interventionWalls()).contains(ProposalWall.OCCUPIED_BLOCK);
+    }
+
+    @Test
+    @DisplayName("a block moved out of its band degrades the whole day (BAND)")
+    void band_breach_degrades() {
+        // The production case, end to end: the evening band moved to the first hour of the day. The
+        // rest of the proposal is impeccable, and it still degrades — the guard is all-or-nothing.
+        RetimingBand household = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(14));
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(block(A, WAKE.plusHours(12), WAKE.plusHours(13)),
+                block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(),
+            Map.of(A, household));
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
+               "start":"2026-07-10T07:00:00Z","end":"2026-07-10T08:00:00Z"},
+              {"block_id":"22222222-2222-2222-2222-222222222222","placement":"KEEP"}
+            ]}""";
+
+        Optional<Agenda> result = service(prompt -> json).propose(context);
+
+        assertThat(result).isEmpty();
+        assertThat(interventionWalls()).contains(ProposalWall.BAND_CONFINEMENT);
+    }
+
+    @Test
+    @DisplayName("a block retimed inside its band is accepted — the arrangement stays the model's")
+    void retiming_inside_the_band_is_accepted() {
+        RetimingBand household = new RetimingBand("Casa", WAKE.plusHours(12), WAKE.plusHours(14));
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(block(A, WAKE.plusHours(12), WAKE.plusHours(13))),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(),
+            Map.of(A, household));
+        String json = """
+            {"decisions":[
+              {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
+               "start":"2026-07-10T20:00:00Z","end":"2026-07-10T21:00:00Z","coach_note":"Cierra en casa"}
+            ]}""";
+
+        Optional<Agenda> result = service(prompt -> json).propose(context);
+
+        assertThat(result).isPresent();
+        assertThat(result.get().blocks()).singleElement().satisfies(moved -> {
+            assertThat(moved.start()).isEqualTo(WAKE.plusHours(13));
+            assertThat(moved.reason()).isEqualTo("Cierra en casa");
+        });
     }
 
     @Test
@@ -246,7 +294,7 @@ class AgendaProposalServiceTest {
             throw new AssertionError("gateway must not be called for an empty run");
         };
         AgendaProposalContext empty = new AgendaProposalContext(
-            List.of(), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            List.of(), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
 
         assertThat(service(neverCalled).propose(empty)).isEmpty();
     }
@@ -259,7 +307,7 @@ class AgendaProposalServiceTest {
             "floor reason", List.of(C), "Deep work morning");
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(themed, block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -286,7 +334,7 @@ class AgendaProposalServiceTest {
         AgendaBlock themed = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
             "floor reason", List.of(C), "Deep work morning");
         AgendaProposalContext context = new AgendaProposalContext(
-            List.of(themed), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of());
+            List.of(themed), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP"}
@@ -309,13 +357,13 @@ class AgendaProposalServiceTest {
         return new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL",
-            Map.of(A, "Write the report", B, "Review PRs"));
+            Map.of(A, "Write the report", B, "Review PRs"), Map.of());
     }
 
     private static AgendaProposalContext wigContext() {
         return new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(A), 3, "NEUTRAL", Map.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(A), 3, "NEUTRAL", Map.of(), Map.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {
