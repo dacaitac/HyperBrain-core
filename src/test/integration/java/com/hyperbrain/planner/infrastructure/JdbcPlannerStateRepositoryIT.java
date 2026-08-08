@@ -678,6 +678,48 @@ class JdbcPlannerStateRepositoryIT {
     }
 
     @Test
+    @DisplayName("the overlap key answers with ONE row even when the observed window covers two")
+    void the_overlap_key_answers_with_one_row_even_when_two_overlap() {
+        // The watch does not only revise an episode's edges — it also re-stages two short naps as one
+        // longer one. When it does, the newly observed window covers BOTH rows already recorded and
+        // the key answers with the earliest alone.
+        //
+        // The consequence is on the caller, and it is worth stating plainly: NapActivityRecorder
+        // re-times the row it is handed and never learns about the second, which is left behind
+        // inside the re-timed window, with its own calendar entry. This is the one shape in which the
+        // idempotency does not converge (the opposite case — one nap re-staged as two — does: the
+        // first re-times the row, the second no longer overlaps it and is inserted).
+        //
+        // Pinned as it behaves today: whether the key should answer with every overlapping row, and
+        // what the recorder should then do with them, is a src/main decision.
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        UUID earlier = UUID.randomUUID();
+        UUID later = UUID.randomUUID();
+        repository.insertCompletedActivity(earlier, USER, sleepCycle, "Siesta", at(14, 0), at(14, 30));
+        repository.insertCompletedActivity(later, USER, sleepCycle, "Siesta", at(15, 0), at(15, 30));
+
+        // The merged observation covers both.
+        assertThat(repository.findActivityOverlapping(USER, sleepCycle, at(14, 0), at(15, 30)))
+            .contains(earlier);
+    }
+
+    @Test
+    @DisplayName("the overlap key does not ask who authored the activity it matches")
+    void the_overlap_key_does_not_discriminate_by_author() {
+        // The key is «an ACTIVITY of this cycle over this window», nothing narrower — not the title,
+        // not the origin, not system_generated. So an activity the USER created under his sleep cycle
+        // is a match, and the recorder will re-time its end and announce the change to Notion and to
+        // the calendar. Whether an observation may move a row its owner wrote is an authority question
+        // and belongs in src/main; this pins that today the key does not distinguish them.
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        UUID hisOwn = insertCommitment("Dormir la mona", "ACTIVITY", "TODO", at(14, 0), at(15, 0));
+        jdbcTemplate.update("UPDATE core_executable SET cycle_id = ? WHERE id = ?", sleepCycle, hisOwn);
+
+        assertThat(repository.findActivityOverlapping(USER, sleepCycle, at(14, 30), at(15, 30)))
+            .contains(hisOwn);
+    }
+
+    @Test
     @DisplayName("a recorded nap is DONE, so it never becomes a wall nor a commitment to move")
     void a_recorded_nap_does_not_wall_the_day() {
         UUID sleepCycle = insertCycle(USER, "Sueño");

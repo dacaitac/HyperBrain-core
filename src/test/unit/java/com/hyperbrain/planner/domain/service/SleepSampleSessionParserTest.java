@@ -274,6 +274,59 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
+    @DisplayName("18:00 sharp opens the next sleep day and closes this one — exactly one row claims it")
+    void the_sleep_day_closes_exclusively_on_its_own_eighteen_hundred() {
+        // The other edge of the same boundary, and the one that makes the sleep days a PARTITION. The
+        // opening bound is inclusive and the closing one exclusive, both at 18:00; were the closing
+        // bound inclusive too, a session starting at 18:00 sharp would be held by the day that closes
+        // there AND by the day that opens there, and the same sleep would be counted on two rows —
+        // exactly the double-count the single boundary was introduced to end.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"),   // the night
+            sample("Core", "10/07/2026 at 6:00 PM", "10/07/2026 at 7:00 PM")));  // starts AT 18:00
+
+        AggregatedSleep tonight =                                    // closes at 10 Jul 18:00
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T22:00:00Z")).sleep();
+        AggregatedSleep tomorrowMorning =                            // opens at 10 Jul 18:00
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-11T08:00:00Z")).sleep();
+
+        // Tonight's row stops short of the instant; tomorrow's owns it. Never both, never neither.
+        assertThat(tonight.sessions()).containsExactly(
+            new SleepSession(OffsetDateTime.parse("2026-07-09T23:00:00Z"),
+                OffsetDateTime.parse("2026-07-10T06:00:00Z"), 7 * 3600));
+        assertThat(tomorrowMorning.sessions()).containsExactly(
+            new SleepSession(OffsetDateTime.parse("2026-07-10T18:00:00Z"),
+                OffsetDateTime.parse("2026-07-10T19:00:00Z"), 3600));
+    }
+
+    @Test
+    @DisplayName("overlapping In Bed and Awake stretches are unioned too, never summed")
+    void unions_overlapping_in_bed_and_awake_stretches() {
+        // The asleep stages are split proportionally, but In Bed and Awake are plain unions — and the
+        // watch revises those tracks as well. Summing them instead would inflate WASO and time in bed,
+        // sink the efficiency the score is built on, and can push asleep+awake past the plausibility
+        // guard, discarding a night that was measured perfectly well.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("In Bed", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"),  // 7 h
+            sample("In Bed", "10/07/2026 at 5:00 AM", "10/07/2026 at 7:00 AM"),   // overlaps 1 h
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"),
+            sample("Awake", "10/07/2026 at 1:00 AM", "10/07/2026 at 1:30 AM"),
+            sample("Awake", "10/07/2026 at 1:20 AM", "10/07/2026 at 2:00 AM")));  // overlaps 10 min
+
+        SleepStageSample totals =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep().totals();
+
+        // In bed is the union 23:00 → 07:00 (8 h), not the naive 9 h sum of the two stretches.
+        assertThat(totals.inBedSeconds()).isEqualTo(8 * 3600);
+        // Awake is the union 01:00 → 02:00 (1 h), not the naive 1 h 10 sum.
+        assertThat(totals.awakeSeconds()).isEqualTo(3600);
+        assertThat(totals.totalSleepSeconds()).isEqualTo(7 * 3600);
+        // And with both tracks unioned the accounting closes exactly on the measured window.
+        assertThat(totals.totalSleepSeconds() + totals.awakeSeconds())
+            .isEqualTo(Duration.between(totals.start(), totals.end()).toSeconds());
+    }
+
+    @Test
     @DisplayName("the same nap lands on the same row whatever hour the replan happened to run at")
     void the_sleep_day_of_a_nap_does_not_depend_on_when_the_run_happens() {
         // A nap at 19:00 on the 9th sits inside the sleep day that opens at 18:00 on the 9th, and there

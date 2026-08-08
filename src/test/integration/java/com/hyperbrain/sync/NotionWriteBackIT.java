@@ -302,6 +302,51 @@ class NotionWriteBackIT {
     }
 
     @Test
+    @DisplayName("an episode born DONE creates its page: «Siesta», closed, under its cycle, with its hours")
+    void an_episode_recorded_after_the_fact_creates_its_notion_page() throws Exception {
+        // The nap NapActivityRecorder writes: an ACTIVITY born DONE, filed under the user's «Sueño»
+        // cycle, over the window it really happened in. It has no Notion page yet and the event is a
+        // genuine create (ExecutableCreatedEvent, never the update-only reflection route), so the
+        // page must be created rather than skipped.
+        UUID sleepCycle = insertCycle("Sueño", "PHASE", "ACTIVE");
+        UUID nap = insertRecordedNap(sleepCycle);
+        insertOutboxEvent(nap, "CORE_EXECUTABLE", "ExecutableCreatedEvent", "SYSTEM");
+        stubCreatePage(CYCLES_DS, "8f000000000000000000000000000001");
+        String pageId = "8f000000000000000000000000000002";
+        stubCreatePage(TASKS_DS, pageId);
+
+        // When
+        outboxWorker.drainBatch();
+
+        // Then the Tasks page carries the episode as what it was: sleep, already over.
+        LoggedRequest request = singleRequest(postRequestedFor(urlEqualTo("/v1/pages"))
+            .withRequestBody(matchingJsonPath("$.parent.data_source_id",
+                WireMock.equalTo(TASKS_DS))));
+        JsonNode props = objectMapper.readTree(request.getBodyAsString()).path("properties");
+        assertThat(props.path("Name").path("title").get(0).path("text").path("content").asText())
+            .isEqualTo("Siesta");
+        assertThat(props.path("Type").path("select").path("name").asText()).isEqualTo("Activity");
+        // Born DONE: Status and the derived Complete checkbox must both read closed on the very first
+        // write, not on a later reflection — there is no later state for this row to move to.
+        assertThat(props.path("Status").path("status").path("name").asText()).isEqualTo("Done");
+        assertThat(props.path("Complete").path("checkbox").asBoolean()).isTrue();
+        // Its real window travels as a range, which is what makes it readable as an episode at all.
+        assertThat(props.path("Date").path("date").path("start").asText()).isNotBlank();
+        assertThat(props.path("Date").path("date").path("end").asText()).isNotBlank();
+        // And the relation lands, so the nap shows up under the commitment it belongs to.
+        assertThat(props.path("Cycle").path("relation").get(0).path("id").asText())
+            .isEqualTo("8f000000000000000000000000000001");
+
+        // And the mapping closes, so the next re-timing of the same nap patches this page instead of
+        // creating a second one.
+        Integer mappings = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_mappings WHERE external_system = 'NOTION' AND local_id = ?",
+            Integer.class, nap);
+        assertThat(mappings).isEqualTo(1);
+        assertThat(unprocessedEvents()).isZero();
+    }
+
+    @Test
     @DisplayName("loop protection: source_system=NOTION never calls the Notion API (CA-2, CA-11)")
     void notion_sourced_change_is_not_written_back() {
         // Given a Notion-originated change
@@ -566,6 +611,23 @@ class NotionWriteBackIT {
             INSERT INTO core_execution_profile (executable_id, energy_drain, mental_load, impact)
             VALUES (?, ?, ?, ?)
             """, executableId, energyDrain, mentalLoad, impact);
+    }
+
+    /**
+     * An episode the system observed after the fact and recorded as done — the shape
+     * {@code NapActivityRecorder} inserts: an {@code ACTIVITY} born {@code DONE}, authored by the
+     * planner, over the real window it happened in, and explicitly not internal accounting.
+     */
+    private UUID insertRecordedNap(UUID cycleId) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, cycle_id, name, type, status, origin, start_time, end_time,
+                 system_generated)
+            VALUES (?, ?, ?, 'Siesta', 'ACTIVITY', 'DONE', 'PLANNER',
+                    TIMESTAMPTZ '2026-07-10T14:00:00Z', TIMESTAMPTZ '2026-07-10T15:00:00Z', false)
+            """, id, DataFixture.SYSTEM_USER_ID, cycleId);
+        return id;
     }
 
     private UUID insertCycle(String name, String type, String status) {

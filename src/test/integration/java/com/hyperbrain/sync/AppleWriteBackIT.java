@@ -187,6 +187,61 @@ class AppleWriteBackIT {
     }
 
     @Test
+    @DisplayName("an ACTIVITY born DONE reaches no calendar: delete-on-DONE claims it before it exists")
+    void an_episode_recorded_after_the_fact_reaches_no_apple_calendar() {
+        // Given a nap the system observed and recorded (NapActivityRecorder): an ACTIVITY born DONE
+        // over the window it really happened in, not system_generated, announced through the standard
+        // outbox exactly like any other executable — and meant to show up in Daniel's calendar as
+        // time that went to sleeping.
+        UUID nap = insertRecordedNap();
+        insertOutboxEvent(nap, "ExecutableCreatedEvent", "SYSTEM", "{}");
+
+        // When the outbox drains
+        outboxWorker.drainBatch();
+
+        // Then nothing at all is written to Apple. propagateUpsert routes every DONE executable that
+        // is not a TIME_BLOCK to the delete-on-DONE path (so Apple never accumulates completed
+        // reminders), and a row born DONE has no sync_mapping yet, so that branch returns having
+        // emitted nothing. The exemption that saves a settled TIME_BLOCK — its EKEvent is a time
+        // record and must survive completion — is the same argument a recorded episode has, and it
+        // does not cover it.
+        //
+        // Pinned as it behaves today, deliberately: the gate stays honest, the gap stays visible, and
+        // the fix has somewhere to land. WHICH executables keep their Apple entity on DONE is a
+        // src/main decision (it changes the behaviour of every ACTIVITY and LEARNING_SESSION that is
+        // completed normally), not something a test may settle.
+        assertThat(receiveOne(COMMANDS_QUEUE)).isEmpty();
+        Integer commands = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM sync_write_commands", Integer.class);
+        assertThat(commands).isZero();
+        // And it fails silently: the event drains clean, so nothing retries and nothing reaches a DLQ.
+        Integer unprocessed = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE processed_at IS NULL", Integer.class);
+        assertThat(unprocessed).isZero();
+    }
+
+    @Test
+    @DisplayName("and if it ever were mapped, re-timing it would DELETE the event, not move it")
+    void a_mapped_episode_is_deleted_rather_than_retimed() throws Exception {
+        // The complement of the case above, and what makes the gap structural rather than a one-off
+        // miss: as soon as the episode HAS an Apple entity, the same delete-on-DONE path removes it.
+        // Repairing only the missing create would therefore not hold — the first re-timing of the nap
+        // (the watch revises its staging on every replan) would delete the event again.
+        UUID nap = insertRecordedNap();
+        String entityId = "EKEvent-" + UUID.randomUUID();
+        insertMapping(nap, entityId);
+        insertOutboxEvent(nap, "ExecutableUpdatedEvent", "SYSTEM", "{}");
+
+        outboxWorker.drainBatch();
+
+        Message<String> message = receiveOne(COMMANDS_QUEUE).orElseThrow();
+        JsonNode command = objectMapper.readTree(message.getPayload());
+        assertThat(command.path("operation").asText()).isEqualTo("DELETED");
+        assertThat(command.path("command_type").asText()).isEqualTo("CALENDAR_EVENT");
+        assertThat(command.path("entity_id").asText()).isEqualTo(entityId);
+    }
+
+    @Test
     @DisplayName("loop protection: source_system=APPLE produces no WriteCommand (CA-10)")
     void apple_sourced_change_is_not_written_back() {
         // Given an Apple-originated outbox event for a mapped executable
@@ -212,6 +267,22 @@ class AppleWriteBackIT {
             INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time, source_calendar)
             VALUES (?, ?, 'Write tests', ?, ?, now(), now() + interval '1 hour', 'HyperBrain')
             """, id, DataFixture.SYSTEM_USER_ID, type, status);
+        return id;
+    }
+
+    /**
+     * An episode the system observed after the fact and recorded as done — the shape
+     * {@code NapActivityRecorder} inserts: an {@code ACTIVITY} born {@code DONE}, authored by the
+     * planner, over the real window it happened in, and explicitly not internal accounting.
+     */
+    private UUID insertRecordedNap() {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time, system_generated)
+            VALUES (?, ?, 'Siesta', 'ACTIVITY', 'DONE', 'PLANNER',
+                    now() - interval '3 hours', now() - interval '2 hours', false)
+            """, id, DataFixture.SYSTEM_USER_ID);
         return id;
     }
 
