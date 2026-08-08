@@ -49,7 +49,10 @@ sourceSets {
     }
     integrationTest {
         java.srcDirs      = ['src/test/integration/java', 'src/test/fixture/java']
-        resources.srcDirs = ['src/test/integration/resources']
+        // The unit resources ride along so a captured production payload is a single fixture file
+        // read by both layers — the unit test that pins how it is parsed and the IT that drives it
+        // through the queue — instead of the same 60 KB of JSON copied into two source sets.
+        resources.srcDirs = ['src/test/integration/resources', 'src/test/unit/resources']
         compileClasspath  += sourceSets.main.output
         runtimeClasspath  += sourceSets.main.output
     }

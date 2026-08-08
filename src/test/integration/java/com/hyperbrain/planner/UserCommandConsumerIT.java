@@ -16,6 +16,9 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -49,6 +52,9 @@ class UserCommandConsumerIT {
     private static final OffsetDateTime HALF_PAST_NOON =
         OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, ZoneOffset.UTC);
     private static final LocalDate DAY = LocalDate.of(2026, 7, 10);
+    /** When the production backfill fixture was captured — the instant its anchor day is read from. */
+    private static final OffsetDateTime BACKFILL_CAPTURED_AT =
+        OffsetDateTime.of(2026, 8, 8, 11, 32, 0, 0, ZoneOffset.UTC);
     /** Pinned "now" for the staleness guard: NOON commands are 1 h old — fresh. */
     private static final Instant PINNED_NOW = Instant.parse("2026-07-10T13:00:00Z");
 
@@ -214,6 +220,91 @@ class UserCommandConsumerIT {
         // spacing are the column's, the values are the dump's.)
         assertThat(raw.get("payload").toString())
             .contains("09/07/2026 at 11:00 PM", "\"Awake\"", "10/07/2026 at 11:56 AM");
+    }
+
+    @Test
+    @DisplayName("the real fortnight backfill: one row per night, naps only for today, re-sends converge")
+    void a_backfill_records_one_row_per_night() throws Exception {
+        // The 660-sample dump Daniel actually sent (25 Jul → 8 Aug), driven end to end through the same
+        // queue and the same command the daily replan uses. Production archived it whole under a single
+        // night's key with status ERROR, because the fortnight was read as one sleep day.
+        UUID sleepCycle = insertSleepCycle();
+        UUID first = UUID.randomUUID();
+        send(replanWithBackfillBody(first, BACKFILL_CAPTURED_AT), first.toString());
+
+        // Thirteen nights read — the oldest of the range is left to the next overlapping window — and
+        // every one of them scorable: one row each, keyed on the night, not one row for the whole send.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(13));
+        assertThat(archivedDumpCount()).isEqualTo(13);
+        assertThat(jdbcTemplate.queryForList(
+            "SELECT (end_time AT TIME ZONE 'UTC')::date::text FROM tel_sleep_record "
+                + "WHERE user_id = ? ORDER BY end_time", String.class, USER))
+            .containsExactly("2026-07-26", "2026-07-27", "2026-07-28", "2026-07-30", "2026-07-31",
+                "2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06",
+                "2026-08-07", "2026-08-08");
+
+        // Each night's bytes are filed under that night's own key, so a night stays re-derivable one at
+        // a time — and nothing in his real history is refused, now that a night's accounted time is
+        // measured as a union instead of TST added to WASO.
+        assertThat(jdbcTemplate.queryForList(
+            "SELECT dedup_key FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP' "
+                + "ORDER BY dedup_key", String.class, USER))
+            .startsWith("APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-07-26")
+            .endsWith("APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-08-08");
+        assertThat(countArchivedWithStatus("NORMALIZED")).isEqualTo(13);
+        assertThat(countArchivedWithStatus("ERROR")).isZero();
+
+        // Not one «Siesta» in the past. The 5th and the 7th of August hold real naps (the 7th's is the
+        // 09:20–13:56 stretch that broke production), and a history that recorded them would have
+        // created executables with their calendar events and their Notion pages for afternoons weeks
+        // gone. Only the day the run is standing on may do that, and that night had no nap.
+        assertThat(napCount(sleepCycle)).isZero();
+
+        // And a re-send of an overlapping range converges: the archive rewrites each night in place and
+        // the score row is found by its own local day and updated. Daniel sends in overlapping batches
+        // on purpose — the second pass must add nothing.
+        UUID second = UUID.randomUUID();
+        send(replanWithBackfillBody(second, BACKFILL_CAPTURED_AT), second.toString());
+        await().atMost(TIMEOUT).untilAsserted(() ->
+            assertThat(countProcessed("user-command:" + second)).isEqualTo(1));
+        assertThat(sleepRecordCount()).isEqualTo(13);
+        assertThat(archivedDumpCount()).isEqualTo(13);
+        assertThat(napCount(sleepCycle)).isZero();
+    }
+
+    @Test
+    @DisplayName("two overlapping backfill windows converge: nothing duplicated, nothing left unrecorded")
+    void overlapping_backfill_windows_converge_and_lose_no_night() {
+        // How Daniel actually sends history: overlapping batches, on purpose. It has to hold together
+        // on two counts at once. Convergence — the night both windows carry is written once, because
+        // both writes are keyed on the night rather than on the send. And completeness — the oldest
+        // night of a window is dropped (a range query may have cut it in half, and a truncated reading
+        // must never overwrite a complete row nor the bytes behind it), so the ONLY thing that keeps
+        // that night is the other window, which carries it in the middle where nothing could have cut
+        // it. This is the test that proves the two halves of that argument meet.
+        UUID later = UUID.randomUUID();
+        send(replanWithNightsBody(later, NOON, "10/07/2026 at 11:00 AM", 8, 9, 10), later.toString());
+        // The 8th is this window's oldest and is deliberately left out: two nights land, not three.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(2));
+
+        // The earlier window overlaps it by two nights (the 8th and the 9th) and reaches further back.
+        UUID earlier = UUID.randomUUID();
+        send(replanWithNightsBody(earlier, NOON, "09/07/2026 at 11:00 AM", 6, 7, 8, 9),
+            earlier.toString());
+        await().atMost(TIMEOUT).untilAsserted(() ->
+            assertThat(countProcessed("user-command:" + earlier)).isEqualTo(1));
+
+        // Four nights, one row each. The 9th arrived in both windows and was written once; the 8th,
+        // dropped as the oldest of the later window, is recovered from the middle of the earlier one;
+        // the 6th is the earlier window's own oldest and stays for a window older still.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(4));
+        assertThat(jdbcTemplate.queryForList(
+            "SELECT (end_time AT TIME ZONE 'UTC')::date::text FROM tel_sleep_record "
+                + "WHERE user_id = ? ORDER BY end_time", String.class, USER))
+            .containsExactly("2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10");
+        // And the raw archive converges the same way — one row per night, never one per send.
+        assertThat(archivedDumpCount()).isEqualTo(4);
+        assertThat(countArchivedWithStatus("NORMALIZED")).isEqualTo(4);
     }
 
     @Test
@@ -491,8 +582,13 @@ class UserCommandConsumerIT {
     }
 
     /**
-     * A dump the plausibility guards refuse: Awake laid over the whole first half of the night, so it
-     * claims 9 h of a 6 h window. Nothing scorable comes out of it, and that is the point.
+     * A dump the plausibility guards refuse: seventeen hours of sleep in one day, which is duplicated
+     * days or a mis-parsed year rather than a long night. Nothing scorable comes out of it, and that is
+     * the point.
+     *
+     * <p>Deliberately <b>not</b> an {@code Awake} stretch laid over the sleep it revises: that shape is
+     * what Apple Watch actually produces and it must be read, not refused (see the parser's accounted
+     * time, measured as a union).
      */
     private static String replanWithImplausibleSleepBody(UUID commandId, OffsetDateTime occurredAt) {
         return """
@@ -504,8 +600,7 @@ class UserCommandConsumerIT {
               "sleep": {
                 "date": "10/07/2026 at 12:05 PM",
                 "sample": [
-                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
-                  {"stage":"Awake","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 2:00 AM","duration":"3:00:00"}
+                  {"stage":"Core","startDate":"09/07/2026 at 6:00 PM","endDate":"10/07/2026 at 11:00 AM","duration":"17:00:00"}
                 ]
               }
             }
@@ -557,6 +652,64 @@ class UserCommandConsumerIT {
             """.formatted(commandId, occurredAt);
     }
 
+    /**
+     * The command Daniel's Shortcut sends when the date range is widened: the same {@code REPLAN_AGENDA}
+     * with the same {@code sleep} envelope, carrying the production dump verbatim from the fixture the
+     * parser's unit test also reads — 660 samples, ~63 KB, well inside the 256 KB an SQS message holds.
+     */
+    private static String replanWithBackfillBody(UUID commandId, OffsetDateTime occurredAt)
+        throws IOException {
+        try (InputStream in = UserCommandConsumerIT.class
+            .getResourceAsStream("/fixtures/shortcut_sleep_backfill.json")) {
+            assertThat(in).as("backfill fixture on the integration classpath").isNotNull();
+            String dump = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return """
+                {
+                  "command_id": "%s",
+                  "command_type": "REPLAN_AGENDA",
+                  "origin": "USER",
+                  "occurred_at": "%s",
+                  "sleep": %s
+                }
+                """.formatted(commandId, occurredAt, dump);
+        }
+    }
+
+    /**
+     * A backfill window covering the given sleep days of July 2026: one 23:00 → 05:00 night each, all
+     * in one dump, captured at {@code capturedAt} (which is what anchors the run). The shape of the
+     * command is the everyday one — only the range the Shortcut queried is wider.
+     *
+     * @param capturedAt the dump's own capture date, in the provider's local format
+     * @param sleepDays  the days of July the nights are labelled by — the day he woke into, ascending
+     */
+    private static String replanWithNightsBody(UUID commandId, OffsetDateTime occurredAt,
+                                               String capturedAt, int... sleepDays) {
+        StringBuilder samples = new StringBuilder();
+        for (int sleepDay : sleepDays) {
+            if (!samples.isEmpty()) {
+                samples.append(",\n              ");
+            }
+            samples.append(
+                "{\"stage\":\"Core\",\"startDate\":\"%02d/07/2026 at 11:00 PM\",\"endDate\":\"%02d/07/2026 at 5:00 AM\",\"duration\":\"6:00:00\"}"
+                    .formatted(sleepDay - 1, sleepDay));
+        }
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "%s",
+                "sample": [
+                  %s
+                ]
+              }
+            }
+            """.formatted(commandId, occurredAt, capturedAt, samples);
+    }
+
     private static String sleepScoreBody(UUID commandId, int score, LocalDate date,
                                          OffsetDateTime occurredAt) {
         return """
@@ -601,6 +754,13 @@ class UserCommandConsumerIT {
         return jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
+    }
+
+    private int countArchivedWithStatus(String status) {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP' "
+                + "AND normalization_status = ?", Integer.class, USER, status);
+        return count == null ? 0 : count;
     }
 
     private int archivedDumpCount() {

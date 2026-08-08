@@ -9,9 +9,10 @@ import java.util.List;
  * stages. {@code capturedAt} is when the Shortcut ran (the collection instant).
  *
  * <p>This is the un-interpreted wire form: stage labels and local date strings are kept as-is. Turning
- * it into a single scorable night — most-recent-session selection, per-stage interval union, window
- * derivation and local-time parsing — is the {@code SleepSampleSessionParser}'s job (the anti-corruption
- * boundary), which needs the user's timezone the strings lack.
+ * it into the scorable sleep of <b>every night it holds</b> — clustering into sessions, grouping them
+ * by sleep day, per-stage interval union and local-time parsing — is the {@code SleepSampleSessionParser}'s
+ * job (the anti-corruption boundary), which needs the user's timezone the strings lack. The same record
+ * is also what one night's slice of the dump is carried in, once the parser has cut it out.
  *
  * @param capturedAt the Shortcut's capture timestamp as a local string, or null when absent
  * @param samples    the stage samples; never null (empty when none were reported)
