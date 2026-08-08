@@ -130,6 +130,101 @@ class MovedCommitmentRescuerTest {
         assertThat(start.getAllValues()).containsExactly(at(11), at(12));
     }
 
+    @Test
+    @DisplayName("its own window is among the walls now, and it never blocks its own rescue")
+    void a_commitment_does_not_wall_itself_out_of_its_rescue() {
+        // Given: commitments occupy the day, so the one being rescued arrives here as a wall of its own.
+        // What keeps that from stopping it is the trigger itself — only a commitment already behind the
+        // run's lower bound is moved, and the search starts at that bound — so the stale wall is out of
+        // reach by construction. This pins that reasoning: widen the trigger to a commitment still ahead
+        // and the rescue would start colliding with the very thing it is moving.
+        givenCommitments(new MovableCommitment(SESSION, at(9), at(10)));
+        when(scheduling.retimeWithinDay(eq(SESSION), any(), any(), eq(UTC))).thenReturn(true);
+        List<OccupiedInterval> walls = List.of(new OccupiedInterval(SESSION, at(9), at(10), false));
+
+        // When
+        List<UUID> moved = rescuer.rescue(USER, DAY, UTC, at(11), at(22), walls);
+
+        // Then: the first free stretch, not a slot pushed aside by its own shadow.
+        ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(scheduling).retimeWithinDay(eq(SESSION), start.capture(), any(), eq(UTC));
+        assertThat(start.getValue()).isEqualTo(at(11));
+        assertThat(moved).containsExactly(SESSION);
+    }
+
+    @Test
+    @DisplayName("a re-timed commitment walls where it LANDED, not where it was")
+    void a_moved_commitment_rewrites_its_own_wall() {
+        // The wall list arrives from the run and is keyed by executable, so the entry for a commitment
+        // this run has just moved is stale the instant the move lands. Leaving it in would have the next
+        // rescue dodge a ghost — and, worse, stack itself onto the hour that was just freed. The stale
+        // entry is placed where the difference is observable: keep it and the second session is pushed
+        // an hour past the first; drop it and it lands flush behind it.
+        UUID second = UUID.fromString("66666666-0000-0000-0000-00000000000f");
+        givenCommitments(
+            new MovableCommitment(SESSION, at(8), at(9)),
+            new MovableCommitment(second, at(9), at(10)));
+        when(scheduling.retimeWithinDay(any(), any(), any(), eq(UTC))).thenReturn(true);
+        List<OccupiedInterval> walls = List.of(new OccupiedInterval(SESSION, at(12), at(13), false));
+
+        rescuer.rescue(USER, DAY, UTC, at(11), at(22), walls);
+
+        ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(scheduling, org.mockito.Mockito.times(2))
+            .retimeWithinDay(any(), start.capture(), any(), eq(UTC));
+        // The first lands at 11:00 — its own stale 12:00 wall is what it must not collide with once it
+        // has moved — and the second lands at 12:00, on the hour the first one vacated.
+        assertThat(start.getAllValues()).containsExactly(at(11), at(12));
+    }
+
+    @Test
+    @DisplayName("the day's real walls include the commitments' own hours, and the rescue lands past them")
+    void the_rescue_runs_against_the_walls_the_day_was_laid_with() {
+        // The production shape since commitments occupy: every commitment of the day arrives here as a
+        // wall of its own — including the ones about to be rescued, whose windows are behind the run's
+        // lower bound — alongside the blocks this run just accepted. Nothing about that changes where
+        // they land, and this is what says so.
+        UUID second = UUID.fromString("66666666-0000-0000-0000-00000000000f");
+        UUID acceptedBlock = UUID.fromString("77777777-0000-0000-0000-000000000010");
+        givenCommitments(
+            new MovableCommitment(SESSION, at(8), at(9)),
+            new MovableCommitment(second, at(9), at(10)));
+        when(scheduling.retimeWithinDay(any(), any(), any(), eq(UTC))).thenReturn(true);
+        List<OccupiedInterval> walls = List.of(
+            new OccupiedInterval(SESSION, at(8), at(9), false),
+            new OccupiedInterval(second, at(9), at(10), false),
+            new OccupiedInterval(acceptedBlock, at(11), at(12), false));
+
+        List<UUID> moved = rescuer.rescue(USER, DAY, UTC, at(11), at(22), walls);
+
+        ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(scheduling, org.mockito.Mockito.times(2))
+            .retimeWithinDay(any(), start.capture(), any(), eq(UTC));
+        assertThat(start.getAllValues()).containsExactly(at(12), at(13));
+        assertThat(moved).containsExactly(SESSION, second);
+    }
+
+    @Test
+    @DisplayName("a refused move changes nothing: the hour stays free for whoever comes next")
+    void a_refused_move_leaves_the_day_untouched() {
+        // core owns the write and may refuse it (a commitment whose day the move would change). When it
+        // does, no wall may be invented for a move that never happened — the next commitment must still
+        // see that hour as free, or one refusal would silently displace the rest of the day.
+        UUID second = UUID.fromString("66666666-0000-0000-0000-00000000000f");
+        givenCommitments(
+            new MovableCommitment(SESSION, at(8), at(9)),
+            new MovableCommitment(second, at(9), at(10)));
+        when(scheduling.retimeWithinDay(eq(SESSION), any(), any(), eq(UTC))).thenReturn(false);
+        when(scheduling.retimeWithinDay(eq(second), any(), any(), eq(UTC))).thenReturn(true);
+
+        List<UUID> moved = rescuer.rescue(USER, DAY, UTC, at(11), at(22), List.of());
+
+        ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(scheduling).retimeWithinDay(eq(second), start.capture(), any(), eq(UTC));
+        assertThat(start.getValue()).isEqualTo(at(11));
+        assertThat(moved).containsExactly(second);
+    }
+
     private void givenCommitments(MovableCommitment... commitments) {
         when(repository.loadMovableCommitments(eq(USER), any(), any()))
             .thenReturn(List.of(commitments));

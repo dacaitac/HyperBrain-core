@@ -18,16 +18,18 @@ import java.util.UUID;
  *   <li>{@code candidateBlocks} — the run's block set the floor produced (the "arrangement" the LLM
  *       owns: reorder, retime, humanize, or DROP a non-WIG block). Every block's {@code executableId}
  *       is the block's stable id for this run — the closed set the proposal's {@code blockId} must draw
- *       from (anti-hallucination). ACTIVITY executables live here as <b>movable</b> candidates, never as
- *       walls;</li>
+ *       from (anti-hallucination). An {@code ACTIVITY} never appears here: it owns a calendar window of
+ *       its own, so it is not something the day is arranged <em>around</em> — it arrives among the walls
+ *       below;</li>
  *   <li>{@code agendaWalls} — read-only AGENDA windows only: fixed occupied space the LLM plans around
  *       and can never overlap;</li>
- *   <li>{@code occupiedWalls} — the day's <b>real</b> occupancy: the time blocks somebody already owns —
- *       the ones the user created himself, the ones already closed, and the ones this run may no longer
- *       re-time because they have started. Just as fixed as an AGENDA window and for the same reason:
- *       that time is spoken for by someone other than this run. They were once absent from this read
- *       model, and the consequence was exactly what one would expect — the model could not see the
- *       user's own block, so it planned straight over it;</li>
+ *   <li>{@code occupiedWalls} — the day's <b>real</b> occupancy: every window somebody already owns —
+ *       the blocks the user created himself, the ones already closed, the ones this run may no longer
+ *       re-time because they have started, and the activities and study sessions standing on the day.
+ *       Just as fixed as an AGENDA window and for the same reason: that time is spoken for by someone
+ *       other than this run. They were once absent from this read model, and the consequence was
+ *       exactly what one would expect — the model could not see the user's own block, so it planned
+ *       straight over it;</li>
  *   <li>{@code wigExecutableIds} — the WIG blocks (F1 lead measures): a hard floor the LLM can never
  *       DROP nor expel;</li>
  *   <li>{@code frontierStart}/{@code frontierEnd} — the sleep frontier {@code [wake, bedtime]}; no
@@ -40,8 +42,11 @@ import java.util.UUID;
  *       band and is unconfined.</li>
  * </ul>
  *
- * <p>{@code highLoadQuota} and {@code energyCriterion} are soft guidance surfaced to the model (the F6
- * quota is <em>not</em> a hard wall the guard re-imposes — energy shaping is the LLM's authority).
+ * <p>{@code highLoadQuota}, {@code energyCriterion} and {@code sleepSessions} are soft guidance
+ * surfaced to the model (the F6 quota is <em>not</em> a hard wall the guard re-imposes — energy
+ * shaping is the LLM's authority). {@code sleepSessions} is when the user actually slept in the last
+ * day — the night and any naps — so the model can order the day around it: a nap that ended at 13:56
+ * is the reason not to put deep work at 14:00 as if the morning had never been slept through.
  * {@code titles} is <b>untrusted content</b> (iOS/Notion display names): the prompt fences it in a
  * delimited section so it can never be read as instructions (anti prompt-injection).
  *
@@ -55,6 +60,8 @@ import java.util.UUID;
  * @param energyCriterion  the readable energy criterion; never blank
  * @param titles           executable id → display name (untrusted, delimited in the prompt); never null
  * @param bands            block id → the band it may be retimed within; never null, may be partial
+ * @param sleepSessions    when the user slept over the last day (night + naps), chronological; never
+ *                         null, empty when nothing was recorded
  */
 public record AgendaProposalContext(
     List<AgendaBlock> candidateBlocks,
@@ -66,7 +73,8 @@ public record AgendaProposalContext(
     int highLoadQuota,
     String energyCriterion,
     Map<UUID, String> titles,
-    Map<UUID, RetimingBand> bands
+    Map<UUID, RetimingBand> bands,
+    List<SleepSession> sleepSessions
 ) {
 
     public AgendaProposalContext {
@@ -89,6 +97,7 @@ public record AgendaProposalContext(
         wigExecutableIds = wigExecutableIds == null ? Set.of() : Set.copyOf(wigExecutableIds);
         titles = titles == null ? Map.of() : Map.copyOf(titles);
         bands = bands == null ? Map.of() : Map.copyOf(bands);
+        sleepSessions = sleepSessions == null ? List.of() : List.copyOf(sleepSessions);
     }
 
     /**

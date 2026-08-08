@@ -1,8 +1,9 @@
 package com.hyperbrain.planner.application;
 
+import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.model.DeviceSleepSamples;
-import com.hyperbrain.planner.domain.model.ParsedSleepNight;
+import com.hyperbrain.planner.domain.model.ParsedSleepDay;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.model.UserCommand;
@@ -78,16 +79,18 @@ class UserCommandServiceTest {
             new DeviceSleepSamples.Sample("Core", "10/07/2026 at 10:00 PM", "11/07/2026 at 6:30 AM")));
     }
 
-    private static SleepStageSample parsedSample() {
-        return new SleepStageSample(
+    /** What the parser hands back: the sleep day's sessions already summed into one aggregate. */
+    private static AggregatedSleep parsedSleep() {
+        return AggregatedSleep.ofSingleSession(new SleepStageSample(
             OffsetDateTime.of(2026, 7, 10, 22, 0, 0, 0, ZoneOffset.UTC),
             OffsetDateTime.of(2026, 7, 11, 6, 30, 0, 0, ZoneOffset.UTC),
-            0, 17280, 5184, 6336, 0, 600);
+            0, 17280, 5184, 6336, 0, 600));
     }
 
-    private static DeviceSleepRecord assembledRecord(SleepStageSample sample, OffsetDateTime collectedAt) {
+    private static DeviceSleepRecord assembledRecord(AggregatedSleep sleep, OffsetDateTime collectedAt) {
         return new DeviceSleepRecord(
-            sample.start(), sample.end(), 480, 100, "{\"low_confidence\":false}", collectedAt, null);
+            sleep.mainSession().start(), sleep.mainSession().end(), 480, 100,
+            "{\"low_confidence\":false}", collectedAt, null);
     }
 
     @Test
@@ -164,19 +167,19 @@ class UserCommandServiceTest {
     }
 
     @Test
-    @DisplayName("a live REPLAN_AGENDA carrying a sleep dump parses it, records the night, then replans")
+    @DisplayName("a live REPLAN_AGENDA carrying a sleep dump parses it, records the sleep, then replans")
     void replan_with_sleep_records_device_record_then_replans() {
         // Given a live replan enriched with a raw HealthKit dump
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
         DeviceSleepSamples dump = sleepDump();
-        SleepStageSample sample = parsedSample();
-        DeviceSleepRecord record = assembledRecord(sample, COLLECTED_AT);
+        AggregatedSleep sleep = parsedSleep();
+        DeviceSleepRecord record = assembledRecord(sleep, COLLECTED_AT);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA))
-            .thenReturn(new ParsedSleepNight(sample, COLLECTED_AT));
-        when(sleepRecordAssembler.assemble(sample, COLLECTED_AT, null)).thenReturn(record);
+        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
+            .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
+        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, null)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -185,34 +188,37 @@ class UserCommandServiceTest {
         // Then the dump is parsed, the device record (no raw origin) written, then the replan runs
         InOrder inOrder = inOrder(
             sleepSampleSessionParser, sleepRecordAssembler, sleepScoreStore, agendaGenerationService);
-        inOrder.verify(sleepSampleSessionParser).parse(dump, BOGOTA);
-        inOrder.verify(sleepRecordAssembler).assemble(sample, COLLECTED_AT, null);
+        inOrder.verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
+        inOrder.verify(sleepRecordAssembler).assemble(sleep, COLLECTED_AT, null);
         inOrder.verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
         inOrder.verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
         verifyNoInteractions(agendaJobEmitter);
     }
 
     @Test
-    @DisplayName("when the dump omits its capture date the record's collected_at falls back to occurred_at")
-    void sleep_collected_at_falls_back_to_occurred_at() {
+    @DisplayName("the dump is anchored on the command's occurred_at, which bounds the sleep period")
+    void sleep_parse_is_anchored_on_occurred_at() {
+        // The anchor is not a convenience: it is what decides WHICH sessions belong to the day being
+        // recorded (and stands in as collected_at when the dump carries no capture date). A service
+        // that anchored on its own clock would score a stale dump against the wrong period.
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
         DeviceSleepSamples dump = sleepDump();
-        SleepStageSample sample = parsedSample();
-        DeviceSleepRecord record = assembledRecord(sample, occurredAt);
+        AggregatedSleep sleep = parsedSleep();
+        DeviceSleepRecord record = assembledRecord(sleep, occurredAt);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        // Parser could not read the capture date → null collectedAt
-        when(sleepSampleSessionParser.parse(dump, BOGOTA))
-            .thenReturn(new ParsedSleepNight(sample, null));
-        when(sleepRecordAssembler.assemble(sample, occurredAt, null)).thenReturn(record);
+        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
+            .thenReturn(new ParsedSleepDay(sleep, occurredAt));
+        when(sleepRecordAssembler.assemble(sleep, occurredAt, null)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
 
-        // Then the command's occurred_at is used as the collection instant
-        verify(sleepRecordAssembler).assemble(sample, occurredAt, null);
+        // Then the parse was anchored there, and the instant it resolved is the collection instant
+        verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
+        verify(sleepRecordAssembler).assemble(sleep, occurredAt, null);
         verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
     }
 
@@ -222,14 +228,14 @@ class UserCommandServiceTest {
         service = newService(true);
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
         DeviceSleepSamples dump = sleepDump();
-        SleepStageSample sample = parsedSample();
-        DeviceSleepRecord record = assembledRecord(sample, COLLECTED_AT);
+        AggregatedSleep sleep = parsedSleep();
+        DeviceSleepRecord record = assembledRecord(sleep, COLLECTED_AT);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA))
-            .thenReturn(new ParsedSleepNight(sample, COLLECTED_AT));
-        when(sleepRecordAssembler.assemble(sample, COLLECTED_AT, null)).thenReturn(record);
+        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
+            .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
+        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, null)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -249,14 +255,14 @@ class UserCommandServiceTest {
         // Given a replan 3 h older than the pinned now (bound = 2 h) that still carries a dump
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 0, 0, 0, 0, ZoneOffset.UTC);
         DeviceSleepSamples dump = sleepDump();
-        SleepStageSample sample = parsedSample();
-        DeviceSleepRecord record = assembledRecord(sample, COLLECTED_AT);
+        AggregatedSleep sleep = parsedSleep();
+        DeviceSleepRecord record = assembledRecord(sleep, COLLECTED_AT);
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA))
-            .thenReturn(new ParsedSleepNight(sample, COLLECTED_AT));
-        when(sleepRecordAssembler.assemble(sample, COLLECTED_AT, null)).thenReturn(record);
+        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
+            .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
+        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, null)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -270,13 +276,13 @@ class UserCommandServiceTest {
     @Test
     @DisplayName("an unusable sleep dump is skipped without failing the replan")
     void unusable_sleep_is_skipped_and_replan_still_runs() {
-        // Given the parser rejects the dump (no scorable night)
+        // Given the parser rejects the dump (no scorable sleep)
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
         DeviceSleepSamples dump = sleepDump();
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA))
+        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
             .thenThrow(new IllegalArgumentException("no parseable sleep samples in the dump"));
 
         // When

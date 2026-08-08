@@ -1,11 +1,14 @@
 package com.hyperbrain.planner.domain.service;
 
+import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepSamples;
-import com.hyperbrain.planner.domain.model.ParsedSleepNight;
+import com.hyperbrain.planner.domain.model.ParsedSleepDay;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -22,39 +25,52 @@ import java.util.TreeSet;
 
 /**
  * Distils a raw {@link DeviceSleepSamples} dump (HealthKit stages forwarded by the iOS Shortcut) into
- * the single scorable {@link ParsedSleepNight} for the most recent night. Pure domain: the only input
- * beyond the dump is the user's timezone, which the provider's local date strings omit.
+ * the scorable sleep of the current sleep day: the night <em>plus every nap that followed it</em>.
+ * Pure domain — beyond the dump it only needs the user's timezone (the provider's local date strings
+ * omit it) and the reference instant to anchor the period on.
  *
- * <p>The pipeline, per the sanctioned heuristic (Daniel, 2026-07-24):
+ * <p>The pipeline:
  * <ol>
  *   <li><b>Parse</b> each sample's local {@code start}/{@code end} in the user's zone. Apple emits the
  *       hour in {@code d/M/yyyy 'at' h:mm a} form with a U+202F narrow no-break space before AM/PM,
  *       which is normalized to a plain space first. An unparseable sample or unknown stage is skipped
  *       (tolerant reader), never fatal.</li>
  *   <li><b>Cluster</b> the samples into sessions, splitting whenever a sample starts more than
- *       {@link #DEFAULT_SESSION_GAP} after the running end of the current session, and keep the most
- *       recent session (the last night).</li>
- *   <li><b>Resolve overlaps</b> across the whole session, not just within a stage. Apple Watch revises
+ *       {@link #DEFAULT_SESSION_GAP} after the running end of the current session.</li>
+ *   <li><b>Keep the sessions of the relevant period</b> — see {@link #periodStart}. Every one of them,
+ *       not just the last: keeping only the most recent session meant an afternoon nap displaced the
+ *       night whole, and the day was scored on the nap alone (production, 09:20–13:56, score 13).</li>
+ *   <li><b>Resolve overlaps</b> inside each session, not just within a stage. Apple Watch revises
  *       stages, so intervals overlap both within and <em>across</em> stages (Core/Deep/REM tracks pile
  *       up). Total sleep time is the union of all asleep intervals on a single timeline — which bounds
  *       {@code TST ≤ TIB} — and each instant is then attributed to a single stage by a "deepest wins"
  *       precedence (Deep &gt; REM &gt; Core &gt; Unspecified), so the per-stage seconds sum exactly to
  *       TST (no double-counting). Awake (WASO) and In Bed are the unions of their own intervals.</li>
- *   <li><b>Window</b> from the session's earliest start to its latest end (the calculator's time-in-bed
- *       baseline).</li>
+ *   <li><b>Sum</b> the sessions into one {@link AggregatedSleep} (Daniel, 2026-08-07): durations add
+ *       up, the longest session keeps the row's real hours, and every session survives as a
+ *       {@link SleepSession} so the day knows <em>when</em> he slept, not only how much.</li>
  * </ol>
  *
- * <p>Throws {@link IllegalArgumentException} when no usable night can be built (no parseable samples,
- * or a degenerate zero-length window); the caller logs it and proceeds with the replan (the sleep is
- * enrichment, not the primary action).
+ * <p>Throws {@link IllegalArgumentException} when no usable sleep can be built (no parseable samples,
+ * nothing inside the relevant period, or a degenerate zero-length window); the caller logs it and
+ * proceeds with the replan (the sleep is enrichment, not the primary action).
  */
 public class SleepSampleSessionParser {
 
     /**
      * A gap larger than this between the running session end and the next sample's start starts a new
-     * session. Three hours separates distinct nights while tolerating long mid-night awake stretches.
+     * session. Three hours separates distinct sleeps while tolerating long mid-night awake stretches.
      */
     public static final Duration DEFAULT_SESSION_GAP = Duration.ofHours(3);
+
+    /**
+     * The hour at which a sleep day opens: nobody starts the night before this, so a period anchored
+     * on it reaches back over the night without reaching into the previous day's waking hours.
+     */
+    private static final LocalTime SLEEP_DAY_OPENS_AT = LocalTime.of(18, 0);
+
+    /** The period never reaches further back than this, so yesterday's naps stay on yesterday's row. */
+    private static final Duration MAX_LOOKBACK = Duration.ofHours(24);
 
     private static final DateTimeFormatter LOCAL_FORMAT =
         DateTimeFormatter.ofPattern("d/M/yyyy 'at' h:mm a", Locale.ENGLISH);
@@ -81,16 +97,18 @@ public class SleepSampleSessionParser {
     }
 
     /**
-     * Parses the most recent night out of the dump.
+     * Distils the dump into the sleep of the current sleep day.
      *
-     * @param dump the raw sleep-stage dump; never null
-     * @param zone the user's timezone, applied to the provider's zone-less local strings; never null
-     * @return the aggregated night and its collection instant
-     * @throws IllegalArgumentException when no scorable night can be built from the dump
+     * @param dump      the raw sleep-stage dump; never null
+     * @param zone      the user's timezone, applied to the provider's zone-less local strings; never null
+     * @param reference the instant to anchor the relevant period on when the dump carries no usable
+     *                  capture date (the command's {@code occurred_at}); never null
+     * @return the aggregated sleep and its collection instant
+     * @throws IllegalArgumentException when no scorable sleep can be built from the dump
      */
-    public ParsedSleepNight parse(DeviceSleepSamples dump, ZoneId zone) {
-        if (dump == null || zone == null) {
-            throw new IllegalArgumentException("sleep dump and zone are required");
+    public ParsedSleepDay parse(DeviceSleepSamples dump, ZoneId zone, OffsetDateTime reference) {
+        if (dump == null || zone == null || reference == null) {
+            throw new IllegalArgumentException("sleep dump, zone and reference instant are required");
         }
         List<StageInterval> parsed = new ArrayList<>();
         for (DeviceSleepSamples.Sample sample : dump.samples()) {
@@ -109,18 +127,52 @@ public class SleepSampleSessionParser {
             throw new IllegalArgumentException("no parseable sleep samples in the dump");
         }
 
-        List<StageInterval> session = mostRecentSession(parsed);
-        SleepStageSample sample = aggregate(session);
-        return new ParsedSleepNight(sample, parseInstant(dump.capturedAt(), zone));
+        OffsetDateTime capturedAt = parseInstant(dump.capturedAt(), zone);
+        OffsetDateTime anchor = capturedAt != null ? capturedAt : reference;
+        List<SleepStageSample> samples = sessionsWithin(parsed, periodStart(anchor, zone));
+        if (samples.isEmpty()) {
+            throw new IllegalArgumentException(
+                "no sleep session in the relevant period ending at " + anchor);
+        }
+        return new ParsedSleepDay(sum(samples), anchor);
     }
 
-    /** Splits the samples into sessions by the gap threshold and returns the latest one. */
-    private List<StageInterval> mostRecentSession(List<StageInterval> intervals) {
+    /**
+     * The instant the relevant period opens, closing at the anchor: the later of
+     * <ul>
+     *   <li><b>{@link #SLEEP_DAY_OPENS_AT} on the day before the anchor's local day</b> — the sleep day
+     *       reaches back over the night that precedes the anchor, and no further into that day's waking
+     *       hours; and</li>
+     *   <li><b>the anchor minus {@link #MAX_LOOKBACK}</b> — an evening anchor must not reach 29 h back
+     *       and swallow the previous evening's nap, which belongs to the previous sleep day's row.</li>
+     * </ul>
+     * Each bound is the tighter one in its own half of the day, so the later of the two is the period
+     * that holds one night plus the naps that followed it, and never a second day's worth of sleep.
+     */
+    private static OffsetDateTime periodStart(OffsetDateTime anchor, ZoneId zone) {
+        OffsetDateTime previousEvening = anchor.atZoneSameInstant(zone).toLocalDate()
+            .minusDays(1)
+            .atTime(SLEEP_DAY_OPENS_AT)
+            .atZone(zone)
+            .toOffsetDateTime();
+        OffsetDateTime maxLookback = anchor.minus(MAX_LOOKBACK);
+        return previousEvening.isAfter(maxLookback) ? previousEvening : maxLookback;
+    }
+
+    /**
+     * Splits the samples into sessions by the gap threshold and aggregates those that reach into the
+     * period, chronologically. A session is kept whole when it <em>ends</em> after the period opens, so
+     * a night that began just before the boundary is summed entire rather than truncated. There is no
+     * upper bound to test: a dump only holds sleep that already happened.
+     */
+    private List<SleepStageSample> sessionsWithin(List<StageInterval> intervals, OffsetDateTime periodStart) {
         intervals.sort(Comparator.comparing(StageInterval::start));
+        List<SleepStageSample> kept = new ArrayList<>();
         List<StageInterval> current = new ArrayList<>();
         OffsetDateTime runningEnd = null;
         for (StageInterval interval : intervals) {
             if (runningEnd != null && Duration.between(runningEnd, interval.start()).compareTo(sessionGap) > 0) {
+                keepIfWithin(kept, current, runningEnd, periodStart);
                 current = new ArrayList<>();
                 runningEnd = null;
             }
@@ -129,14 +181,61 @@ public class SleepSampleSessionParser {
                 runningEnd = interval.end();
             }
         }
-        return current;
+        keepIfWithin(kept, current, runningEnd, periodStart);
+        return kept;
+    }
+
+    /** Aggregates a closed session into the kept list when it reaches into the period. */
+    private static void keepIfWithin(List<SleepStageSample> kept, List<StageInterval> session,
+                                     OffsetDateTime sessionEnd, OffsetDateTime periodStart) {
+        if (session.isEmpty() || !sessionEnd.isAfter(periodStart)) {
+            return;
+        }
+        SleepStageSample sample = aggregate(session);
+        if (sample != null) {
+            kept.add(sample);
+        }
     }
 
     /**
-     * Aggregates the session: asleep stages are overlap-resolved (deepest wins) so they sum to the
-     * asleep-union TST; Awake and In Bed are plain unions; the window spans all samples.
+     * Sums the period's sessions into the aggregate the row is built from: stage durations add up, the
+     * scorable window spans the summed time in bed (never the awake gaps between sessions — see
+     * {@link AggregatedSleep}), and the longest session keeps the row's real hours.
      */
-    private SleepStageSample aggregate(List<StageInterval> session) {
+    private static AggregatedSleep sum(List<SleepStageSample> samples) {
+        long inBed = 0;
+        long core = 0;
+        long deep = 0;
+        long rem = 0;
+        long unspecified = 0;
+        long awake = 0;
+        long timeInBed = 0;
+        List<SleepSession> sessions = new ArrayList<>(samples.size());
+        for (SleepStageSample sample : samples) {
+            inBed += sample.inBedSeconds();
+            core += sample.coreSeconds();
+            deep += sample.deepSeconds();
+            rem += sample.remSeconds();
+            unspecified += sample.unspecifiedSeconds();
+            awake += sample.awakeSeconds();
+            timeInBed += Duration.between(sample.start(), sample.end()).toSeconds();
+            sessions.add(new SleepSession(sample.start(), sample.end(), sample.totalSleepSeconds()));
+        }
+        SleepSession main = AggregatedSleep.mainOf(sessions);
+        SleepStageSample totals = new SleepStageSample(
+            main.start(), main.start().plusSeconds(timeInBed),
+            inBed, core, deep, rem, unspecified, awake);
+        return new AggregatedSleep(totals, main, sessions);
+    }
+
+    /**
+     * Aggregates one session: asleep stages are overlap-resolved (deepest wins) so they sum to the
+     * asleep-union TST; Awake and In Bed are plain unions; the window spans all its samples.
+     *
+     * @return the session's sample, or null when its window is degenerate (zero-length) — such a
+     *         session carries no time and is dropped rather than failing the whole dump
+     */
+    private static SleepStageSample aggregate(List<StageInterval> session) {
         List<StageInterval> asleep = new ArrayList<>();
         List<StageInterval> awake = new ArrayList<>();
         List<StageInterval> inBed = new ArrayList<>();
@@ -154,6 +253,9 @@ public class SleepSampleSessionParser {
             if (windowEnd == null || interval.end().isAfter(windowEnd)) {
                 windowEnd = interval.end();
             }
+        }
+        if (!windowEnd.isAfter(windowStart)) {
+            return null;
         }
         Map<StageCategory, Long> asleepSeconds = resolveAsleepSeconds(asleep);
         return new SleepStageSample(

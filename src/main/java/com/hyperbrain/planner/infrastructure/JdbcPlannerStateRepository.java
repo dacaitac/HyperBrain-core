@@ -1,5 +1,8 @@
 package com.hyperbrain.planner.infrastructure;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.planner.domain.model.ExecutableType;
 import com.hyperbrain.planner.domain.model.LocalTimeOfDay;
 import com.hyperbrain.planner.domain.model.MciWig;
@@ -12,6 +15,7 @@ import com.hyperbrain.planner.domain.model.PlannerBlockRow;
 import com.hyperbrain.planner.domain.model.PlannerConstraints;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
 import org.slf4j.Logger;
@@ -19,11 +23,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -121,6 +128,36 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         ORDER BY (s.end_time IS NOT NULL) DESC, s.collected_at DESC
         LIMIT 1
         """;
+
+    /**
+     * The rows whose sleep can still be relevant to the day being planned: those that ended within the
+     * lookback. The sessions themselves live in {@code stages -> 'sessions'} (night + naps) because the
+     * row has only two instant columns and they hold the main session; a row written before that array
+     * existed — or by a payload of a single session — falls back to its own hours.
+     */
+    private static final String RECENT_SLEEP_SESSIONS_SQL = """
+        SELECT start_time, end_time, duration_minutes, stages -> 'sessions' AS sessions
+        FROM tel_sleep_record
+        WHERE user_id = ?
+          AND end_time IS NOT NULL
+          AND end_time >= ? - make_interval(hours => ?)
+        ORDER BY end_time
+        """;
+
+    /**
+     * How far back a session may end and still speak about the day being planned: one day, which holds
+     * last night and every nap since.
+     */
+    private static final int SESSION_LOOKBACK_HOURS = 24;
+
+    /**
+     * How far back a <em>row</em> is read. Wider than the session lookback because a row is stamped
+     * with its main session's hours while its naps can end many hours later: a night that ended just
+     * outside the session window may still carry an afternoon nap that falls inside it.
+     */
+    private static final int ROW_LOOKBACK_HOURS = 48;
+
+    private static final long SECONDS_PER_MINUTE = 60L;
 
     /**
      * The day's schedulable executables ranked by the persisted {@code priority_score} (highest
@@ -366,6 +403,48 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
         """;
 
     /**
+     * The day's commitments that hold time: the {@code ACTIVITY} and {@code LEARNING_SESSION} windows
+     * overlapping the planning day. An activity is a calendar event, so it occupies by definition.
+     *
+     * <p><b>Why this read had to exist.</b> The middle tier of the rigidity hierarchy (ADR-040 D9) says a
+     * commitment moves in hour, never in day — and <em>movable</em> was silently read as <em>invisible</em>.
+     * A commitment is never a window member (the generator refuses it as {@code NOT_CONTAINABLE}: it
+     * already is a block of time in itself), and until now it was not a wall either, so it belonged to
+     * neither list and the day was laid straight over it. Production said it plainly: «Desayunar»
+     * standing at 10:30–11:30 with «Descanso» at 10:30 and «Oficio» at 11:00 laid on top of it.
+     *
+     * <p><b>What a terminal state means here, and why it differs from a block.</b> A block walls in every
+     * state because a closed block is time that has already gone by. A commitment is the user's own work
+     * and he can settle it ahead of its hour: {@code DONE} or {@code FAILED} therefore <b>releases</b> the
+     * window — an activity already done does not occupy the future. Everything else occupies, and the
+     * predicate is written as an exclusion rather than a whitelist for the same reason
+     * {@link #OCCUPIED_BLOCKS_SQL} is: a row ingested from Notion or the calendar arrives in whatever
+     * state its origin gives it, and a whitelist is exactly what once made those rows invisible. For a
+     * window with an owner, "taken" is the safe default.
+     *
+     * <p><b>The status set is deliberately wider than {@link #MOVABLE_COMMITMENTS_SQL}'s</b>, and the two
+     * must not be merged: what occupies the day is everything not settled, while what the planner may
+     * pick up and re-time is only the open work (ADR-040 D9 keeps that authority narrow). A commitment
+     * that occupies without being rescuable simply stays where it is, which is the conservative outcome.
+     *
+     * <p>{@code system_generated} rows stay out for the same reason a {@code FOCUS} block does: they are
+     * retrospective accounting of work, not somebody's reservation of time.
+     */
+    private static final String OCCUPIED_COMMITMENTS_SQL = """
+        SELECT e.id, e.start_time, e.end_time
+        FROM core_executable e
+        WHERE e.user_id = ?
+          AND e.type IN ('ACTIVITY', 'LEARNING_SESSION')
+          AND e.status NOT IN ('DONE', 'FAILED')
+          AND e.system_generated = false
+          AND e.start_time IS NOT NULL
+          AND e.end_time   IS NOT NULL
+          AND e.end_time   > e.start_time
+          AND e.start_time < ?
+          AND e.end_time   > ?
+        """;
+
+    /**
      * The day's movable commitments (ADR-040 D9): open activities and study sessions whose window sits
      * on the target day. Both bounds are required — a row without a real window is not something whose
      * hour can be moved.
@@ -486,10 +565,13 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
 
     private final JdbcTemplate jdbcTemplate;
     private final PlannerConstraints constraints;
+    private final ObjectMapper objectMapper;
 
-    JdbcPlannerStateRepository(JdbcTemplate jdbcTemplate, PlannerConstraints constraints) {
+    JdbcPlannerStateRepository(JdbcTemplate jdbcTemplate, PlannerConstraints constraints,
+                               ObjectMapper objectMapper) {
         this.jdbcTemplate = jdbcTemplate;
         this.constraints = constraints;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -518,6 +600,83 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 (rs, rowNum) -> rs.getObject("sleep_score", Integer.class),
                 userId, now, constraints.sleepFreshnessHours())
             .stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
+    }
+
+    @Override
+    public List<SleepSession> loadRecentSleepSessions(UUID userId, OffsetDateTime now) {
+        OffsetDateTime earliestSessionEnd = now.minusHours(SESSION_LOOKBACK_HOURS);
+        List<SleepSession> sessions = new ArrayList<>();
+        jdbcTemplate.query(RECENT_SLEEP_SESSIONS_SQL, rs -> {
+            sessions.addAll(readSessions(
+                rs.getString("sessions"),
+                rs.getObject("start_time", OffsetDateTime.class),
+                rs.getObject("end_time", OffsetDateTime.class),
+                rs.getObject("duration_minutes", Integer.class)));
+        }, userId, now, ROW_LOOKBACK_HOURS);
+        return sessions.stream()
+            .filter(session -> session.end().isAfter(earliestSessionEnd))
+            .sorted(Comparator.comparing(SleepSession::start))
+            .toList();
+    }
+
+    /**
+     * Reads one row's sessions out of its {@code stages -> 'sessions'} array, falling back to the row's
+     * own hours when the array is absent or unusable — a row written before the array existed still
+     * knows one thing for certain: the main session it stores in its two instant columns.
+     */
+    private List<SleepSession> readSessions(String rawSessions, OffsetDateTime rowStart,
+                                            OffsetDateTime rowEnd, Integer durationMinutes) {
+        List<SleepSession> sessions = new ArrayList<>();
+        if (rawSessions != null) {
+            try {
+                for (JsonNode node : objectMapper.readTree(rawSessions)) {
+                    SleepSession session = readSession(node);
+                    if (session != null) {
+                        sessions.add(session);
+                    }
+                }
+            } catch (JsonProcessingException ex) {
+                log.warn("Unreadable sleep sessions on a record ending {}: {}", rowEnd, ex.getMessage());
+            }
+        }
+        if (!sessions.isEmpty()) {
+            return sessions;
+        }
+        SleepSession fallback = session(rowStart, rowEnd,
+            durationMinutes == null ? 0L : durationMinutes * SECONDS_PER_MINUTE);
+        return fallback == null ? List.of() : List.of(fallback);
+    }
+
+    /** One session node, or null when it does not describe a usable interval (tolerant reader). */
+    private static SleepSession readSession(JsonNode node) {
+        return session(
+            instantOrNull(node.path("start").asText(null)),
+            instantOrNull(node.path("end").asText(null)),
+            node.path("asleep_seconds").asLong());
+    }
+
+    /**
+     * Builds a session defensively: an unusable interval yields null rather than an exception, and the
+     * asleep seconds are clamped to the window so a summed duration read from an older row's
+     * {@code duration_minutes} can never claim more sleep than the window holds.
+     */
+    private static SleepSession session(OffsetDateTime start, OffsetDateTime end, long asleepSeconds) {
+        if (start == null || end == null || !end.isAfter(start)) {
+            return null;
+        }
+        long windowSeconds = Duration.between(start, end).toSeconds();
+        return new SleepSession(start, end, Math.min(Math.max(asleepSeconds, 0L), windowSeconds));
+    }
+
+    private static OffsetDateTime instantOrNull(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(raw);
+        } catch (DateTimeParseException ex) {
+            return null;
+        }
     }
 
     @Override
@@ -606,6 +765,17 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                 rs.getObject("start_time", OffsetDateTime.class),
                 rs.getObject("end_time", OffsetDateTime.class),
                 true),
+            userId, dayEnd, dayStart));
+
+        // An activity or a study session is a calendar event of the user's, not read-only agenda: he may
+        // still be sent its hour back by the rescue (ADR-040 D9), so it is not flagged readOnlyAgenda.
+        // While it stands where it stands, it occupies.
+        intervals.addAll(jdbcTemplate.query(OCCUPIED_COMMITMENTS_SQL,
+            (rs, rowNum) -> new OccupiedInterval(
+                rs.getObject("id", UUID.class),
+                rs.getObject("start_time", OffsetDateTime.class),
+                rs.getObject("end_time", OffsetDateTime.class),
+                false),
             userId, dayEnd, dayStart));
         return intervals;
     }

@@ -1,15 +1,16 @@
 package com.hyperbrain.planner.domain.port.out;
 
+import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
-import com.hyperbrain.planner.domain.model.SleepStageSample;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * Assembles a scored {@link DeviceSleepRecord} from a raw {@link SleepStageSample} (ADR-016 v1.4.0):
- * scores the night with the pure {@code SleepScoreCalculator}, derives the duration, and serializes
- * the stage breakdown + sub-scores for {@code tel_sleep_record.stages}.
+ * Assembles a scored {@link DeviceSleepRecord} from an {@link AggregatedSleep} (ADR-016 v1.4.0):
+ * scores the summed totals with the pure {@code SleepScoreCalculator}, derives the duration, and
+ * serializes the stage breakdown, the sub-scores and the sessions for
+ * {@code tel_sleep_record.stages}.
  *
  * <p>This is the single seam shared by both device-sleep origins so the two never drift:
  * <ul>
@@ -26,14 +27,16 @@ import java.util.UUID;
 public interface SleepRecordAssembler {
 
     /**
-     * Scores the sample and builds the persistable device record.
+     * Scores the aggregate and builds the persistable device record. The row's hours come from the
+     * aggregate's main session (its real bedtime and wake), never from the totals' duration-carrying
+     * window — that is what keeps a nap out of the sleep frontier's wake median.
      *
-     * @param sample         the night's stage durations and window; never null
+     * @param sleep          the sleep day's summed totals, main session and sessions; never null
      * @param collectedAt    when the record was captured/reported; recorded as {@code collected_at}
      * @param contextEventId the raw {@code context_event} row's id, or {@code null} for a record with
      *                       no raw origin (user-command sleep bridge)
      * @return the scored device record ready for {@code SleepScoreStore#upsertDeviceSleepRecord}
-     * @throws IllegalArgumentException when the sample is not scorable (no asleep time)
+     * @throws IllegalArgumentException when the aggregate is not scorable (no asleep time)
      */
-    DeviceSleepRecord assemble(SleepStageSample sample, OffsetDateTime collectedAt, UUID contextEventId);
+    DeviceSleepRecord assemble(AggregatedSleep sleep, OffsetDateTime collectedAt, UUID contextEventId);
 }

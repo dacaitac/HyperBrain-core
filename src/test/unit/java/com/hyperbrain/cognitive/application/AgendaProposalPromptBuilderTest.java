@@ -8,6 +8,7 @@ import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.RetimingBand;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -53,7 +54,7 @@ class AgendaProposalPromptBuilderTest {
             UUID.randomUUID(), WAKE.plusMinutes(60), WAKE.plusMinutes(120), false);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of());
+            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(), List.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -65,6 +66,70 @@ class AgendaProposalPromptBuilderTest {
     }
 
     @Test
+    @DisplayName("the sleep the user actually had reaches the model as windows, not just as a score")
+    void user_carries_the_slept_windows() {
+        // The score says how rested the day is; only the windows say WHEN, and a nap that ended at 13:56
+        // is the difference between proposing deep work at 14:00 to someone fresh and to someone who has
+        // just got up. The naps are the half that no single number carries.
+        SleepSession night = new SleepSession(
+            OffsetDateTime.of(2026, 7, 9, 23, 30, 0, 0, ZoneOffset.UTC),
+            OffsetDateTime.of(2026, 7, 10, 5, 30, 0, 0, ZoneOffset.UTC), 20400);
+        SleepSession nap = new SleepSession(
+            OffsetDateTime.of(2026, 7, 10, 9, 20, 0, 0, ZoneOffset.UTC),
+            OffsetDateTime.of(2026, 7, 10, 13, 56, 0, 0, ZoneOffset.UTC), 15000);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(),
+            List.of(night, nap));
+
+        LlmPrompt prompt = builder.build(context);
+
+        assertThat(prompt.user())
+            .contains("slept_windows")
+            .contains(night.start().toString())
+            .contains(nap.end().toString())
+            .contains("\"asleep_minutes\" : 250");
+        assertThat(prompt.system()).contains("slept_windows");
+    }
+
+    @Test
+    @DisplayName("the windows keep the order they happened in, and a nap is never dressed up as a wall")
+    void the_slept_windows_are_context_and_not_occupancy() {
+        // Two ways this could go wrong quietly: rendering them out of order (the model reads the day as
+        // a sequence) and letting them leak into the wall lists, where they would amputate the whole
+        // afternoon. The nap here is deliberately given the same geometry a wall would have.
+        SleepSession night = new SleepSession(
+            OffsetDateTime.of(2026, 7, 9, 23, 30, 0, 0, ZoneOffset.UTC),
+            OffsetDateTime.of(2026, 7, 10, 5, 30, 0, 0, ZoneOffset.UTC), 20400);
+        SleepSession nap = new SleepSession(
+            OffsetDateTime.of(2026, 7, 10, 9, 20, 0, 0, ZoneOffset.UTC),
+            OffsetDateTime.of(2026, 7, 10, 13, 56, 0, 0, ZoneOffset.UTC), 90);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(),
+            List.of(night, nap));
+
+        String user = builder.build(context).user();
+
+        assertThat(user.indexOf(night.start().toString()))
+            .isLessThan(user.indexOf(nap.start().toString()));
+        // A minute and a half of sleep is a minute, floored — never rounded up into a claim.
+        assertThat(user).contains("\"asleep_minutes\" : 1");
+        // Both wall lists stay empty: the sleep is guidance, and the guard re-imposes nothing from it.
+        assertThat(user).contains("\"agenda_walls\" : [ ]").contains("\"occupied_blocks\" : [ ]");
+    }
+
+    @Test
+    @DisplayName("a day with no recorded sleep says nothing, rather than saying he did not sleep")
+    void a_day_without_recorded_sleep_carries_no_windows() {
+        // An empty array is a claim — «he slept nothing» — and a much louder one than «no device
+        // reported anything». Silence is the honest rendering of a missing signal.
+        LlmPrompt prompt = builder.build(context("Write the report"));
+
+        assertThat(prompt.user()).doesNotContain("slept_windows");
+    }
+
+    @Test
     @DisplayName("each block's band reaches the model as geometry and as a stated rule")
     void user_carries_the_retiming_band() {
         // Same doctrine as the walls: state the rule the guard will judge by, and never trust it.
@@ -72,7 +137,7 @@ class AgendaProposalPromptBuilderTest {
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE.plusHours(12), WAKE.plusHours(13), false, false, "r")),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"),
-            Map.of(A, household));
+            Map.of(A, household), List.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -101,7 +166,7 @@ class AgendaProposalPromptBuilderTest {
             List.of(new AgendaBlock(A, WAKE.plusHours(12), WAKE.plusHours(13), false, false, "r"),
                 new AgendaBlock(B, WAKE, WAKE.plusMinutes(60), false, false, "r")),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL",
-            Map.of(A, "Household", B, "Loose"), Map.of(A, household));
+            Map.of(A, "Household", B, "Loose"), Map.of(A, household), List.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -177,7 +242,7 @@ class AgendaProposalPromptBuilderTest {
             .contains("cognitive load")
             .contains("PHYSICAL TRAINING")
             .contains("recovery")
-            .contains("ACTIVITY blocks as anchors")
+            .contains("as anchors")
             .contains("never as separate agents, never as separate calls");
     }
 
@@ -219,6 +284,6 @@ class AgendaProposalPromptBuilderTest {
     private static AgendaProposalContext context(String title) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title), Map.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title), Map.of(), List.of());
     }
 }

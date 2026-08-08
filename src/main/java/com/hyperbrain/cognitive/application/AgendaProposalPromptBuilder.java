@@ -11,7 +11,10 @@ import com.hyperbrain.planner.domain.model.AgendaBlock;
 import com.hyperbrain.planner.domain.model.AgendaProposalContext;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
 import com.hyperbrain.planner.domain.model.RetimingBand;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 /**
  * Builds the {@link LlmPrompt} for the agenda proposal (HU-01c H3) as a pure function of the day's read
@@ -46,6 +49,8 @@ public class AgendaProposalPromptBuilder {
     static final String UNTRUSTED_OPEN = "<<<UNTRUSTED_TITLES";
     static final String UNTRUSTED_CLOSE = "UNTRUSTED_TITLES>>>";
 
+    private static final long SECONDS_PER_MINUTE = 60L;
+
     private static final String INTRO = """
         You are HyperBrain's day-planning coach. You are given a set of candidate time blocks the \
         deterministic planner already sized for one day. Each block's start time is the user's TENTATIVE \
@@ -72,10 +77,16 @@ public class AgendaProposalPromptBuilder {
         2. NEUROSCIENCE (ADR-016): respect the day's energy criterion and F3/F6 high-load guidance, \
         account for the user's chronotype (their actual wake/bedtime frontier, not an assumed one), and \
         avoid stacking cognitive load — space demanding (high_load) blocks rather than clustering them \
-        back-to-back.
+        back-to-back. Read "slept_windows" — WHEN he actually slept over the last day, night and naps \
+        alike — and ORDER the day around it: the hours right after a long sleep are alert ones worth \
+        spending on demanding work, the hours of a long stretch awake before it are not, and a nap that \
+        ended in the afternoon means the afternoon starts fresh while the morning it swallowed does \
+        not. This is context for your judgement, not a rule: it shapes the ORDER you propose, it never \
+        forbids a placement.
         3. PHYSICAL TRAINING: protect recovery — do not schedule demanding cognitive work immediately \
-        around intense physical effort — and use existing ACTIVITY blocks as anchors: group adjacent, \
-        lighter work around them instead of treating them as arbitrary interruptions.""";
+        around intense physical effort — and use the listed "occupied_blocks" (the user's own \
+        commitments: meals, training, study sessions) as anchors: group adjacent, lighter work around \
+        them instead of treating them as arbitrary interruptions.""";
 
     private static final String RULES = """
         You MUST obey these inviolable rules (a proposal breaking any of them is discarded entirely):
@@ -83,8 +94,9 @@ public class AgendaProposalPromptBuilder {
         2. AGENDA: the listed read-only AGENDA windows are fixed, occupied space — never overlap them and \
         never move them; plan around them.
         3. OCCUPIED: the listed occupied blocks are time the user has already committed — blocks he \
-        created himself, blocks already finished, and blocks already under way. They are just as fixed as \
-        an AGENDA window: never overlap them, never move them, plan around them.
+        created himself, blocks already finished, blocks already under way, and his standing commitments \
+        (an activity or a study session that owns its own hour). They are just as fixed as an AGENDA \
+        window: never overlap them, never move them, plan around them.
         4. WIG: the block(s) flagged "wig": true are the Wildly Important Goal — never drop them and \
         never expel them from the day, and never soften the pace the WIG requires.
         5. STRUCTURE: every decision's "block_id" MUST be one of the given candidate ids (never invent \
@@ -99,7 +111,7 @@ public class AgendaProposalPromptBuilder {
         The day is already sized and capped to a realistic load — the blocks you are given all fit the \
         day. Your job is to HUMANIZE them (reorder, retime, group by context, add breathing room, write \
         the coach notes), not to prune them. KEEP is the default for every block; MOVE a block only when \
-        a new time improves the day; move ACTIVITY blocks as needed. Do NOT drop blocks to lighten a day \
+        a new time improves the day. Do NOT drop blocks to lighten a day \
         that is already capped. DROP a non-WIG block ONLY when it genuinely cannot fit today within the \
         hard walls (sleep frontier, AGENDA windows, occupied blocks) — and that block will simply carry \
         to the next day. \
@@ -206,6 +218,7 @@ public class AgendaProposalPromptBuilder {
 
         renderWalls(root.putArray("agenda_walls"), context.agendaWalls());
         renderWalls(root.putArray("occupied_blocks"), context.occupiedWalls());
+        renderSleep(root, context.sleepSessions());
 
         String controlData;
         try {
@@ -248,8 +261,27 @@ public class AgendaProposalPromptBuilder {
         target.put("latest_end", band.end().toString());
     }
 
+    /**
+     * Renders when the user slept over the last day — every session, night and naps alike, with how
+     * much of each window was actually asleep. Omitted entirely when nothing was recorded: an empty
+     * array would read as «he did not sleep», which is a different and much louder claim than «no
+     * device reported anything».
+     */
+    private static void renderSleep(ObjectNode root, List<SleepSession> sessions) {
+        if (sessions.isEmpty()) {
+            return;
+        }
+        ArrayNode target = root.putArray("slept_windows");
+        for (SleepSession session : sessions) {
+            ObjectNode node = target.addObject();
+            node.put("start", session.start().toString());
+            node.put("end", session.end().toString());
+            node.put("asleep_minutes", session.asleepSeconds() / SECONDS_PER_MINUTE);
+        }
+    }
+
     /** Renders one wall list as bare geometry — the only thing the model needs to plan around it. */
-    private static void renderWalls(ArrayNode target, java.util.List<OccupiedInterval> walls) {
+    private static void renderWalls(ArrayNode target, List<OccupiedInterval> walls) {
         for (OccupiedInterval wall : walls) {
             ObjectNode node = target.addObject();
             node.put("start", wall.start().toString());
