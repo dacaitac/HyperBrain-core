@@ -182,7 +182,7 @@ public class SleepSampleSessionParser {
                 ? new ParsedSleepDay(sleepDay, samples, sleep, anchor)
                 : new RefusedSleepDay(sleepDay, samples, refusal));
         }
-        return readings;
+        return List.copyOf(readings);
     }
 
     /**

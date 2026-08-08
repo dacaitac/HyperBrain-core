@@ -16,6 +16,9 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -49,6 +52,9 @@ class UserCommandConsumerIT {
     private static final OffsetDateTime HALF_PAST_NOON =
         OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, ZoneOffset.UTC);
     private static final LocalDate DAY = LocalDate.of(2026, 7, 10);
+    /** When the production backfill fixture was captured — the instant its anchor day is read from. */
+    private static final OffsetDateTime BACKFILL_CAPTURED_AT =
+        OffsetDateTime.of(2026, 8, 8, 11, 32, 0, 0, ZoneOffset.UTC);
     /** Pinned "now" for the staleness guard: NOON commands are 1 h old — fresh. */
     private static final Instant PINNED_NOW = Instant.parse("2026-07-10T13:00:00Z");
 
@@ -214,6 +220,55 @@ class UserCommandConsumerIT {
         // spacing are the column's, the values are the dump's.)
         assertThat(raw.get("payload").toString())
             .contains("09/07/2026 at 11:00 PM", "\"Awake\"", "10/07/2026 at 11:56 AM");
+    }
+
+    @Test
+    @DisplayName("the real fortnight backfill: one row per night, naps only for today, re-sends converge")
+    void a_backfill_records_one_row_per_night() throws Exception {
+        // The 660-sample dump Daniel actually sent (25 Jul → 8 Aug), driven end to end through the same
+        // queue and the same command the daily replan uses. Production archived it whole under a single
+        // night's key with status ERROR, because the fortnight was read as one sleep day.
+        UUID sleepCycle = insertSleepCycle();
+        UUID first = UUID.randomUUID();
+        send(replanWithBackfillBody(first, BACKFILL_CAPTURED_AT), first.toString());
+
+        // Thirteen nights read (the oldest of the range is left to the next overlapping window), nine
+        // of them scorable — one row each, keyed on the night, not one row for the whole send.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(9));
+        assertThat(archivedDumpCount()).isEqualTo(13);
+        assertThat(jdbcTemplate.queryForList(
+            "SELECT (end_time AT TIME ZONE 'UTC')::date::text FROM tel_sleep_record "
+                + "WHERE user_id = ? ORDER BY end_time", String.class, USER))
+            .containsExactly("2026-07-26", "2026-07-27", "2026-07-28", "2026-07-31", "2026-08-01",
+                "2026-08-02", "2026-08-04", "2026-08-06", "2026-08-07");
+
+        // Each night's bytes are filed under that night's own key, so a night stays re-derivable one at
+        // a time; the four the guards refused are kept too, flagged, which is the only thing that can
+        // explain afterwards why those nights have no score.
+        assertThat(jdbcTemplate.queryForList(
+            "SELECT dedup_key FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP' "
+                + "ORDER BY dedup_key", String.class, USER))
+            .startsWith("APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-07-26")
+            .endsWith("APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-08-08");
+        assertThat(countArchivedWithStatus("ERROR")).isEqualTo(4);
+        assertThat(countArchivedWithStatus("NORMALIZED")).isEqualTo(9);
+
+        // Not one «Siesta» in the past. The 7th of August holds a real nap (09:20–13:56), and a history
+        // that recorded it would have created an executable with its calendar event and its Notion page
+        // for an afternoon three weeks gone. Only the day the run is standing on may do that, and that
+        // night had no nap.
+        assertThat(napCount(sleepCycle)).isZero();
+
+        // And a re-send of an overlapping range converges: the archive rewrites each night in place and
+        // the score row is found by its own local day and updated. Daniel sends in overlapping batches
+        // on purpose — the second pass must add nothing.
+        UUID second = UUID.randomUUID();
+        send(replanWithBackfillBody(second, BACKFILL_CAPTURED_AT), second.toString());
+        await().atMost(TIMEOUT).untilAsserted(() ->
+            assertThat(countProcessed("user-command:" + second)).isEqualTo(1));
+        assertThat(sleepRecordCount()).isEqualTo(9);
+        assertThat(archivedDumpCount()).isEqualTo(13);
+        assertThat(napCount(sleepCycle)).isZero();
     }
 
     @Test
@@ -557,6 +612,29 @@ class UserCommandConsumerIT {
             """.formatted(commandId, occurredAt);
     }
 
+    /**
+     * The command Daniel's Shortcut sends when the date range is widened: the same {@code REPLAN_AGENDA}
+     * with the same {@code sleep} envelope, carrying the production dump verbatim from the fixture the
+     * parser's unit test also reads — 660 samples, ~63 KB, well inside the 256 KB an SQS message holds.
+     */
+    private static String replanWithBackfillBody(UUID commandId, OffsetDateTime occurredAt)
+        throws IOException {
+        try (InputStream in = UserCommandConsumerIT.class
+            .getResourceAsStream("/fixtures/shortcut_sleep_backfill.json")) {
+            assertThat(in).as("backfill fixture on the integration classpath").isNotNull();
+            String dump = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return """
+                {
+                  "command_id": "%s",
+                  "command_type": "REPLAN_AGENDA",
+                  "origin": "USER",
+                  "occurred_at": "%s",
+                  "sleep": %s
+                }
+                """.formatted(commandId, occurredAt, dump);
+        }
+    }
+
     private static String sleepScoreBody(UUID commandId, int score, LocalDate date,
                                          OffsetDateTime occurredAt) {
         return """
@@ -601,6 +679,13 @@ class UserCommandConsumerIT {
         return jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
+    }
+
+    private int countArchivedWithStatus(String status) {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP' "
+                + "AND normalization_status = ?", Integer.class, USER, status);
+        return count == null ? 0 : count;
     }
 
     private int archivedDumpCount() {

@@ -4,6 +4,7 @@ import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.model.DeviceSleepSamples;
 import com.hyperbrain.planner.domain.model.ParsedSleepDay;
+import com.hyperbrain.planner.domain.model.RefusedSleepDay;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.model.UserCommand;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -84,10 +86,19 @@ class UserCommandServiceTest {
             Clock.fixed(NOW, ZoneOffset.UTC), STALENESS_HOURS, asyncMaterializationEnabled);
     }
 
-    /** Stubs the raw-first archive: the dump is filed under its night before anything reads it. */
+    /**
+     * Stubs the anchor's day and the raw-first archive of the single night these dumps hold: the
+     * night's own samples are filed under its own key before anything reads them.
+     */
     private void givenTheDumpIsArchived(DeviceSleepSamples dump, OffsetDateTime occurredAt) {
         when(sleepSampleSessionParser.sleepDayOf(dump, BOGOTA, occurredAt)).thenReturn(SLEEP_DAY);
         when(sleepDumpArchive.archive(USER_ID, dump, SLEEP_DAY, occurredAt)).thenReturn(RAW_DUMP_ID);
+    }
+
+    /** The single-night reading the parser hands back for {@link #sleepDump()}. */
+    private static ParsedSleepDay theNight(DeviceSleepSamples dump, AggregatedSleep sleep,
+                                           OffsetDateTime collectedAt) {
+        return new ParsedSleepDay(SLEEP_DAY, dump, sleep, collectedAt);
     }
 
     private static DeviceSleepSamples sleepDump() {
@@ -107,6 +118,35 @@ class UserCommandServiceTest {
         return new DeviceSleepRecord(
             sleep.night().start(), sleep.night().end(), 480, 100,
             "{\"low_confidence\":false}", collectedAt, null);
+    }
+
+    // ── one night of a multi-night dump, everything about it derived from its own sleep day ──────
+
+    /** That night's own slice of the dump — what the archive must file under that night's key. */
+    private static DeviceSleepSamples samplesOf(LocalDate sleepDay) {
+        return new DeviceSleepSamples("11/07/2026 at 6:35 AM", List.of(new DeviceSleepSamples.Sample(
+            "Core", sleepDay.minusDays(1) + " at 10:00 PM", sleepDay + " at 6:30 AM")));
+    }
+
+    /** That night's sleep: 22:00 → 06:30 of its own sleep day, so no two nights compare equal. */
+    private static AggregatedSleep sleepOf(LocalDate sleepDay) {
+        return AggregatedSleep.ofSingleSession(new SleepStageSample(
+            sleepDay.minusDays(1).atTime(22, 0).atOffset(ZoneOffset.UTC),
+            sleepDay.atTime(6, 30).atOffset(ZoneOffset.UTC),
+            0, 17280, 5184, 6336, 0, 600));
+    }
+
+    private static ParsedSleepDay night(LocalDate sleepDay) {
+        return new ParsedSleepDay(sleepDay, samplesOf(sleepDay), sleepOf(sleepDay), COLLECTED_AT);
+    }
+
+    private static DeviceSleepRecord recordOf(LocalDate sleepDay) {
+        return assembledRecord(sleepOf(sleepDay), COLLECTED_AT);
+    }
+
+    /** The archived row that night's bytes landed on, stable per day so the marks can be verified. */
+    private static UUID archiveIdOf(LocalDate sleepDay) {
+        return UUID.nameUUIDFromBytes(sleepDay.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -194,8 +234,8 @@ class UserCommandServiceTest {
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
         givenTheDumpIsArchived(dump, occurredAt);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
-            .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt))
+            .thenReturn(List.of(theNight(dump, sleep, COLLECTED_AT)));
         when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, RAW_DUMP_ID)).thenReturn(record);
 
         // When
@@ -206,7 +246,7 @@ class UserCommandServiceTest {
         // as activities, and only then the replan runs
         InOrder inOrder = inOrder(sleepSampleSessionParser, sleepRecordAssembler, sleepScoreStore,
             napActivityRecorder, agendaGenerationService);
-        inOrder.verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
+        inOrder.verify(sleepSampleSessionParser).readSleepDays(dump, BOGOTA, occurredAt);
         inOrder.verify(sleepRecordAssembler).assemble(sleep, COLLECTED_AT, RAW_DUMP_ID);
         inOrder.verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
         inOrder.verify(napActivityRecorder).record(USER_ID, sleep);
@@ -228,8 +268,8 @@ class UserCommandServiceTest {
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
         givenTheDumpIsArchived(dump, occurredAt);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
-            .thenReturn(new ParsedSleepDay(sleep, occurredAt));
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt))
+            .thenReturn(List.of(theNight(dump, sleep, occurredAt)));
         when(sleepRecordAssembler.assemble(sleep, occurredAt, RAW_DUMP_ID)).thenReturn(record);
 
         // When
@@ -237,7 +277,7 @@ class UserCommandServiceTest {
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
 
         // Then the parse was anchored there, and the instant it resolved is the collection instant
-        verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
+        verify(sleepSampleSessionParser).readSleepDays(dump, BOGOTA, occurredAt);
         verify(sleepRecordAssembler).assemble(sleep, occurredAt, RAW_DUMP_ID);
         verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
     }
@@ -254,8 +294,8 @@ class UserCommandServiceTest {
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
         givenTheDumpIsArchived(dump, occurredAt);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
-            .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt))
+            .thenReturn(List.of(theNight(dump, sleep, COLLECTED_AT)));
         when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, RAW_DUMP_ID)).thenReturn(record);
 
         // When
@@ -282,8 +322,8 @@ class UserCommandServiceTest {
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
         givenTheDumpIsArchived(dump, occurredAt);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
-            .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt))
+            .thenReturn(List.of(theNight(dump, sleep, COLLECTED_AT)));
         when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, RAW_DUMP_ID)).thenReturn(record);
 
         // When
@@ -298,15 +338,15 @@ class UserCommandServiceTest {
     @Test
     @DisplayName("an unusable sleep dump is skipped without failing the replan")
     void unusable_sleep_is_skipped_and_replan_still_runs() {
-        // Given the parser rejects the dump (no scorable sleep)
+        // Given the parser refuses the night (no scorable sleep)
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
         DeviceSleepSamples dump = sleepDump();
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
         givenTheDumpIsArchived(dump, occurredAt);
-        when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
-            .thenThrow(new IllegalArgumentException("no parseable sleep samples in the dump"));
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt)).thenReturn(
+            List.of(new RefusedSleepDay(SLEEP_DAY, dump, "no parseable sleep samples in the dump")));
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -320,6 +360,79 @@ class UserCommandServiceTest {
         verify(sleepDumpArchive).archive(USER_ID, dump, SLEEP_DAY, occurredAt);
         verify(sleepDumpArchive).markUnusable(RAW_DUMP_ID);
         verify(sleepDumpArchive, never()).markInterpreted(RAW_DUMP_ID);
+    }
+
+    @Test
+    @DisplayName("a dump holding several nights writes each one on its own — archive, score and mark")
+    void every_night_of_the_dump_is_archived_and_recorded_on_its_own() {
+        // Given a backfill: two nights of history plus the night the run is standing on
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
+        DeviceSleepSamples dump = sleepDump();
+        when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
+            .thenReturn(true);
+        when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        when(sleepSampleSessionParser.sleepDayOf(dump, BOGOTA, occurredAt)).thenReturn(SLEEP_DAY);
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt)).thenReturn(List.of(
+            night(SLEEP_DAY.minusDays(2)), night(SLEEP_DAY.minusDays(1)), night(SLEEP_DAY)));
+        for (LocalDate day : List.of(SLEEP_DAY.minusDays(2), SLEEP_DAY.minusDays(1), SLEEP_DAY)) {
+            when(sleepDumpArchive.archive(USER_ID, samplesOf(day), day, occurredAt))
+                .thenReturn(archiveIdOf(day));
+            when(sleepRecordAssembler.assemble(sleepOf(day), COLLECTED_AT, archiveIdOf(day)))
+                .thenReturn(recordOf(day));
+        }
+
+        // When
+        service.handle(USER_ID, new UserCommand(
+            COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
+
+        // Then each night is filed under its OWN key with its OWN samples — never the whole dump under
+        // one night's key, which is what made the fortnight unrecoverable in the first place.
+        for (LocalDate day : List.of(SLEEP_DAY.minusDays(2), SLEEP_DAY.minusDays(1), SLEEP_DAY)) {
+            verify(sleepDumpArchive).archive(USER_ID, samplesOf(day), day, occurredAt);
+            verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, recordOf(day), BOGOTA);
+            verify(sleepDumpArchive).markInterpreted(archiveIdOf(day));
+        }
+        // And ONLY the anchor's night turns its naps into activities: a backfill of three months would
+        // otherwise fill the past with «Siesta» executables, each with its calendar event and its
+        // Notion page. History leaves a score row and its raw archive, nothing else.
+        verify(napActivityRecorder).record(USER_ID, sleepOf(SLEEP_DAY));
+        verifyNoMoreInteractions(napActivityRecorder);
+    }
+
+    @Test
+    @DisplayName("one implausible night is archived, flagged and skipped — the others are still written")
+    void a_refused_night_does_not_cost_the_rest_of_the_dump() {
+        // The failure this replaces: a refusal was an exception, and the exception aborted the whole
+        // dump. On a fortnight that meant fifteen nights lost to one bad reading.
+        OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 11, 2, 0, 0, 0, ZoneOffset.UTC);
+        DeviceSleepSamples dump = sleepDump();
+        LocalDate refusedDay = SLEEP_DAY.minusDays(1);
+        when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
+            .thenReturn(true);
+        when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        when(sleepSampleSessionParser.sleepDayOf(dump, BOGOTA, occurredAt)).thenReturn(SLEEP_DAY);
+        when(sleepSampleSessionParser.readSleepDays(dump, BOGOTA, occurredAt)).thenReturn(List.of(
+            new RefusedSleepDay(refusedDay, samplesOf(refusedDay), "implausible sleep dump: corrupt"),
+            night(SLEEP_DAY)));
+        when(sleepDumpArchive.archive(USER_ID, samplesOf(refusedDay), refusedDay, occurredAt))
+            .thenReturn(archiveIdOf(refusedDay));
+        when(sleepDumpArchive.archive(USER_ID, samplesOf(SLEEP_DAY), SLEEP_DAY, occurredAt))
+            .thenReturn(archiveIdOf(SLEEP_DAY));
+        when(sleepRecordAssembler.assemble(sleepOf(SLEEP_DAY), COLLECTED_AT, archiveIdOf(SLEEP_DAY)))
+            .thenReturn(recordOf(SLEEP_DAY));
+
+        // When
+        service.handle(USER_ID, new UserCommand(
+            COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
+
+        // Then the refused night is still filed — flagged, never scored — and the good night is written
+        verify(sleepDumpArchive).archive(USER_ID, samplesOf(refusedDay), refusedDay, occurredAt);
+        verify(sleepDumpArchive).markUnusable(archiveIdOf(refusedDay));
+        verify(sleepRecordAssembler, never())
+            .assemble(sleepOf(refusedDay), COLLECTED_AT, archiveIdOf(refusedDay));
+        verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, recordOf(SLEEP_DAY), BOGOTA);
+        verify(sleepDumpArchive).markInterpreted(archiveIdOf(SLEEP_DAY));
+        verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
     }
 
     @Test

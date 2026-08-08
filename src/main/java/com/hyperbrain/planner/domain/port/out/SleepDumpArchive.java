@@ -22,6 +22,11 @@ import java.util.UUID;
  * arrival overwrites the previous version in place (Daniel, 2026-08-08 — «teniendo en cuenta que se
  * puede reescribir»). What is stored is therefore the most recent reading of that night, never a pile
  * of near-duplicates.
+ *
+ * <p><b>A night at a time, not a send at a time.</b> One command may carry weeks of history, and what
+ * is filed under a night's key is that night's <em>own</em> samples — never the whole send under the
+ * key of one of its nights. Re-deriving a single night when the reading of sleep changes again is the
+ * point, and it only works if the bytes under a key are that night's and nothing else.
  */
 public interface SleepDumpArchive {
 
@@ -39,19 +44,20 @@ public interface SleepDumpArchive {
     String EVENT_TYPE = "SLEEP_STAGE_DUMP";
 
     /**
-     * Files the dump under its night, replacing whatever was filed there before, and returns the
-     * archived row's identity so the typed record can point back at it.
+     * Files one night's samples under that night, replacing whatever was filed there before, and
+     * returns the archived row's identity so the typed record can point back at it.
      *
-     * <p>Called <b>before</b> the dump is interpreted: an archive that only kept the dumps that parsed
-     * would be missing exactly the ones worth looking at.
+     * <p>Called <b>before</b> the samples are interpreted: an archive that only kept the nights that
+     * parsed would be missing exactly the ones worth looking at.
      *
+     * @param samples    the night's own stage samples, as they arrived; never null
      * @param userId     the owning user; never null
-     * @param dump       the stage dump as it arrived; never null
-     * @param sleepDay   the local day the dump's sleep belongs to — the archive key; never null
+     * @param sleepDay   the local day those samples belong to — the archive key; never null
      * @param occurredAt when the dump was captured or the command fired; never null
      * @return the archived raw row's id
      */
-    UUID archive(UUID userId, DeviceSleepSamples dump, LocalDate sleepDay, OffsetDateTime occurredAt);
+    UUID archive(UUID userId, DeviceSleepSamples samples, LocalDate sleepDay,
+                 OffsetDateTime occurredAt);
 
     /**
      * Marks an archived dump as the one the stored sleep record was derived from.
