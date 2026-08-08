@@ -3,6 +3,7 @@ package com.hyperbrain.planner.infrastructure;
 import com.hyperbrain.planner.domain.model.NormalizationStatus;
 import com.hyperbrain.planner.domain.model.RawTelemetryRow;
 import com.hyperbrain.planner.domain.port.out.RawTelemetryStore;
+import com.hyperbrain.planner.domain.port.out.SleepDumpArchive;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -55,9 +56,20 @@ class JdbcRawTelemetryStore implements RawTelemetryStore {
     private static final String MARK_STATUS_SQL =
         "UPDATE context_event SET normalization_status = ? WHERE id = ?";
 
+    /**
+     * The retention sweep, with the raw sleep archive carved out of it by name. The bound parameter is
+     * {@link SleepDumpArchive#EVENT_TYPE}, so the exemption follows the archive if that type is ever
+     * renamed, and {@code IS DISTINCT FROM} keeps rows with no event type at all inside the sweep.
+     *
+     * <p>The exemption is written here, in the statement, rather than expressed as a longer window:
+     * the archive is not "data we happen to keep for a while", it is the only thing that can recompute
+     * a night after the formula changes, and a window is something a future reader could shorten
+     * without ever learning that.
+     */
     private static final String PURGE_SQL = """
         DELETE FROM context_event
         WHERE normalization_status IN ('NORMALIZED', 'SKIPPED')
+          AND event_type IS DISTINCT FROM ?
           AND ingested_at < now() - make_interval(days => ?)
         """;
 
@@ -90,6 +102,6 @@ class JdbcRawTelemetryStore implements RawTelemetryStore {
 
     @Override
     public int purgeProcessedOlderThan(int retentionDays) {
-        return jdbcTemplate.update(PURGE_SQL, retentionDays);
+        return jdbcTemplate.update(PURGE_SQL, SleepDumpArchive.EVENT_TYPE, retentionDays);
     }
 }

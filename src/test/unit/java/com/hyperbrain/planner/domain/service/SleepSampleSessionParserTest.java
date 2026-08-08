@@ -135,25 +135,48 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
-    @DisplayName("under 5 h from the night, a stretch joins it; at 5 h sharp it is a sleep of its own")
-    void the_same_night_threshold_decides_where_the_night_ends() {
-        // The accepted coarseness of a single threshold, pinned in both directions on the same night:
-        // a stretch 4 h 59 after waking is absorbed into the night and stretches the row's hours over
-        // it; one 5 h after is a nap. Daniel accepted the first as the benign side of the trade.
-        AggregatedSleep absorbed = parser.parse(new DeviceSleepSamples(null, List.of(
+    @DisplayName("the night ends at nine: a stretch at 08:59 is still night, one at 09:01 is a nap")
+    void the_morning_cut_decides_where_the_night_ends() {
+        // Both stretches are the same distance from the night in every way that the gap threshold can
+        // see — under 5 h, over the 3 h that split them into their own session. The only difference is
+        // which side of nine in the morning they start on, and after nine the day had already begun.
+        AggregatedSleep stillNight = parser.parse(new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
-            sample("Core", "10/07/2026 at 9:59 AM", "10/07/2026 at 10:59 AM"))),
+            sample("Core", "10/07/2026 at 8:59 AM", "10/07/2026 at 9:59 AM"))),
             ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
 
-        AggregatedSleep separate = parser.parse(new DeviceSleepSamples(null, List.of(
+        AggregatedSleep aNap = parser.parse(new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
-            sample("Core", "10/07/2026 at 10:00 AM", "10/07/2026 at 11:00 AM"))),
+            sample("Core", "10/07/2026 at 9:01 AM", "10/07/2026 at 10:01 AM"))),
             ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
 
-        assertThat(absorbed.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T10:59:00Z"));
-        assertThat(absorbed.naps()).isEmpty();
-        assertThat(separate.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:00:00Z"));
-        assertThat(separate.naps()).hasSize(1);
+        assertThat(stillNight.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T09:59:00Z"));
+        assertThat(stillNight.naps()).isEmpty();
+        assertThat(aNap.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:00:00Z"));
+        assertThat(aNap.naps()).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("five hours apart is a sleep of its own, in the direction the cut does not guard")
+    void the_same_night_gap_still_bounds_the_night() {
+        // Measured BACKWARDS from the night, where the morning cut deliberately does not apply — both
+        // stretches start at 21:00, long after nine, and the only thing that differs is the gap. Under
+        // five hours the earlier stretch is the opening of the night; at five hours sharp it is a doze
+        // that preceded it.
+        AggregatedSleep stillNight = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 9:00 PM", "09/07/2026 at 11:01 PM"),
+            sample("Core", "10/07/2026 at 4:00 AM", "10/07/2026 at 8:00 AM"))),
+            ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        AggregatedSleep aNap = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 9:00 PM", "09/07/2026 at 11:00 PM"),
+            sample("Core", "10/07/2026 at 4:00 AM", "10/07/2026 at 8:00 AM"))),
+            ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        assertThat(stillNight.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T21:00:00Z"));
+        assertThat(stillNight.naps()).isEmpty();
+        assertThat(aNap.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-10T04:00:00Z"));
+        assertThat(aNap.naps()).hasSize(1);
     }
 
     @Test

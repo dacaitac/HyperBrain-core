@@ -163,8 +163,8 @@ class UserCommandConsumerIT {
         Map<String, Object> row = jdbcTemplate.queryForMap("""
             SELECT duration_minutes, sleep_score FROM tel_sleep_record WHERE user_id = ?
             """, USER);
-        // Scored on the whole day: 330 min of night + 116 of nap. The nap alone would be 116.
-        assertThat(row.get("duration_minutes")).isEqualTo(446);
+        // Scored on the whole day: 450 min of night + 116 of nap. The nap alone would be 116.
+        assertThat(row.get("duration_minutes")).isEqualTo(566);
         assertThat((Integer) row.get("sleep_score")).isGreaterThan(50);
         // The row's two instant columns are the chronotype the sleep frontier takes its wake median
         // from, so they stay the NIGHT's: a nap that ended at 11:56 must never become the learned wake.
@@ -173,13 +173,13 @@ class UserCommandConsumerIT {
             .isEqualTo(OffsetDateTime.of(2026, 7, 9, 23, 0, 0, 0, ZoneOffset.UTC));
         assertThat(jdbcTemplate.queryForObject(
             "SELECT end_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
-            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 4, 40, 0, 0, ZoneOffset.UTC));
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 6, 40, 0, 0, ZoneOffset.UTC));
 
         // And both sessions survive into the row and come back out through the planner's own port —
         // which is what lets the day know WHEN he slept, not only how much.
         assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON))
             .extracting(session -> session.start().toString() + ".." + session.end().toString())
-            .containsExactly("2026-07-09T23:00Z..2026-07-10T04:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
+            .containsExactly("2026-07-09T23:00Z..2026-07-10T06:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
     }
 
     @Test
@@ -231,28 +231,31 @@ class UserCommandConsumerIT {
     }
 
     @Test
-    @DisplayName("a nap taken less than 5 h after waking is absorbed into the night — the accepted limit")
-    void a_nap_within_the_same_night_threshold_is_absorbed() {
-        // Pinned rather than endorsed. One gap threshold cannot tell "he woke at 3 and went back to
-        // sleep" from "he woke at 6:40 and napped at 10", and Daniel took the first as the case worth
-        // getting right. The cost is here, on his own production shape: the row's wake time becomes
-        // 11:56, the frontier learns that as when he gets up, and no nap activity is recorded.
+    @DisplayName("a night slept in two phases is ONE night, and its second half is never a «Siesta»")
+    void a_broken_night_is_one_night_end_to_end() {
+        // Daniel, 2026-08-08: «anoche dormí en dos fases porque me desperté en la madrugada». Reading
+        // the row's hours off the longer stretch declared he got up at 03:00 — which the sleep frontier
+        // then learned as his wake time — and put a calendar event titled «Siesta» at half past six.
         UUID sleepCycle = insertSleepCycle();
         UUID commandId = UUID.randomUUID();
 
-        send(replanWithAbsorbedMorningNapBody(commandId, NOON), commandId.toString());
+        send(replanWithBrokenNightBody(commandId, NOON), commandId.toString());
 
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+        // The row spans the whole night on the clock, hole included: 23:00 to 08:00.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 9, 23, 0, 0, 0, ZoneOffset.UTC));
         assertThat(jdbcTemplate.queryForObject(
             "SELECT end_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
-            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 11, 56, 0, 0, ZoneOffset.UTC));
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, ZoneOffset.UTC));
+        // Nothing is filed as a nap, and both stretches still survive so the day knows WHEN he slept.
         assertThat(napCount(sleepCycle)).isZero();
-        // The sleep itself is neither lost nor double-counted: both stretches survive as sessions and
-        // the score is still computed on the summed time in bed, not on the 13 h span.
         assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON)).hasSize(2);
+        // And the score is computed on the 5 h 30 actually slept, not on the 9 h the row spans.
         assertThat(jdbcTemplate.queryForMap(
             "SELECT duration_minutes FROM tel_sleep_record WHERE user_id = ?", USER))
-            .containsEntry("duration_minutes", 566);
+            .containsEntry("duration_minutes", 330);
     }
 
     @Test
@@ -476,10 +479,10 @@ class UserCommandConsumerIT {
               "sleep": {
                 "date": "10/07/2026 at 12:05 PM",
                 "sample": [
-                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 3:00 AM","duration":"4:00:00"},
-                  {"stage":"Deep","startDate":"10/07/2026 at 3:00 AM","endDate":"10/07/2026 at 4:00 AM","duration":"1:00:00"},
-                  {"stage":"REM","startDate":"10/07/2026 at 4:00 AM","endDate":"10/07/2026 at 4:30 AM","duration":"30:00"},
-                  {"stage":"Awake","startDate":"10/07/2026 at 4:30 AM","endDate":"10/07/2026 at 4:40 AM","duration":"10:00"},
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
+                  {"stage":"Deep","startDate":"10/07/2026 at 5:00 AM","endDate":"10/07/2026 at 6:00 AM","duration":"1:00:00"},
+                  {"stage":"REM","startDate":"10/07/2026 at 6:00 AM","endDate":"10/07/2026 at 6:30 AM","duration":"30:00"},
+                  {"stage":"Awake","startDate":"10/07/2026 at 6:30 AM","endDate":"10/07/2026 at 6:40 AM","duration":"10:00"},
                   {"stage":"Core","startDate":"10/07/2026 at 10:00 AM","endDate":"10/07/2026 at 11:56 AM","duration":"1:56:00"}
                 ]
               }
@@ -510,11 +513,10 @@ class UserCommandConsumerIT {
     }
 
     /**
-     * The same night and nap, but with the nap starting 3 h 20 after waking instead of 5 h 20 — inside
-     * the same-night threshold, so the two are read as one broken night. Pins the accepted coarseness
-     * of that single threshold on real production data.
+     * A night broken in the small hours: 23:00–03:00 and then 06:30–08:00, the shape Daniel actually
+     * slept. Both stretches start before nine, so both are the night.
      */
-    private static String replanWithAbsorbedMorningNapBody(UUID commandId, OffsetDateTime occurredAt) {
+    private static String replanWithBrokenNightBody(UUID commandId, OffsetDateTime occurredAt) {
         return """
             {
               "command_id": "%s",
@@ -524,11 +526,8 @@ class UserCommandConsumerIT {
               "sleep": {
                 "date": "10/07/2026 at 12:05 PM",
                 "sample": [
-                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
-                  {"stage":"Deep","startDate":"10/07/2026 at 5:00 AM","endDate":"10/07/2026 at 6:00 AM","duration":"1:00:00"},
-                  {"stage":"REM","startDate":"10/07/2026 at 6:00 AM","endDate":"10/07/2026 at 6:30 AM","duration":"30:00"},
-                  {"stage":"Awake","startDate":"10/07/2026 at 6:30 AM","endDate":"10/07/2026 at 6:40 AM","duration":"10:00"},
-                  {"stage":"Core","startDate":"10/07/2026 at 10:00 AM","endDate":"10/07/2026 at 11:56 AM","duration":"1:56:00"}
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 3:00 AM","duration":"4:00:00"},
+                  {"stage":"Core","startDate":"10/07/2026 at 6:30 AM","endDate":"10/07/2026 at 8:00 AM","duration":"1:30:00"}
                 ]
               }
             }

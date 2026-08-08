@@ -14,6 +14,10 @@ import org.springframework.transaction.annotation.Transactional;
  * tests can drive {@link #purgeExpired()} deterministically.
  *
  * <p>{@code app.telemetry.retention-days} (default 90) is a sanctioned MVP default, calibrable by Daniel.
+ *
+ * <p><b>The raw sleep archive is outside this window entirely</b> and no configuration change can bring
+ * it back in — the exemption lives in the sweep's own statement, next to the reason for it. See
+ * {@code RawTelemetryStore#purgeProcessedOlderThan}.
  */
 @Service
 public class TelemetryRetentionService {

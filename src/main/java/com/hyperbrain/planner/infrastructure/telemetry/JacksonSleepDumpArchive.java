@@ -41,7 +41,7 @@ class JacksonSleepDumpArchive implements SleepDumpArchive {
     private static final String PROVIDER = SleepSessionNormalizationStrategy.PROVIDER;
 
     /** The raw stage dump, as distinct from the canonical aggregated {@code SLEEP_SESSION}. */
-    private static final String EVENT_TYPE = "SLEEP_STAGE_DUMP";
+    private static final String EVENT_TYPE = SleepDumpArchive.EVENT_TYPE;
 
     /** Format version of the payload written below; bumped if the archived shape ever changes. */
     private static final String SCHEMA_VERSION = "v1";

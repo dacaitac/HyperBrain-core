@@ -146,6 +146,23 @@ class TelemetryConsumerIT {
         assertThat(countContextEvents("SKIPPED")).isZero();
     }
 
+    @Test
+    @DisplayName("the raw sleep archive is never purged, however old — that is what it is for")
+    void retention_never_touches_the_raw_sleep_archive() {
+        // The archive exists to survive a change in the way sleep is read, so the nights already scored
+        // can be recomputed. Six production rows were lost that way once, when the only thing kept was
+        // the collapsed totals (Daniel, 2026-08-08: «no es necesario borrar nada, tenemos espacio de
+        // sobra»). A row purged at ninety days cannot answer the question the archive was built for.
+        insertArchivedDumpAt("NORMALIZED", 4000);
+        insertRawAt("NORMALIZED", 4000);
+
+        int purged = retentionService.purgeExpired();
+
+        // Only the ordinary telemetry row goes; the dump stays, eleven years old and counting.
+        assertThat(purged).isEqualTo(1);
+        assertThat(countArchivedDumps()).isEqualTo(1);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void send(String body) {
@@ -233,6 +250,24 @@ class TelemetryConsumerIT {
     private int appUsageCount() {
         Integer count = jdbcTemplate.queryForObject(
             "SELECT count(*) FROM tel_app_usage WHERE user_id = ?", Integer.class, USER);
+        return count == null ? 0 : count;
+    }
+
+    /** A row of the raw sleep archive, which the retention sweep must recognise and spare. */
+    private void insertArchivedDumpAt(String status, int daysAgo) {
+        jdbcTemplate.update("""
+            INSERT INTO context_event
+                (id, user_id, source, provider, event_type, payload, occurred_at,
+                 dedup_key, schema_version, ingested_at, normalization_status)
+            VALUES (?, ?, 'INTEGRATION', 'APPLE_HEALTH', 'SLEEP_STAGE_DUMP', '{}'::jsonb, now(),
+                    ?, 'v1', now() - make_interval(days => ?), ?)
+            """, UUID.randomUUID(), USER, UUID.randomUUID().toString(), daysAgo, status);
+    }
+
+    private int countArchivedDumps() {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP'",
+            Integer.class, USER);
         return count == null ? 0 : count;
     }
 

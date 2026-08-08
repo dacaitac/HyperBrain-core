@@ -50,8 +50,18 @@ public interface RawTelemetryStore {
     void markStatus(UUID id, NormalizationStatus status);
 
     /**
-     * Deletes NORMALIZED and SKIPPED raw rows older than the retention window (ERROR rows are kept
-     * for diagnosis), using the retention partial index.
+     * Deletes NORMALIZED and SKIPPED raw rows older than the retention window, using the retention
+     * partial index. Two kinds of row are spared, and for two different reasons:
+     * <ul>
+     *   <li><b>ERROR rows</b> — kept for diagnosis, as they always have been.</li>
+     *   <li><b>The raw sleep archive</b> ({@link SleepDumpArchive#EVENT_TYPE}) — kept
+     *       <b>indefinitely</b> (Daniel, 2026-08-08: «no es necesario borrar nada, tenemos espacio de
+     *       sobra»). These rows exist for exactly one purpose: to survive a change in the way sleep is
+     *       read, so the nights already scored can be recomputed. Six production rows were lost that
+     *       way once, when the only thing kept was the collapsed totals. A row purged at ninety days
+     *       is a row that cannot answer the question the archive was built to answer, so the exemption
+     *       is part of the archive's contract and not a tuning of the window.</li>
+     * </ul>
      *
      * @param retentionDays the retention window in days
      * @return the number of rows purged

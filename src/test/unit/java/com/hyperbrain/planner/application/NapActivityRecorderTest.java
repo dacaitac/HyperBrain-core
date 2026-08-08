@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -226,7 +227,7 @@ class NapActivityRecorderTest {
     /** A sleep day built the way the parser builds one: the night resolved out of its sessions. */
     private static AggregatedSleep sleepOf(SleepSession... sessions) {
         List<SleepSession> all = List.of(sessions);
-        SleepSession night = AggregatedSleep.nightOf(all);
+        SleepSession night = AggregatedSleep.nightOf(all, ZoneOffset.UTC);
         long asleep = all.stream().mapToLong(SleepSession::asleepSeconds).sum();
         SleepStageSample totals = new SleepStageSample(
             night.start(), night.start().plusSeconds(asleep), 0, asleep, 0, 0, 0, 0);

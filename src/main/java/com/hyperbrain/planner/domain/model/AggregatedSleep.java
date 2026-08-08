@@ -1,6 +1,8 @@
 package com.hyperbrain.planner.domain.model;
 
 import java.time.Duration;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -58,6 +60,17 @@ public record AggregatedSleep(SleepStageSample totals, SleepSession night,
      * stretch is still the same night, which is a question about the person.
      */
     private static final Duration SAME_NIGHT_GAP = Duration.ofHours(5);
+
+    /**
+     * The local hour by which the night is over (Daniel, 2026-08-08). A stretch of sleep that starts
+     * after it is not the night continuing, however short the break before it: by nine in the morning
+     * he was up and the day had begun, so what follows is a nap.
+     *
+     * <p>It is a <em>local</em> hour on purpose — a fact about his morning, not about an offset — and it
+     * guards the forward growth of the night only; see {@link #nightOf} for why applying it backwards
+     * would break the case the rule exists for.
+     */
+    private static final LocalTime NIGHT_ENDS_BY = LocalTime.of(9, 0);
 
     public AggregatedSleep {
         if (totals == null || night == null) {
@@ -122,26 +135,41 @@ public record AggregatedSleep(SleepStageSample totals, SleepSession night,
 
     /**
      * Resolves the night out of the day's sessions: the longest one, grown outwards — backwards and
-     * forwards alike — for as long as the break to the neighbouring session is shorter than
-     * {@link #SAME_NIGHT_GAP}. The result spans from the first fragment's start to the last one's end
-     * and carries the sleep of all of them.
+     * forwards — while the break to the neighbouring session is shorter than {@link #SAME_NIGHT_GAP}
+     * (and, forwards, while the night has not yet run into the morning). The result spans from the
+     * first fragment's start to the last one's end and carries the sleep of all of them.
      *
      * <p>The longest session is only the <em>seed</em>. What the night is, is the run of sleep it
      * belongs to: on a broken night neither fragment is the night on its own, and picking the longer of
      * the two puts the row's wake time in the middle of the small hours.
      *
-     * <p><b>Known limit, accepted (Daniel, 2026-08-08).</b> The threshold is symmetric and it is coarse,
-     * so an evening doze taken less than five hours before falling asleep is absorbed into the night —
-     * and so is a morning nap taken less than five hours after waking. Both stretch the row's hours
-     * outwards, which drags the learned bedtime earlier or the learned wake later. It is a far more
-     * benign failure than labelling a stretch of the night a nap, and it is not being solved now.
+     * <p><b>Forwards there is a second condition</b> (Daniel, 2026-08-08): the next fragment must also
+     * <em>start before {@link #NIGHT_ENDS_BY} in the user's local time</em>. A gap threshold on its own
+     * cannot tell "he woke at three and went back to sleep" from "he woke at 6:40 and napped at 10" —
+     * on his own production data the second case was being swallowed, and the row then declared 11:56
+     * as the hour he gets up. After nine in the morning he was already up, however short the break.
+     *
+     * <p><b>And that condition is deliberately not applied backwards.</b> Growing back is how a night
+     * that <em>began</em> in a short first stretch is recovered — 23:00–01:00 followed by 02:00–08:00 —
+     * and 23:00 is, trivially, after nine in the morning of its own day. Requiring it there would throw
+     * the opening stretch of the night out of the night and file it as a «Siesta» at 11 PM, which is
+     * the exact defect this whole rule exists to prevent.
+     *
+     * <p><b>Known limit, accepted (Daniel, 2026-08-08).</b> Because of that asymmetry an evening doze
+     * taken less than five hours before falling asleep is still absorbed into the night that follows it,
+     * dragging the learned bedtime earlier. It is a far more benign failure than labelling a stretch of
+     * the night a nap, and it is not being solved now.
      *
      * @param sessions the period's sessions, <b>chronological</b>; never null nor empty
+     * @param zone     the user's timezone, in which the morning cut is read; never null
      * @return the night: its real span on the clock and the sleep inside it
      */
-    public static SleepSession nightOf(List<SleepSession> sessions) {
+    public static SleepSession nightOf(List<SleepSession> sessions, ZoneId zone) {
         if (sessions == null || sessions.isEmpty()) {
             throw new IllegalArgumentException("no session to resolve a night from");
+        }
+        if (zone == null) {
+            throw new IllegalArgumentException("a night is resolved against the user's timezone");
         }
         int seed = sessions.indexOf(longestOf(sessions));
         int first = seed;
@@ -149,7 +177,9 @@ public record AggregatedSleep(SleepStageSample totals, SleepSession night,
             first--;
         }
         int last = seed;
-        while (last < sessions.size() - 1 && sameNight(sessions.get(last), sessions.get(last + 1))) {
+        while (last < sessions.size() - 1
+            && sameNight(sessions.get(last), sessions.get(last + 1))
+            && startsBeforeMorning(sessions.get(last + 1), zone)) {
             last++;
         }
         long asleep = 0;
@@ -162,6 +192,15 @@ public record AggregatedSleep(SleepStageSample totals, SleepSession night,
     /** Whether the break between two consecutive sessions is short enough to leave them one night. */
     private static boolean sameNight(SleepSession earlier, SleepSession later) {
         return Duration.between(earlier.end(), later.start()).compareTo(SAME_NIGHT_GAP) < 0;
+    }
+
+    /**
+     * Whether a session began early enough in the user's own morning to still be the night going on.
+     * Read in the user's zone and not in the instant's offset: the hour is a fact about his morning,
+     * not about UTC.
+     */
+    private static boolean startsBeforeMorning(SleepSession session, ZoneId zone) {
+        return session.start().atZoneSameInstant(zone).toLocalTime().isBefore(NIGHT_ENDS_BY);
     }
 
     /** The longest session by time asleep; the earliest wins a tie, so a night beats an equal nap. */

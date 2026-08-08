@@ -4,6 +4,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +23,7 @@ class AggregatedSleepTest {
     private static final OffsetDateTime NIGHT_START =
         OffsetDateTime.of(2026, 8, 6, 23, 0, 0, 0, ZoneOffset.UTC);
     private static final OffsetDateTime NIGHT_END = NIGHT_START.plusHours(7);
+    private static final ZoneId UTC = ZoneOffset.UTC;
 
     @Test
     @DisplayName("a single-session day is its own totals, its own hours and its only session")
@@ -47,7 +49,7 @@ class AggregatedSleepTest {
         SleepSession nap = new SleepSession(
             NIGHT_END.plusHours(6), NIGHT_END.plusHours(8), 2 * 3600);
 
-        assertThat(AggregatedSleep.nightOf(List.of(night, nap))).isEqualTo(night);
+        assertThat(AggregatedSleep.nightOf(List.of(night, nap), UTC)).isEqualTo(night);
     }
 
     @Test
@@ -60,7 +62,7 @@ class AggregatedSleepTest {
         SleepSession secondHalf = new SleepSession(
             NIGHT_START.plusHours(7).plusMinutes(30), NIGHT_START.plusHours(9), 90 * 60);
 
-        SleepSession night = AggregatedSleep.nightOf(List.of(firstHalf, secondHalf));
+        SleepSession night = AggregatedSleep.nightOf(List.of(firstHalf, secondHalf), UTC);
 
         // The span is the whole night on the clock, hole included...
         assertThat(night.start()).isEqualTo(NIGHT_START);
@@ -77,7 +79,7 @@ class AggregatedSleepTest {
         SleepSession longest = new SleepSession(
             NIGHT_START.plusHours(3), NIGHT_START.plusHours(9), 6 * 3600);
 
-        SleepSession night = AggregatedSleep.nightOf(List.of(firstHalf, longest));
+        SleepSession night = AggregatedSleep.nightOf(List.of(firstHalf, longest), UTC);
 
         assertThat(night.start()).isEqualTo(NIGHT_START);
         assertThat(night.end()).isEqualTo(NIGHT_START.plusHours(9));
@@ -86,16 +88,86 @@ class AggregatedSleepTest {
     @Test
     @DisplayName("under five hours apart is the same night; five hours sharp is a separate sleep")
     void the_same_night_threshold_is_five_hours_exclusive() {
-        SleepSession night = new SleepSession(NIGHT_START, NIGHT_END, 7 * 3600);
-        SleepSession justInside = new SleepSession(
-            NIGHT_END.plusMinutes(299), NIGHT_END.plusMinutes(359), 3600);   // 4 h 59 later
-        SleepSession onTheThreshold = new SleepSession(
-            NIGHT_END.plusHours(5), NIGHT_END.plusHours(6), 3600);           // 5 h sharp
+        // A short night ending at 03:00, so both candidates start before the morning cut and the only
+        // thing under test here is the gap itself.
+        SleepSession night = new SleepSession(NIGHT_START, NIGHT_START.plusHours(4), 4 * 3600);
+        SleepSession justInside = new SleepSession(                          // resumes 4 h 59 later
+            NIGHT_START.plusHours(4).plusMinutes(299),
+            NIGHT_START.plusHours(4).plusMinutes(359), 3600);
+        SleepSession onTheThreshold = new SleepSession(                      // resumes 5 h sharp later
+            NIGHT_START.plusHours(9), NIGHT_START.plusHours(10), 3600);
 
-        assertThat(AggregatedSleep.nightOf(List.of(night, justInside)).end())
+        assertThat(AggregatedSleep.nightOf(List.of(night, justInside), UTC).end())
             .isEqualTo(justInside.end());
-        assertThat(AggregatedSleep.nightOf(List.of(night, onTheThreshold)).end())
-            .isEqualTo(NIGHT_END);
+        assertThat(AggregatedSleep.nightOf(List.of(night, onTheThreshold), UTC).end())
+            .isEqualTo(NIGHT_START.plusHours(4));
+    }
+
+    @Test
+    @DisplayName("the night stops at nine in the morning: 08:59 joins it, 09:01 is a nap")
+    void the_night_ends_at_the_morning_cut() {
+        // Daniel, 2026-08-08. A gap threshold on its own cannot tell "he woke at three and went back to
+        // sleep" from "he woke at 6:40 and napped at 10": on his own production data the second was
+        // being swallowed and the row then declared 11:56 as the hour he gets up. After nine he was
+        // already up, however short the break.
+        // The night ends at 08:00, so BOTH candidates are well inside the 5 h gap and the only thing
+        // that differs between them is which side of nine o'clock they start on.
+        SleepSession night = new SleepSession(NIGHT_START, NIGHT_START.plusHours(9), 9 * 3600);
+        SleepSession beforeNine = new SleepSession(                                  // 08:59, gap 59 min
+            NIGHT_START.plusHours(9).plusMinutes(59), NIGHT_START.plusHours(11), 3600);
+        SleepSession afterNine = new SleepSession(                                   // 09:01, gap 1 h 01
+            NIGHT_START.plusHours(10).plusMinutes(1), NIGHT_START.plusHours(11), 3600);
+
+        assertThat(AggregatedSleep.nightOf(List.of(night, beforeNine), UTC).end())
+            .isEqualTo(beforeNine.end());
+        assertThat(AggregatedSleep.nightOf(List.of(night, afterNine), UTC).end())
+            .isEqualTo(night.end());
+    }
+
+    @Test
+    @DisplayName("the morning cut does NOT apply backwards, or a night starting at 23:00 would be a nap")
+    void the_morning_cut_is_deliberately_asymmetric() {
+        // Growing backwards is how a night that BEGAN in a short first stretch is recovered, and 23:00
+        // is trivially after nine in the morning of its own day. Requiring the cut there would file the
+        // opening stretch of the night as a «Siesta» at 11 PM — the exact defect the rule exists for.
+        SleepSession opening = new SleepSession(NIGHT_START, NIGHT_START.plusHours(2), 2 * 3600);
+        SleepSession bulk = new SleepSession(
+            NIGHT_START.plusHours(3), NIGHT_START.plusHours(9), 6 * 3600);
+
+        SleepSession night = AggregatedSleep.nightOf(List.of(opening, bulk), UTC);
+
+        assertThat(night.start()).isEqualTo(NIGHT_START);
+        assertThat(night.asleepSeconds()).isEqualTo(8 * 3600);
+    }
+
+    @Test
+    @DisplayName("nine o'clock is read in the USER's morning, not in the instant's offset")
+    void the_morning_cut_is_a_local_hour() {
+        // Bogota is UTC-5 all year. The same instant is 08:30 for him and 13:30 in UTC, and only one of
+        // those answers the question the rule asks: had he got up yet?
+        ZoneId bogota = ZoneId.of("America/Bogota");
+        SleepSession night = new SleepSession(                            // 23:00–05:00 local
+            OffsetDateTime.parse("2026-08-07T04:00:00Z"),
+            OffsetDateTime.parse("2026-08-07T10:00:00Z"), 6 * 3600);
+        SleepSession resumed = new SleepSession(                          // 08:30 local, gap 3 h 30
+            OffsetDateTime.parse("2026-08-07T13:30:00Z"),
+            OffsetDateTime.parse("2026-08-07T14:30:00Z"), 3600);
+
+        assertThat(AggregatedSleep.nightOf(List.of(night, resumed), bogota).end())
+            .isEqualTo(resumed.end());
+        // Read the boundary in UTC and the same stretch is past nine, and the night ends early.
+        assertThat(AggregatedSleep.nightOf(List.of(night, resumed), UTC).end())
+            .isEqualTo(night.end());
+    }
+
+    @Test
+    @DisplayName("a night cannot be resolved without the zone its morning is read in")
+    void the_zone_is_required() {
+        List<SleepSession> sessions = List.of(new SleepSession(NIGHT_START, NIGHT_END, 6 * 3600));
+
+        assertThatThrownBy(() -> AggregatedSleep.nightOf(sessions, null))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("timezone");
     }
 
     @Test
@@ -111,7 +183,7 @@ class AggregatedSleepTest {
             NIGHT_START, NIGHT_START.plusSeconds(4 * 3600 + 90 * 60 + 3600), 0, 23400, 0, 0, 0, 0);
 
         AggregatedSleep sleep = new AggregatedSleep(
-            totals, AggregatedSleep.nightOf(sessions), sessions);
+            totals, AggregatedSleep.nightOf(sessions, UTC), sessions);
 
         // The 90-minute fragment at half past six is night, not a nap at half past six.
         assertThat(sleep.naps()).containsExactly(afternoonNap);
@@ -124,7 +196,7 @@ class AggregatedSleepTest {
         SleepSession nap = new SleepSession(
             NIGHT_END.plusHours(6), NIGHT_END.plusHours(10), 3 * 3600);
 
-        assertThat(AggregatedSleep.nightOf(List.of(night, nap))).isEqualTo(night);
+        assertThat(AggregatedSleep.nightOf(List.of(night, nap), UTC)).isEqualTo(night);
     }
 
     @Test
@@ -132,7 +204,7 @@ class AggregatedSleepTest {
     void an_empty_period_has_no_night() {
         List<SleepSession> none = List.of();
 
-        assertThatThrownBy(() -> AggregatedSleep.nightOf(none))
+        assertThatThrownBy(() -> AggregatedSleep.nightOf(none, UTC))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("no session to resolve a night from");
     }

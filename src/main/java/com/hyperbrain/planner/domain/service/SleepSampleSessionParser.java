@@ -150,7 +150,7 @@ public class SleepSampleSessionParser {
         if (sessions.isEmpty()) {
             throw new IllegalArgumentException("no sleep session in the sleep day anchored at " + anchor);
         }
-        AggregatedSleep sleep = sum(sessions);
+        AggregatedSleep sleep = sum(sessions, zone);
         verifyPlausible(sleep);
         return new ParsedSleepDay(sleep, anchor);
     }
@@ -250,9 +250,10 @@ public class SleepSampleSessionParser {
      * Sums the sleep day's sessions into the aggregate the row is built from: stage durations add up,
      * the scorable window spans the summed time in bed (never the awake gaps between sessions — see
      * {@link AggregatedSleep}), the night cluster gives the row its real hours, and the contested
-     * seconds add up into the aggregate's overlap measurement.
+     * seconds add up into the aggregate's overlap measurement. The zone is needed because where the
+     * night ends is decided against the user's own morning, not against an offset.
      */
-    private static AggregatedSleep sum(List<SessionSummary> summaries) {
+    private static AggregatedSleep sum(List<SessionSummary> summaries, ZoneId zone) {
         long inBed = 0;
         long core = 0;
         long deep = 0;
@@ -274,7 +275,7 @@ public class SleepSampleSessionParser {
             overlap += summary.overlapSeconds();
             sessions.add(new SleepSession(sample.start(), sample.end(), sample.totalSleepSeconds()));
         }
-        SleepSession night = AggregatedSleep.nightOf(sessions);
+        SleepSession night = AggregatedSleep.nightOf(sessions, zone);
         SleepStageSample totals = new SleepStageSample(
             night.start(), night.start().plusSeconds(timeInBed),
             inBed, core, deep, rem, unspecified, awake);
