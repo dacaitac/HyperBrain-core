@@ -181,7 +181,7 @@ public class UserCommandService {
      *
      * <p><b>Why a night at a time.</b> The daily dump carries one or two nights, but the same channel is
      * what a wide date range travels through when the score has to be recalibrated against real history;
-     * reading only the anchor's night would collapse three months into a single row. Each night is
+     * reading only the anchor's night would collapse six weeks into a single row. Each night is
      * archived, scored and stored on its own, so one corrupt night is discarded without costing the
      * others. The upserts are keyed on the day (raw dump by user + sleep day, score row by wake day), so
      * re-sending an overlapping range converges instead of duplicating.

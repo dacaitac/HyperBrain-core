@@ -36,7 +36,9 @@ import java.util.TreeSet;
  * <p><b>One reading per night, not one per dump</b> (Daniel, 2026-08-08). The daily dump carries the
  * last night or two, but the same channel is what a wide date range travels through when the formula
  * has to be recalibrated against real history; collapsing it into the anchor's night alone would turn
- * ninety nights into a single row. Nothing about how a night is read changes — only how many are read.
+ * weeks of nights into a single row. Nothing about how a night is read changes — only how many are read.
+ * A send tops out near 55–60 nights: the transport caps a message at 256 KB and a night costs about
+ * 4.4 KB, so a wide range travels as overlapping windows of six weeks or less.
  *
  * <p>The pipeline:
  * <ol>
@@ -218,7 +220,7 @@ public class SleepSampleSessionParser {
      *
      * <p>This is the day whose sleep is happening now, which is why it, and only it, may turn its naps
      * into activities: the nights that came before it are history being recorded, and a backfill must
-     * not put three months of «Siesta» into the calendar and into Notion.
+     * not put weeks of «Siesta» into the calendar and into Notion.
      *
      * @param dump      the raw sleep-stage dump; never null
      * @param zone      the user's timezone; never null

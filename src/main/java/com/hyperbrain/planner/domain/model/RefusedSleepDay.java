@@ -5,7 +5,7 @@ import java.time.LocalDate;
 /**
  * A sleep day the reader could not turn into sleep: nothing parseable in the dump, or a volume of sleep
  * the plausibility guards refused. It is a first-class outcome rather than an exception because a dump
- * may hold ninety nights and one corrupt reading must not cost the other eighty-nine.
+ * may hold six weeks of nights and one corrupt reading must not cost all the others.
  *
  * @param sleepDay the local day the refused reading was about; never null
  * @param samples  the night's raw samples, kept so the refusal can be diagnosed; never null
