@@ -2,6 +2,8 @@ package com.hyperbrain.planner.application;
 
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.model.ParsedSleepDay;
+import com.hyperbrain.planner.domain.model.RefusedSleepDay;
+import com.hyperbrain.planner.domain.model.SleepDayReading;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
@@ -21,6 +23,7 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -170,49 +173,84 @@ public class UserCommandService {
     }
 
     /**
-     * Distils the command's HealthKit dump into the sleep of the current sleep day — the night plus
-     * the naps that followed it, summed — and records it as a device record (device precedence),
-     * reusing the same assembler + store the telemetry pipeline uses. The dump is parsed with the
-     * user's timezone (its local strings carry none) and anchored on the command's
-     * {@code occurred_at}, which both bounds the relevant period and stands in as
-     * {@code collected_at} when the dump carries no capture date. A dump that yields no scorable sleep
-     * (nothing parseable, nothing in the period, no asleep time) is logged and skipped rather than
-     * failing the whole command — the replan is the primary action and must not be lost to a bad
-     * enrichment. Parsing and scoring are pure (no SQL), so catching their failure leaves no partial
-     * state; a genuine store fault still propagates for retry.
+     * Distils the command's HealthKit dump into sleep and records <b>one row per night</b> it holds
+     * (device precedence), reusing the same assembler + store the telemetry pipeline uses. The dump is
+     * parsed with the user's timezone (its local strings carry none) and anchored on the command's
+     * {@code occurred_at}, which decides which day the run is standing on and stands in as
+     * {@code collected_at} when the dump carries no capture date.
      *
-     * <p><b>The dump is archived before it is read</b> (raw-first, ADR-016), through
+     * <p><b>Why a night at a time.</b> The daily dump carries one or two nights, but the same channel is
+     * what a wide date range travels through when the score has to be recalibrated against real history;
+     * reading only the anchor's night would collapse three months into a single row. Each night is
+     * archived, scored and stored on its own, so one corrupt night is discarded without costing the
+     * others. The upserts are keyed on the day (raw dump by user + sleep day, score row by wake day), so
+     * re-sending an overlapping range converges instead of duplicating.
+     *
+     * <p><b>Each night is archived before it is read</b> (raw-first, ADR-016), through
      * {@link SleepDumpArchive}: totals alone cannot be un-collapsed, and when the way sleep is read
-     * changes there has to be something left to recompute the nights from. The archived row is then
-     * marked by the outcome — interpreted when a record was written, unusable when the payload was
-     * refused — and the typed record carries its id, so a row can always be traced back to the bytes it
-     * came from.
+     * changes there has to be something left to recompute the nights from — <em>each</em> night, under
+     * its own key. The archived row is then marked by the outcome — interpreted when a record was
+     * written, unusable when the payload was refused — and the typed record carries its id, so a row can
+     * always be traced back to the bytes it came from.
      *
-     * <p>The day's naps are then recorded as completed activities (Daniel, 2026-08-08) through
-     * {@link NapActivityRecorder}, so time that went to sleeping shows up in Notion and in the calendar
-     * as what it was. That write is a genuine domain write, not enrichment of the score: it shares this
-     * command's transaction and a failure in it propagates.
+     * <p><b>Only the anchor's day turns its naps into activities</b> (see
+     * {@link #recordNight}). The whole sleep path is best-effort: a night nothing can be read from is
+     * logged and skipped rather than failing the command, because the replan is the primary action and
+     * must not be lost to a bad enrichment. Parsing and scoring are pure (no SQL), so skipping leaves no
+     * partial state; a genuine store fault still propagates for retry.
      */
     private void recordDeviceSleep(UUID userId, UserCommand command, ZoneId zone) {
-        UUID archivedDumpId = sleepDumpArchive.archive(userId, command.sleepSession(),
-            sleepSampleSessionParser.sleepDayOf(command.sleepSession(), zone, command.occurredAt()),
-            command.occurredAt());
-        ParsedSleepDay day;
+        List<SleepDayReading> nights = sleepSampleSessionParser.readSleepDays(
+            command.sleepSession(), zone, command.occurredAt());
+        if (nights.isEmpty()) {
+            log.warn("Sleep dump on replan command {} held no night to record", command.commandId());
+            return;
+        }
+        LocalDate anchorDay =
+            sleepSampleSessionParser.sleepDayOf(command.sleepSession(), zone, command.occurredAt());
+        for (SleepDayReading night : nights) {
+            UUID archivedDumpId = sleepDumpArchive.archive(
+                userId, night.samples(), night.sleepDay(), command.occurredAt());
+            switch (night) {
+                case RefusedSleepDay refused -> {
+                    sleepDumpArchive.markUnusable(archivedDumpId);
+                    log.warn("Unusable sleep of {} on replan command {} archived and skipped: {}",
+                        refused.sleepDay(), command.commandId(), refused.reason());
+                }
+                case ParsedSleepDay parsed ->
+                    recordNight(userId, parsed, zone, archivedDumpId, anchorDay, command.commandId());
+            }
+        }
+    }
+
+    /**
+     * Records one night: its score row, the archive's interpreted mark and — only when it is the day the
+     * run is standing on — its naps as completed activities.
+     *
+     * <p><b>Why the naps are the anchor's day alone</b> (Daniel, 2026-08-08). A nap becomes a real
+     * executable with a calendar event and a Notion page, so a three-month backfill would fill the past
+     * with «Siesta» entries nobody asked for. A historical night leaves a score row and its raw archive,
+     * nothing else. The nap write shares this command's transaction and its failure propagates — unlike
+     * the score, it is a genuine domain write and not enrichment.
+     */
+    private void recordNight(UUID userId, ParsedSleepDay night, ZoneId zone, UUID archivedDumpId,
+                             LocalDate anchorDay, UUID commandId) {
         DeviceSleepRecord record;
         try {
-            day = sleepSampleSessionParser.parse(command.sleepSession(), zone, command.occurredAt());
-            record = sleepRecordAssembler.assemble(day.sleep(), day.collectedAt(), archivedDumpId);
+            record = sleepRecordAssembler.assemble(night.sleep(), night.collectedAt(), archivedDumpId);
         } catch (IllegalArgumentException ex) {
             sleepDumpArchive.markUnusable(archivedDumpId);
-            log.warn("Unusable sleep dump on replan command {} archived and skipped: {}",
-                command.commandId(), ex.getMessage());
+            log.warn("Unscorable sleep of {} on replan command {} archived and skipped: {}",
+                night.sleepDay(), commandId, ex.getMessage());
             return;
         }
         sleepScoreStore.upsertDeviceSleepRecord(userId, record, zone);
         sleepDumpArchive.markInterpreted(archivedDumpId);
-        log.info("Device sleep (score {}) from replan command {} recorded for user {}",
-            record.sleepScore(), command.commandId(), userId);
-        napActivityRecorder.record(userId, day.sleep());
+        log.info("Device sleep of {} (score {}) from replan command {} recorded for user {}",
+            night.sleepDay(), record.sleepScore(), commandId, userId);
+        if (night.sleepDay().equals(anchorDay)) {
+            napActivityRecorder.record(userId, night.sleep());
+        }
     }
 
     private void recordSleepScore(UUID userId, SleepScoreInput input, OffsetDateTime occurredAt) {
