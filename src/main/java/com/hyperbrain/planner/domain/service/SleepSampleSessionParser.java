@@ -177,7 +177,7 @@ public class SleepSampleSessionParser {
             LocalDate sleepDay = night.getKey();
             DeviceSleepSamples samples = samplesFiledUnder(sleepDay, dump, filedUnder);
             AggregatedSleep sleep = sum(night.getValue(), zone);
-            String refusal = implausibility(sleep);
+            String refusal = implausibility(sleep, accountedSeconds(night.getValue()));
             readings.add(refusal == null
                 ? new ParsedSleepDay(sleepDay, samples, sleep, anchor)
                 : new RefusedSleepDay(sleepDay, samples, refusal));
@@ -361,6 +361,20 @@ public class SleepSampleSessionParser {
     }
 
     /**
+     * The night's measured time: each session's accounted union added up. Adding <em>these</em> is
+     * sound where adding TST to WASO is not — two sessions are separated by more than
+     * {@link #sessionGap} by construction, so they cannot overlap, whereas two stage tracks of the same
+     * session routinely do.
+     */
+    private static long accountedSeconds(List<SessionSummary> summaries) {
+        long accounted = 0;
+        for (SessionSummary summary : summaries) {
+            accounted += summary.accountedSeconds();
+        }
+        return accounted;
+    }
+
+    /**
      * Judges a night whose volume does not fit the time it claims to have measured. These are input
      * guards, not scoring: a reading that fails one of them is corrupt, and scoring it would put a
      * plausible-looking number on a day that was never measured.
@@ -368,18 +382,33 @@ public class SleepSampleSessionParser {
      * <p>Returned rather than thrown because the verdict is about <em>one</em> night of a dump that may
      * hold many, and the other nights are none the worse for it.
      *
-     * @param sleep the night's aggregate; never null
-     * @return why the night is refused — more sleep than its window can carry, more than
+     * <p><b>What the first guard is worth now that it is measured correctly.</b> A session's accounted
+     * union lies inside that session's own window by construction, so the measured time can no longer
+     * exceed the window it was measured in — the guard states an invariant that the aggregation already
+     * guarantees, and can only fire if the two ever stop agreeing (a defect here, not a corrupt dump).
+     * It is kept as the cheap assertion of that invariant; the tolerance now absorbs only that. What it
+     * used to catch was its own arithmetic: the double-counted overlap between the asleep and awake
+     * tracks, which is not something a reading can be wrong about. The <em>real</em> corrupt readings —
+     * a volume no day can hold, a window wider than a day — fall to the two guards below, and those
+     * assume no disjunction and are untouched.
+     *
+     * @param sleep            the night's aggregate; never null
+     * @param accountedSeconds the night's measured time — its sessions' accounted unions summed, which
+     *                         is exact because the sessions are separated by more than
+     *                         {@link #sessionGap} and therefore never overlap. It is
+     *                         <b>a union and not a sum of totals</b>; see
+     *                         {@link SessionSummary#accountedSeconds} for the night this distinction
+     *                         cost.
+     * @return why the night is refused — more measured time than its window can carry, more sleep than
      *         {@link #MAX_TOTAL_SLEEP}, or a window wider than {@link #MAX_MEASURED_WINDOW} — or null
      *         when it is plausible
      */
-    private static String implausibility(AggregatedSleep sleep) {
+    private static String implausibility(AggregatedSleep sleep, long accountedSeconds) {
         SleepStageSample totals = sleep.totals();
         long windowSeconds = Duration.between(totals.start(), totals.end()).toSeconds();
-        long asleepAndAwake = totals.totalSleepSeconds() + totals.awakeSeconds();
-        if (asleepAndAwake > MEASURED_WINDOW_TOLERANCE * windowSeconds) {
-            return "implausible sleep dump: " + asleepAndAwake
-                + "s asleep+awake exceed the " + windowSeconds + "s window that was measured";
+        if (accountedSeconds > MEASURED_WINDOW_TOLERANCE * windowSeconds) {
+            return "implausible sleep dump: " + accountedSeconds
+                + "s of measured time exceed the " + windowSeconds + "s window that was measured";
         }
         if (totals.totalSleepSeconds() > MAX_TOTAL_SLEEP.toSeconds()) {
             return "implausible sleep dump: " + totals.totalSleepSeconds()
@@ -396,9 +425,12 @@ public class SleepSampleSessionParser {
      * Aggregates one session: asleep stages are overlap-resolved (proportional split) so they sum to
      * the asleep-union TST; Awake and In Bed are plain unions; the window spans all its samples.
      *
-     * @return the session's sample and its contested seconds, or null when its window is degenerate
-     *         (zero-length) — such a session carries no time and is dropped rather than failing the
-     *         whole dump
+     * <p>It also measures the session's <b>accounted time</b> — see {@link SessionSummary#accountedSeconds}
+     * — as the union of the asleep <em>and</em> awake intervals laid on <b>one</b> timeline.
+     *
+     * @return the session's sample, its contested seconds and its accounted time, or null when its
+     *         window is degenerate (zero-length) — such a session carries no time and is dropped
+     *         rather than failing the whole dump
      */
     private static SessionSummary aggregate(List<StageInterval> session) {
         List<StageInterval> asleep = new ArrayList<>();
@@ -424,6 +456,10 @@ public class SleepSampleSessionParser {
         }
         AsleepBreakdown breakdown = resolveAsleepSeconds(asleep);
         Map<StageCategory, Long> asleepSeconds = breakdown.seconds();
+        // Asleep and awake on ONE timeline, not two totals added up — see SessionSummary.
+        List<StageInterval> accounted = new ArrayList<>(asleep.size() + awake.size());
+        accounted.addAll(asleep);
+        accounted.addAll(awake);
         return new SessionSummary(new SleepStageSample(
             windowStart, windowEnd,
             unionSeconds(inBed),
@@ -431,7 +467,7 @@ public class SleepSampleSessionParser {
             asleepSeconds.get(StageCategory.DEEP),
             asleepSeconds.get(StageCategory.REM),
             asleepSeconds.get(StageCategory.UNSPECIFIED),
-            unionSeconds(awake)), breakdown.overlapSeconds());
+            unionSeconds(awake)), breakdown.overlapSeconds(), unionSeconds(accounted));
     }
 
     /**
@@ -561,8 +597,26 @@ public class SleepSampleSessionParser {
                                  int sampleIndex) {
     }
 
-    /** One clustered session already aggregated, with the sleep seconds more than one stage claimed. */
-    private record SessionSummary(SleepStageSample sample, long overlapSeconds) {
+    /**
+     * One clustered session already aggregated.
+     *
+     * @param sample           the session's stage durations and its real window
+     * @param overlapSeconds   the sleep seconds more than one stage claimed at once
+     * @param accountedSeconds the session's <b>measured time</b>: the union of its asleep and awake
+     *                         intervals on a <b>single</b> timeline.
+     *
+     *                         <p><b>Union, never a sum</b> (Daniel, 2026-08-08). Adding TST to WASO
+     *                         assumes the two are disjoint, and on Apple Watch data they are not: the
+     *                         watch <em>revises</em> its staging and an {@code Awake} stretch overlaps
+     *                         the {@code Core}/{@code REM} it corrects, exactly as the sleep stages
+     *                         overlap each other. Adding the two unions therefore counts the contested
+     *                         seconds twice — the same mistake as "the deepest stage wins", made in a
+     *                         second place. On Daniel's own fortnight it declared 34 200 s of measured
+     *                         time inside a 30 900 s window and cost four of thirteen nights, last
+     *                         night included. Laid on one timeline the overlap is counted once, and the
+     *                         reading matches the time it was actually taken over.
+     */
+    private record SessionSummary(SleepStageSample sample, long overlapSeconds, long accountedSeconds) {
     }
 
     /**

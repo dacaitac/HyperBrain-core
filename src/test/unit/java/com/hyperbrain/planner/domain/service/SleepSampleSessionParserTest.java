@@ -98,13 +98,12 @@ class SleepSampleSessionParserTest {
             LocalDate.of(2026, 8, 5), LocalDate.of(2026, 8, 6), LocalDate.of(2026, 8, 7),
             LocalDate.of(2026, 8, 8));
 
-        // Nine of them are scorable; four are refused one at a time — and the four refusals cost the
-        // nine nothing, which is the difference between this and the single ERROR row in production.
-        assertThat(nights).filteredOn(ParsedSleepDay.class::isInstance).hasSize(9);
-        assertThat(nights).filteredOn(RefusedSleepDay.class::isInstance)
-            .extracting(SleepDayReading::sleepDay)
-            .containsExactly(LocalDate.of(2026, 7, 30), LocalDate.of(2026, 8, 3),
-                LocalDate.of(2026, 8, 5), LocalDate.of(2026, 8, 8));
+        // And every one of them is scorable. Four were not, until the measured-window guard stopped
+        // reading a night's accounted time as TST + WASO: on his data the watch's Awake track overlaps
+        // the sleep it revises, so that sum counted the contested seconds twice and refused four
+        // perfectly good nights — 30 Jul, 3, 5 and 8 Aug, the last of them last night.
+        assertThat(nights).allSatisfy(reading ->
+            assertThat(reading).isInstanceOf(ParsedSleepDay.class));
 
         // Every night carries its own slice of the 660 samples and nothing else: the slices are
         // disjoint, and together with the 22 that belong to the night left out they account for the
@@ -133,9 +132,16 @@ class SleepSampleSessionParserTest {
 
         // The whole dump is anchored on its own capture date ("8/08/2026 at 11:32 AM"), once — every
         // night of the range was collected at the same instant, however far back it happened.
-        assertThat(nights).filteredOn(ParsedSleepDay.class::isInstance)
-            .allSatisfy(reading -> assertThat(((ParsedSleepDay) reading).collectedAt())
-                .isEqualTo(OffsetDateTime.parse("2026-08-08T11:32:00Z")));
+        assertThat(nights).allSatisfy(reading -> assertThat(((ParsedSleepDay) reading).collectedAt())
+            .isEqualTo(OffsetDateTime.parse("2026-08-08T11:32:00Z")));
+
+        // The invariant that must hold on every night of his real history, and the one the guard was
+        // trying to express: no night accounts for more time than the window it was measured in.
+        assertThat(nights).allSatisfy(reading -> {
+            SleepStageSample totals = ((ParsedSleepDay) reading).sleep().totals();
+            assertThat(totals.totalSleepSeconds())
+                .isLessThanOrEqualTo(Duration.between(totals.start(), totals.end()).toSeconds());
+        });
     }
 
     @Test
@@ -179,9 +185,8 @@ class SleepSampleSessionParserTest {
         // production archived as ERROR.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "06/07/2026 at 11:00 PM", "07/07/2026 at 5:00 AM"),  // sleep day 7 — oldest
-            // Sleep day 8: Awake laid over the first half of the night — 9 h claimed of a 6 h window.
-            sample("Core", "07/07/2026 at 11:00 PM", "08/07/2026 at 5:00 AM"),
-            sample("Awake", "07/07/2026 at 11:00 PM", "08/07/2026 at 2:00 AM"),
+            // Sleep day 8: seventeen hours straight, which no sleep day holds.
+            sample("Core", "07/07/2026 at 6:00 PM", "08/07/2026 at 11:00 AM"),
             sample("Core", "08/07/2026 at 10:00 PM", "09/07/2026 at 7:00 AM"))); // sleep day 9
 
         List<SleepDayReading> nights = parser.readSleepDays(dump, ZONE, reference());
@@ -190,10 +195,10 @@ class SleepSampleSessionParserTest {
         assertThat(nights.getFirst()).isInstanceOf(RefusedSleepDay.class);
         RefusedSleepDay refused = (RefusedSleepDay) nights.getFirst();
         assertThat(refused.sleepDay()).isEqualTo(LocalDate.of(2026, 7, 8));
-        assertThat(refused.reason()).contains("exceed the 21600s window that was measured");
+        assertThat(refused.reason()).contains("of sleep exceed the 16h a sleep day can hold");
         // The refusal carries the night's bytes too: it is precisely the row worth archiving, because
         // it is the only thing that explains afterwards why that night has no score.
-        assertThat(refused.samples().samples()).hasSize(2);
+        assertThat(refused.samples().samples()).hasSize(1);
         // And the good night after it is read as if nothing had happened.
         assertThat(nights.getLast()).isInstanceOf(ParsedSleepDay.class);
         assertThat(((ParsedSleepDay) nights.getLast()).sleep().totals().coreSeconds()).isEqualTo(9 * 3600);
@@ -663,27 +668,39 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
-    @DisplayName("a dump claiming more asleep + awake time than the window it measured is refused")
-    void rejects_more_sleep_than_the_measured_window_can_hold() {
-        // Awake laid over the whole first half of the night: the window measures 6 h but the reading
-        // claims 9 h of it accounted for. Scoring that would put a number on efficiency and WASO that
-        // no measurement supports.
+    @DisplayName("an Awake stretch laid over the sleep it revises is measured once, not twice")
+    void awake_overlapping_the_sleep_it_revises_does_not_refuse_the_night() {
+        // The defect this pins (Daniel, 2026-08-08). The measured-window guard used to read the night's
+        // accounted time as TST + WASO, which assumes the asleep and awake intervals are disjoint. They
+        // are not: the watch REVISES its staging, and an Awake stretch overlaps the Core it corrects —
+        // the very same thing the stages do to each other, and the reason the overlap is split instead
+        // of won. Adding the two unions counted the contested seconds twice and refused the night.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
-            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
-            sample("Awake", "09/07/2026 at 11:00 PM", "10/07/2026 at 2:00 AM")));
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),   // 6 h of sleep
+            sample("Awake", "09/07/2026 at 11:00 PM", "10/07/2026 at 2:00 AM"))); // 3 h laid over it
 
-        assertThat(theOnlyRefusal(dump, ZONE, reference()).reason())
-            .contains("exceed the 21600s window that was measured");
+        AggregatedSleep sleep = theOnlyNight(dump, ZONE, reference()).sleep();
+
+        // The old sum said 21 600 + 10 800 = 32 400 s accounted inside a 21 600 s window — one and a
+        // half times what was measured — and threw the night away. On one timeline the union is the
+        // 21 600 s that were actually recorded, and the night is read.
+        assertThat(sleep.totals().totalSleepSeconds()).isEqualTo(21600);
+        assertThat(sleep.totals().awakeSeconds()).isEqualTo(10800);
+        assertThat(sleep.totals().totalSleepSeconds() + sleep.totals().awakeSeconds())
+            .isGreaterThan(Duration.between(sleep.totals().start(), sleep.totals().end()).toSeconds());
     }
 
     @Test
-    @DisplayName("a sleep day holding more than 16 h of sleep is refused as a corrupt reading")
+    @DisplayName("a sleep day holding more than 16 h of sleep is still refused — the guards are not off")
     void rejects_more_than_sixteen_hours_of_sleep() {
+        // Measuring the accounted time as a union rather than a sum does not soften what a corrupt
+        // reading is. Seventeen hours of sleep in one day is not a long night — it is duplicated days
+        // or a mis-parsed year — and it still falls, with the volume named in the refusal.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 6:00 PM", "10/07/2026 at 11:00 AM"))); // 17 h straight
 
         assertThat(theOnlyRefusal(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).reason())
-            .contains("of sleep exceed the 16h a sleep day can hold");
+            .contains("61200s of sleep exceed the 16h a sleep day can hold");
     }
 
     @Test

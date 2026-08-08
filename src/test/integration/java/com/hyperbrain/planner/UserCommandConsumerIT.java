@@ -232,31 +232,32 @@ class UserCommandConsumerIT {
         UUID first = UUID.randomUUID();
         send(replanWithBackfillBody(first, BACKFILL_CAPTURED_AT), first.toString());
 
-        // Thirteen nights read (the oldest of the range is left to the next overlapping window), nine
-        // of them scorable — one row each, keyed on the night, not one row for the whole send.
-        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(9));
+        // Thirteen nights read — the oldest of the range is left to the next overlapping window — and
+        // every one of them scorable: one row each, keyed on the night, not one row for the whole send.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(13));
         assertThat(archivedDumpCount()).isEqualTo(13);
         assertThat(jdbcTemplate.queryForList(
             "SELECT (end_time AT TIME ZONE 'UTC')::date::text FROM tel_sleep_record "
                 + "WHERE user_id = ? ORDER BY end_time", String.class, USER))
-            .containsExactly("2026-07-26", "2026-07-27", "2026-07-28", "2026-07-31", "2026-08-01",
-                "2026-08-02", "2026-08-04", "2026-08-06", "2026-08-07");
+            .containsExactly("2026-07-26", "2026-07-27", "2026-07-28", "2026-07-30", "2026-07-31",
+                "2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06",
+                "2026-08-07", "2026-08-08");
 
         // Each night's bytes are filed under that night's own key, so a night stays re-derivable one at
-        // a time; the four the guards refused are kept too, flagged, which is the only thing that can
-        // explain afterwards why those nights have no score.
+        // a time — and nothing in his real history is refused, now that a night's accounted time is
+        // measured as a union instead of TST added to WASO.
         assertThat(jdbcTemplate.queryForList(
             "SELECT dedup_key FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP' "
                 + "ORDER BY dedup_key", String.class, USER))
             .startsWith("APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-07-26")
             .endsWith("APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-08-08");
-        assertThat(countArchivedWithStatus("ERROR")).isEqualTo(4);
-        assertThat(countArchivedWithStatus("NORMALIZED")).isEqualTo(9);
+        assertThat(countArchivedWithStatus("NORMALIZED")).isEqualTo(13);
+        assertThat(countArchivedWithStatus("ERROR")).isZero();
 
-        // Not one «Siesta» in the past. The 7th of August holds a real nap (09:20–13:56), and a history
-        // that recorded it would have created an executable with its calendar event and its Notion page
-        // for an afternoon three weeks gone. Only the day the run is standing on may do that, and that
-        // night had no nap.
+        // Not one «Siesta» in the past. The 5th and the 7th of August hold real naps (the 7th's is the
+        // 09:20–13:56 stretch that broke production), and a history that recorded them would have
+        // created executables with their calendar events and their Notion pages for afternoons weeks
+        // gone. Only the day the run is standing on may do that, and that night had no nap.
         assertThat(napCount(sleepCycle)).isZero();
 
         // And a re-send of an overlapping range converges: the archive rewrites each night in place and
@@ -266,7 +267,7 @@ class UserCommandConsumerIT {
         send(replanWithBackfillBody(second, BACKFILL_CAPTURED_AT), second.toString());
         await().atMost(TIMEOUT).untilAsserted(() ->
             assertThat(countProcessed("user-command:" + second)).isEqualTo(1));
-        assertThat(sleepRecordCount()).isEqualTo(9);
+        assertThat(sleepRecordCount()).isEqualTo(13);
         assertThat(archivedDumpCount()).isEqualTo(13);
         assertThat(napCount(sleepCycle)).isZero();
     }
@@ -546,8 +547,13 @@ class UserCommandConsumerIT {
     }
 
     /**
-     * A dump the plausibility guards refuse: Awake laid over the whole first half of the night, so it
-     * claims 9 h of a 6 h window. Nothing scorable comes out of it, and that is the point.
+     * A dump the plausibility guards refuse: seventeen hours of sleep in one day, which is duplicated
+     * days or a mis-parsed year rather than a long night. Nothing scorable comes out of it, and that is
+     * the point.
+     *
+     * <p>Deliberately <b>not</b> an {@code Awake} stretch laid over the sleep it revises: that shape is
+     * what Apple Watch actually produces and it must be read, not refused (see the parser's accounted
+     * time, measured as a union).
      */
     private static String replanWithImplausibleSleepBody(UUID commandId, OffsetDateTime occurredAt) {
         return """
@@ -559,8 +565,7 @@ class UserCommandConsumerIT {
               "sleep": {
                 "date": "10/07/2026 at 12:05 PM",
                 "sample": [
-                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
-                  {"stage":"Awake","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 2:00 AM","duration":"3:00:00"}
+                  {"stage":"Core","startDate":"09/07/2026 at 6:00 PM","endDate":"10/07/2026 at 11:00 AM","duration":"17:00:00"}
                 ]
               }
             }
