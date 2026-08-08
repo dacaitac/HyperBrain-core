@@ -75,6 +75,23 @@ class NapActivityRecorderTest {
     }
 
     @Test
+    @DisplayName("a fragment of a broken night is night, not a nap at half past six in the morning")
+    void a_night_fragment_is_never_recorded_as_a_nap() {
+        // Daniel's split night: 23:00–03:00 and 06:30–08:00. Filing the second stretch as a nap put a
+        // «Siesta» event at 06:30 in his calendar and taught the frontier that he woke at 03:00.
+        SleepSession firstHalf = new SleepSession(
+            OffsetDateTime.parse("2026-08-07T23:00:00Z"),
+            OffsetDateTime.parse("2026-08-08T03:00:00Z"), 4 * 3600);
+        SleepSession secondHalf = new SleepSession(
+            OffsetDateTime.parse("2026-08-08T06:30:00Z"),
+            OffsetDateTime.parse("2026-08-08T08:00:00Z"), 90 * 60);
+
+        recorder.record(USER_ID, sleepOf(firstHalf, secondHalf));
+
+        verifyNoInteractions(repository, outboxRepository);
+    }
+
+    @Test
     @DisplayName("the night is never recorded — it is the sleep row, not an activity")
     void the_night_is_not_recorded_as_an_activity() {
         // A day of one session is a night on its own: recording it would put a six-hour event across
@@ -184,8 +201,8 @@ class NapActivityRecorderTest {
     void all_the_naps_of_the_day_are_recorded() {
         SleepSession night = new SleepSession(NIGHT_START, NIGHT_END, 6 * 3600);
         SleepSession morningNap = new SleepSession(
-            OffsetDateTime.parse("2026-08-08T09:00:00Z"),
-            OffsetDateTime.parse("2026-08-08T09:40:00Z"), 40 * 60);
+            OffsetDateTime.parse("2026-08-08T11:00:00Z"),
+            OffsetDateTime.parse("2026-08-08T11:40:00Z"), 40 * 60);
         SleepSession afternoonNap = new SleepSession(NAP_START, NAP_END, 3600);
         when(repository.findCycleIdByName(USER_ID, "Sueño")).thenReturn(Optional.of(SLEEP_CYCLE_ID));
         when(repository.findActivityOverlapping(eq(USER_ID), eq(SLEEP_CYCLE_ID), any(), any()))
@@ -206,13 +223,13 @@ class NapActivityRecorderTest {
                 && executableId.toString().equals(event.aggregateId()));
     }
 
-    /** A sleep day whose main session is the longest of the given ones — the night, in every case here. */
+    /** A sleep day built the way the parser builds one: the night resolved out of its sessions. */
     private static AggregatedSleep sleepOf(SleepSession... sessions) {
         List<SleepSession> all = List.of(sessions);
-        SleepSession main = AggregatedSleep.mainOf(all);
+        SleepSession night = AggregatedSleep.nightOf(all);
         long asleep = all.stream().mapToLong(SleepSession::asleepSeconds).sum();
         SleepStageSample totals = new SleepStageSample(
-            main.start(), main.start().plusSeconds(asleep), 0, asleep, 0, 0, 0, 0);
-        return new AggregatedSleep(totals, main, all);
+            night.start(), night.start().plusSeconds(asleep), 0, asleep, 0, 0, 0, 0);
+        return new AggregatedSleep(totals, night, all);
     }
 }

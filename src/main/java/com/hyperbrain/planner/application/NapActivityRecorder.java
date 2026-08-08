@@ -30,10 +30,12 @@ import java.util.UUID;
  * Records the naps of a sleep day as completed activities, so a nap the user actually took shows up in
  * Notion and in his calendar as what it was: time that went to sleeping (Daniel, 2026-08-08).
  *
- * <p><b>Which sessions are naps.</b> The sleep day's main session is the night — it is the longest one
- * and it is what gives the row its hours. Every other session of the same day is a nap. The night is
- * not recorded: it is already the {@code tel_sleep_record} row, and writing it again as an activity
- * would duplicate it as a calendar event covering the whole night.
+ * <p><b>Which sessions are naps.</b> The aggregate decides — a nap is a session outside the night
+ * cluster ({@link AggregatedSleep#naps()}) — and this class only applies the floor below which an
+ * episode is not worth a calendar entry. Asking the aggregate rather than comparing against "the
+ * longest session" is what keeps a broken night whole: the 06:30 stretch of a night that started at
+ * 23:00 is night, not a nap at half past six. The night itself is never recorded: it is already the
+ * {@code tel_sleep_record} row, and writing it again would duplicate it as a calendar event.
  *
  * <p><b>Idempotency is the point, not a nicety.</b> Recording twice would leave two activities and two
  * calendar events for one nap, and the replan that re-sends the dump runs several times a day. An
@@ -122,15 +124,14 @@ public class NapActivityRecorder {
         log.info("Nap {} recorded for user {}: {} .. {}", activityId, userId, nap.start(), nap.end());
     }
 
-    /** The day's sessions that are naps: everything but the night, that slept long enough to count. */
+    /** The day's naps that slept long enough to be worth a calendar entry. */
     private static List<SleepSession> napsOf(AggregatedSleep sleep) {
-        List<SleepSession> naps = new ArrayList<>();
-        for (SleepSession session : sleep.sessions()) {
-            if (!session.equals(sleep.mainSession())
-                && session.asleepSeconds() >= NAP_FLOOR.toSeconds()) {
-                naps.add(session);
+        List<SleepSession> worthRecording = new ArrayList<>();
+        for (SleepSession nap : sleep.naps()) {
+            if (nap.asleepSeconds() >= NAP_FLOOR.toSeconds()) {
+                worthRecording.add(nap);
             }
         }
-        return naps;
+        return worthRecording;
     }
 }

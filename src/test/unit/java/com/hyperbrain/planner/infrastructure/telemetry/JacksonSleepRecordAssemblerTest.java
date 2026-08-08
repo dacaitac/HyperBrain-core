@@ -134,6 +134,36 @@ class JacksonSleepRecordAssemblerTest {
     }
 
     @Test
+    @DisplayName("a broken night stamps the row with the WHOLE night, hole and all — never the longer half")
+    void a_broken_night_stamps_the_row_with_its_full_span() {
+        // The row's two instant columns are the chronotype the sleep frontier learns from, so on a night
+        // slept in two phases they have to span both: stamping the longer fragment alone declared that
+        // he got up at 03:00. The duration carrier is the other half of the same separation — it must
+        // NOT grow to the 9 h span, or the 3 h 30 hole would be counted as time in bed and sink
+        // efficiency for a night he simply woke up in the middle of.
+        OffsetDateTime nightStart = OffsetDateTime.parse("2026-08-07T23:00:00Z");
+        OffsetDateTime nightEnd = OffsetDateTime.parse("2026-08-08T08:00:00Z");
+        SleepSession firstHalf = new SleepSession(nightStart, nightStart.plusHours(4), 4 * 3600);
+        SleepSession secondHalf = new SleepSession(nightEnd.minusHours(1).minusMinutes(30),
+            nightEnd, 90 * 60);
+        SleepSession night = new SleepSession(nightStart, nightEnd, 4 * 3600 + 90 * 60);
+        SleepStageSample carrier = new SleepStageSample(
+            nightStart, nightStart.plusSeconds(4 * 3600 + 90 * 60), 0, 19800, 0, 0, 0, 0);
+
+        DeviceSleepRecord record = assembler.assemble(
+            new AggregatedSleep(carrier, night, List.of(firstHalf, secondHalf)), COLLECTED, null);
+
+        assertThat(record.startTime()).isEqualTo(nightStart);
+        assertThat(record.endTime()).isEqualTo(nightEnd);
+        // 5 h 30 of sleep over 5 h 30 of summed bed time — the hole is neither slept nor in bed.
+        assertThat(record.durationMinutes()).isEqualTo(330);
+        assertThat(record.stagesJson()).contains("\"efficiency\":1.0");
+        // And both fragments survive, so the day can still see WHEN the night was broken.
+        assertThat(record.stagesJson())
+            .contains(firstHalf.end().toString(), secondHalf.start().toString());
+    }
+
+    @Test
     @DisplayName("the contested seconds are persisted beside the stages, so past rows can be judged")
     void the_overlap_measurement_is_persisted() {
         // Not a duration of the night but a property of the reading: how much of the sleep more than one

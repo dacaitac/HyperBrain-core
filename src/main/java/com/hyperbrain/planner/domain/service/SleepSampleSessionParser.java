@@ -145,8 +145,7 @@ public class SleepSampleSessionParser {
             throw new IllegalArgumentException("no parseable sleep samples in the dump");
         }
 
-        OffsetDateTime capturedAt = parseInstant(dump.capturedAt(), zone);
-        OffsetDateTime anchor = capturedAt != null ? capturedAt : reference;
+        OffsetDateTime anchor = anchorOf(dump, zone, reference);
         List<SessionSummary> sessions = sessionsWithin(parsed, sleepDayWindow(anchor, zone));
         if (sessions.isEmpty()) {
             throw new IllegalArgumentException("no sleep session in the sleep day anchored at " + anchor);
@@ -154,6 +153,34 @@ public class SleepSampleSessionParser {
         AggregatedSleep sleep = sum(sessions);
         verifyPlausible(sleep);
         return new ParsedSleepDay(sleep, anchor);
+    }
+
+    /**
+     * The local day whose sleep this dump is about, resolved by the same anchor rule {@link #parse}
+     * uses and <b>without interpreting a single sample</b>. The sleep day spans two calendar dates and
+     * is labelled by the later one — the day he woke into, which is the anchor's own local date.
+     *
+     * <p>This exists so the raw dump can be filed under the night it belongs to <em>before</em> it is
+     * interpreted (raw-first): a dump the plausibility guards refuse must still be archived, and it is
+     * precisely the one worth keeping for diagnosis.
+     *
+     * @param dump      the raw sleep-stage dump; never null
+     * @param zone      the user's timezone; never null
+     * @param reference the fallback anchor when the dump carries no usable capture date; never null
+     * @return the sleep day's local date
+     */
+    public LocalDate sleepDayOf(DeviceSleepSamples dump, ZoneId zone, OffsetDateTime reference) {
+        if (dump == null || zone == null || reference == null) {
+            throw new IllegalArgumentException("sleep dump, zone and reference instant are required");
+        }
+        return anchorOf(dump, zone, reference).atZoneSameInstant(zone).toLocalDate();
+    }
+
+    /** The instant the sleep day is anchored on: the dump's own capture date, else the caller's. */
+    private static OffsetDateTime anchorOf(DeviceSleepSamples dump, ZoneId zone,
+                                           OffsetDateTime reference) {
+        OffsetDateTime capturedAt = parseInstant(dump.capturedAt(), zone);
+        return capturedAt != null ? capturedAt : reference;
     }
 
     /**
@@ -222,7 +249,7 @@ public class SleepSampleSessionParser {
     /**
      * Sums the sleep day's sessions into the aggregate the row is built from: stage durations add up,
      * the scorable window spans the summed time in bed (never the awake gaps between sessions — see
-     * {@link AggregatedSleep}), the longest session keeps the row's real hours, and the contested
+     * {@link AggregatedSleep}), the night cluster gives the row its real hours, and the contested
      * seconds add up into the aggregate's overlap measurement.
      */
     private static AggregatedSleep sum(List<SessionSummary> summaries) {
@@ -247,11 +274,11 @@ public class SleepSampleSessionParser {
             overlap += summary.overlapSeconds();
             sessions.add(new SleepSession(sample.start(), sample.end(), sample.totalSleepSeconds()));
         }
-        SleepSession main = AggregatedSleep.mainOf(sessions);
+        SleepSession night = AggregatedSleep.nightOf(sessions);
         SleepStageSample totals = new SleepStageSample(
-            main.start(), main.start().plusSeconds(timeInBed),
+            night.start(), night.start().plusSeconds(timeInBed),
             inBed, core, deep, rem, unspecified, awake);
-        return new AggregatedSleep(totals, main, sessions, overlap);
+        return new AggregatedSleep(totals, night, sessions, overlap);
     }
 
     /**

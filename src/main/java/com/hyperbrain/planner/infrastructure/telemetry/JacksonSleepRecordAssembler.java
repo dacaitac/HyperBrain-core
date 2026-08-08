@@ -22,9 +22,10 @@ import java.util.UUID;
  * into the {@code tel_sleep_record.stages} JSON. The JSON serialization is why this lives in
  * infrastructure while the port stays in the domain.
  *
- * <p>The {@code sessions} array is the only place the naps survive: the row has exactly two instant
- * columns and they are spoken for by the main session (the chronotype the sleep frontier learns from),
- * so an afternoon nap can only be recorded beside them, not in them.
+ * <p>The {@code sessions} array is the only place the individual stretches survive: the row has exactly
+ * two instant columns and they are spoken for by the night's real span (the chronotype the sleep
+ * frontier learns from), so an afternoon nap — or the hole in a broken night — can only be recorded
+ * beside them, not in them.
  */
 @Component
 class JacksonSleepRecordAssembler implements SleepRecordAssembler {
@@ -46,7 +47,7 @@ class JacksonSleepRecordAssembler implements SleepRecordAssembler {
         SleepScoreResult result = calculator.score(totals);
         int durationMinutes = (int) Math.round(totals.totalSleepSeconds() / SECONDS_PER_MINUTE);
         return new DeviceSleepRecord(
-            sleep.mainSession().start(), sleep.mainSession().end(), durationMinutes, result.score(),
+            sleep.night().start(), sleep.night().end(), durationMinutes, result.score(),
             stagesJson(sleep, result), collectedAt, contextEventId);
     }
 

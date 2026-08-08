@@ -70,6 +70,7 @@ class UserCommandConsumerIT {
         PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
+        jdbcTemplate.update("DELETE FROM context_event");
         jdbcTemplate.update("DELETE FROM processed_message");
         jdbcTemplate.update("DELETE FROM core_execution_profile");
         jdbcTemplate.update("UPDATE core_executable SET imputed_time_block_id = NULL");
@@ -118,7 +119,7 @@ class UserCommandConsumerIT {
     }
 
     @Test
-    @DisplayName("REPLAN_AGENDA carrying a raw HealthKit dump distils a device night (real hours, no raw origin) and replans")
+    @DisplayName("REPLAN_AGENDA carrying a raw HealthKit dump distils a device night, archives it raw and replans")
     void replan_with_sleep_records_device_record_and_plans() {
         // Given one schedulable task
         insertTask("Deep work", 0.9, 60);
@@ -128,7 +129,7 @@ class UserCommandConsumerIT {
         send(replanWithSleepBody(commandId, NOON), commandId.toString());
 
         // Then a complete device record lands: real hours (end_time set), a score, the derived
-        // duration (Core 6h + Deep 1h + REM 30m = 450 min), and no raw origin (context_event_id NULL)
+        // duration (Core 6h + Deep 1h + REM 30m = 450 min), and a link to the archived raw dump
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
         Map<String, Object> row = jdbcTemplate.queryForMap("""
             SELECT end_time, sleep_score, duration_minutes, context_event_id
@@ -137,7 +138,9 @@ class UserCommandConsumerIT {
         assertThat(row.get("end_time")).isNotNull();
         assertThat((Integer) row.get("sleep_score")).isGreaterThan(0);
         assertThat(row.get("duration_minutes")).isEqualTo(450);
-        assertThat(row.get("context_event_id")).isNull();
+        // The typed row points back at the dump it was derived from: totals cannot be un-collapsed, so
+        // without the raw envelope a night already scored can never be recomputed (ADR-016 raw-first).
+        assertThat(row.get("context_event_id")).isEqualTo(archivedDumpId());
 
         // And the agenda still materializes from the replan (same transaction)
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
@@ -160,8 +163,8 @@ class UserCommandConsumerIT {
         Map<String, Object> row = jdbcTemplate.queryForMap("""
             SELECT duration_minutes, sleep_score FROM tel_sleep_record WHERE user_id = ?
             """, USER);
-        // Scored on the whole day: 450 min of night + 116 of nap. The nap alone would be 116.
-        assertThat(row.get("duration_minutes")).isEqualTo(566);
+        // Scored on the whole day: 330 min of night + 116 of nap. The nap alone would be 116.
+        assertThat(row.get("duration_minutes")).isEqualTo(446);
         assertThat((Integer) row.get("sleep_score")).isGreaterThan(50);
         // The row's two instant columns are the chronotype the sleep frontier takes its wake median
         // from, so they stay the NIGHT's: a nap that ended at 11:56 must never become the learned wake.
@@ -170,13 +173,86 @@ class UserCommandConsumerIT {
             .isEqualTo(OffsetDateTime.of(2026, 7, 9, 23, 0, 0, 0, ZoneOffset.UTC));
         assertThat(jdbcTemplate.queryForObject(
             "SELECT end_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
-            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 6, 40, 0, 0, ZoneOffset.UTC));
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 4, 40, 0, 0, ZoneOffset.UTC));
 
         // And both sessions survive into the row and come back out through the planner's own port —
         // which is what lets the day know WHEN he slept, not only how much.
         assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON))
             .extracting(session -> session.start().toString() + ".." + session.end().toString())
-            .containsExactly("2026-07-09T23:00Z..2026-07-10T06:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
+            .containsExactly("2026-07-09T23:00Z..2026-07-10T04:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
+    }
+
+    @Test
+    @DisplayName("the raw dump is archived verbatim, one row per night, rewritten by every re-send")
+    void the_raw_dump_is_archived_and_rewritten_per_night() {
+        // Six production rows could not be recomputed when the reading of sleep changed, because only
+        // the collapsed totals had been kept. The raw envelope is what makes that recoverable — and
+        // because the phone re-sends the same night on every replan and the watch re-stages it in
+        // between, there must be exactly one row per night, holding the newest reading.
+        UUID first = UUID.randomUUID();
+        send(replanWithSleepBody(first, NOON), first.toString());
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(archivedDumpCount()).isEqualTo(1));
+
+        UUID second = UUID.randomUUID();
+        send(replanWithNightAndNapBody(second, HALF_PAST_NOON), second.toString());
+        await().atMost(TIMEOUT).untilAsserted(() ->
+            assertThat(archivedDump().get("payload").toString()).contains("11:56"));
+
+        // Still one row for that night, and it is the second dump — not two near-duplicates.
+        assertThat(archivedDumpCount()).isEqualTo(1);
+        Map<String, Object> raw = archivedDump();
+        assertThat(raw).containsEntry("source", "INTEGRATION")
+            .containsEntry("provider", "APPLE_HEALTH")
+            // Not the canonical SLEEP_SESSION type: that payload is one aggregated session, this is a
+            // list of raw stage intervals, and a re-normalizer must never confuse the two.
+            .containsEntry("event_type", "SLEEP_STAGE_DUMP")
+            .containsEntry("normalization_status", "NORMALIZED")
+            .containsEntry("dedup_key",
+                "APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-07-10");
+        // Verbatim where it counts: the provider's own local time strings and stage labels, not
+        // instants the parser derived from them. (JSONB stores a normalized object — key order and
+        // spacing are the column's, the values are the dump's.)
+        assertThat(raw.get("payload").toString())
+            .contains("09/07/2026 at 11:00 PM", "\"Awake\"", "10/07/2026 at 11:56 AM");
+    }
+
+    @Test
+    @DisplayName("a dump the plausibility guards refuse is archived anyway, flagged, and scores nothing")
+    void a_refused_dump_is_archived_for_diagnosis() {
+        UUID commandId = UUID.randomUUID();
+        send(replanWithImplausibleSleepBody(commandId, NOON), commandId.toString());
+
+        // The replan still runs — the sleep is enrichment, never the primary action.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(archivedDumpCount()).isEqualTo(1));
+        assertThat(sleepRecordCount()).isZero();
+        // ERROR and not SKIPPED, so the retention sweep spares it: this row is the only thing that can
+        // explain, after the fact, why a night has no score.
+        assertThat(archivedDump()).containsEntry("normalization_status", "ERROR");
+    }
+
+    @Test
+    @DisplayName("a nap taken less than 5 h after waking is absorbed into the night — the accepted limit")
+    void a_nap_within_the_same_night_threshold_is_absorbed() {
+        // Pinned rather than endorsed. One gap threshold cannot tell "he woke at 3 and went back to
+        // sleep" from "he woke at 6:40 and napped at 10", and Daniel took the first as the case worth
+        // getting right. The cost is here, on his own production shape: the row's wake time becomes
+        // 11:56, the frontier learns that as when he gets up, and no nap activity is recorded.
+        UUID sleepCycle = insertSleepCycle();
+        UUID commandId = UUID.randomUUID();
+
+        send(replanWithAbsorbedMorningNapBody(commandId, NOON), commandId.toString());
+
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT end_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 11, 56, 0, 0, ZoneOffset.UTC));
+        assertThat(napCount(sleepCycle)).isZero();
+        // The sleep itself is neither lost nor double-counted: both stretches survive as sessions and
+        // the score is still computed on the summed time in bed, not on the 13 h span.
+        assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON)).hasSize(2);
+        assertThat(jdbcTemplate.queryForMap(
+            "SELECT duration_minutes FROM tel_sleep_record WHERE user_id = ?", USER))
+            .containsEntry("duration_minutes", 566);
     }
 
     @Test
@@ -400,6 +476,54 @@ class UserCommandConsumerIT {
               "sleep": {
                 "date": "10/07/2026 at 12:05 PM",
                 "sample": [
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 3:00 AM","duration":"4:00:00"},
+                  {"stage":"Deep","startDate":"10/07/2026 at 3:00 AM","endDate":"10/07/2026 at 4:00 AM","duration":"1:00:00"},
+                  {"stage":"REM","startDate":"10/07/2026 at 4:00 AM","endDate":"10/07/2026 at 4:30 AM","duration":"30:00"},
+                  {"stage":"Awake","startDate":"10/07/2026 at 4:30 AM","endDate":"10/07/2026 at 4:40 AM","duration":"10:00"},
+                  {"stage":"Core","startDate":"10/07/2026 at 10:00 AM","endDate":"10/07/2026 at 11:56 AM","duration":"1:56:00"}
+                ]
+              }
+            }
+            """.formatted(commandId, occurredAt);
+    }
+
+    /**
+     * A dump the plausibility guards refuse: Awake laid over the whole first half of the night, so it
+     * claims 9 h of a 6 h window. Nothing scorable comes out of it, and that is the point.
+     */
+    private static String replanWithImplausibleSleepBody(UUID commandId, OffsetDateTime occurredAt) {
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "10/07/2026 at 12:05 PM",
+                "sample": [
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
+                  {"stage":"Awake","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 2:00 AM","duration":"3:00:00"}
+                ]
+              }
+            }
+            """.formatted(commandId, occurredAt);
+    }
+
+    /**
+     * The same night and nap, but with the nap starting 3 h 20 after waking instead of 5 h 20 — inside
+     * the same-night threshold, so the two are read as one broken night. Pins the accepted coarseness
+     * of that single threshold on real production data.
+     */
+    private static String replanWithAbsorbedMorningNapBody(UUID commandId, OffsetDateTime occurredAt) {
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "10/07/2026 at 12:05 PM",
+                "sample": [
                   {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
                   {"stage":"Deep","startDate":"10/07/2026 at 5:00 AM","endDate":"10/07/2026 at 6:00 AM","duration":"1:00:00"},
                   {"stage":"REM","startDate":"10/07/2026 at 6:00 AM","endDate":"10/07/2026 at 6:30 AM","duration":"30:00"},
@@ -478,6 +602,23 @@ class UserCommandConsumerIT {
         return jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
+    }
+
+    private int archivedDumpCount() {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP'",
+            Integer.class, USER);
+        return count == null ? 0 : count;
+    }
+
+    private Map<String, Object> archivedDump() {
+        return jdbcTemplate.queryForMap(
+            "SELECT id, source, provider, event_type, payload, dedup_key, normalization_status "
+                + "FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP'", USER);
+    }
+
+    private UUID archivedDumpId() {
+        return (UUID) archivedDump().get("id");
     }
 
     /** The user's «Sueño» cycle, which is what a recorded nap is filed under. */

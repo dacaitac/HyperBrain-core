@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -42,8 +43,8 @@ class SleepSampleSessionParserTest {
         // sleep day holds (22 Jul 23:41 → 23 Jul 07:51) is summed — the one two days back is not.
         SleepStageSample sample = day.sleep().totals();
         assertThat(day.sleep().sessions()).hasSize(1);
-        assertThat(day.sleep().mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-22T23:41:00Z"));
-        assertThat(day.sleep().mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-23T07:51:00Z"));
+        assertThat(day.sleep().night().start()).isEqualTo(OffsetDateTime.parse("2026-07-22T23:41:00Z"));
+        assertThat(day.sleep().night().end()).isEqualTo(OffsetDateTime.parse("2026-07-23T07:51:00Z"));
         assertThat(sample.start()).isEqualTo(OffsetDateTime.parse("2026-07-22T23:41:00Z"));
         assertThat(sample.end()).isEqualTo(OffsetDateTime.parse("2026-07-23T07:51:00Z"));
 
@@ -78,15 +79,15 @@ class SleepSampleSessionParserTest {
     @Test
     @DisplayName("sums the night and the afternoon nap instead of letting the nap displace the night")
     void sums_night_and_nap() {
-        // The production defect: a 09:20–13:56 nap became the whole day and scored 13.
+        // The production defect: an afternoon nap became the whole day and scored 13.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 1:00 AM"),
             sample("Awake", "10/07/2026 at 1:00 AM", "10/07/2026 at 1:20 AM"),
             sample("Core", "10/07/2026 at 1:20 AM", "10/07/2026 at 5:00 AM"),
-            sample("Core", "10/07/2026 at 9:20 AM", "10/07/2026 at 12:00 PM")));
+            sample("Core", "10/07/2026 at 12:00 PM", "10/07/2026 at 2:40 PM")));
 
         AggregatedSleep sleep =
-            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:30:00Z")).sleep();
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T16:30:00Z")).sleep();
 
         // Durations add up across both sessions.
         assertThat(sleep.totals().coreSeconds()).isEqualTo(20400 + 9600);
@@ -94,15 +95,65 @@ class SleepSampleSessionParserTest {
         assertThat(sleep.totals().totalSleepSeconds()).isEqualTo(30000);
 
         // The row's hours stay the night's — the nap must never become the learned wake time.
-        assertThat(sleep.mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
-        assertThat(sleep.mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:00:00Z"));
+        assertThat(sleep.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
+        assertThat(sleep.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:00:00Z"));
 
         // Both sessions survive, chronologically, with their own asleep time.
         assertThat(sleep.sessions()).containsExactly(
             new SleepSession(OffsetDateTime.parse("2026-07-09T23:00:00Z"),
                 OffsetDateTime.parse("2026-07-10T05:00:00Z"), 20400),
-            new SleepSession(OffsetDateTime.parse("2026-07-10T09:20:00Z"),
-                OffsetDateTime.parse("2026-07-10T12:00:00Z"), 9600));
+            new SleepSession(OffsetDateTime.parse("2026-07-10T12:00:00Z"),
+                OffsetDateTime.parse("2026-07-10T14:40:00Z"), 9600));
+        assertThat(sleep.naps()).containsExactly(sleep.sessions().getLast());
+    }
+
+    @Test
+    @DisplayName("a night broken in the small hours is ONE night, with the row's hours spanning both")
+    void a_broken_night_is_summed_as_one_night() {
+        // Daniel, 2026-08-08: «anoche dormí en dos fases porque me desperté en la madrugada». The
+        // 3 h session gap splits the two stretches, and reading the hours off the longer one declared
+        // that he got up at 03:00 — which is what the sleep frontier then learned as his wake time —
+        // while filing the 06:30 stretch as a nap, with a calendar event at half past six.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "07/08/2026 at 11:00 PM", "08/08/2026 at 3:00 AM"),
+            sample("Core", "08/08/2026 at 6:30 AM", "08/08/2026 at 8:00 AM")));
+
+        AggregatedSleep sleep =
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-08-08T09:00:00Z")).sleep();
+
+        // Two sessions on the record, one night on the clock: 23:00 to 08:00, hole included.
+        assertThat(sleep.sessions()).hasSize(2);
+        assertThat(sleep.night().start()).isEqualTo(OffsetDateTime.parse("2026-08-07T23:00:00Z"));
+        assertThat(sleep.night().end()).isEqualTo(OffsetDateTime.parse("2026-08-08T08:00:00Z"));
+        assertThat(sleep.naps()).isEmpty();
+
+        // And the scorable window is still the SUMMED time in bed (5 h 30), never the 9 h span — the
+        // calculator reads time in bed as end - start, so the 3 h 30 hole would sink efficiency.
+        assertThat(Duration.between(sleep.totals().start(), sleep.totals().end()).toSeconds())
+            .isEqualTo(4 * 3600 + 90 * 60);
+        assertThat(sleep.totals().totalSleepSeconds()).isEqualTo(4 * 3600 + 90 * 60);
+    }
+
+    @Test
+    @DisplayName("under 5 h from the night, a stretch joins it; at 5 h sharp it is a sleep of its own")
+    void the_same_night_threshold_decides_where_the_night_ends() {
+        // The accepted coarseness of a single threshold, pinned in both directions on the same night:
+        // a stretch 4 h 59 after waking is absorbed into the night and stretches the row's hours over
+        // it; one 5 h after is a nap. Daniel accepted the first as the benign side of the trade.
+        AggregatedSleep absorbed = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
+            sample("Core", "10/07/2026 at 9:59 AM", "10/07/2026 at 10:59 AM"))),
+            ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        AggregatedSleep separate = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
+            sample("Core", "10/07/2026 at 10:00 AM", "10/07/2026 at 11:00 AM"))),
+            ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        assertThat(absorbed.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T10:59:00Z"));
+        assertThat(absorbed.naps()).isEmpty();
+        assertThat(separate.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:00:00Z"));
+        assertThat(separate.naps()).hasSize(1);
     }
 
     @Test
@@ -257,8 +308,8 @@ class SleepSampleSessionParserTest {
         AggregatedSleep sleep =
             parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
 
-        assertThat(sleep.mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
-        assertThat(sleep.mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T01:00:00Z"));
+        assertThat(sleep.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
+        assertThat(sleep.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T01:00:00Z"));
     }
 
     @Test
@@ -341,8 +392,8 @@ class SleepSampleSessionParserTest {
         // A replan at 05:00 closes the sleep day on itself, half an hour before he woke up. The session
         // is still summed entire: membership is decided by its start and the session is then kept whole,
         // so no other row may claim the hours that fall past the boundary.
-        assertThat(sleep.mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T21:30:00Z"));
-        assertThat(sleep.mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:30:00Z"));
+        assertThat(sleep.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T21:30:00Z"));
+        assertThat(sleep.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:30:00Z"));
         assertThat(sleep.totals().coreSeconds()).isEqualTo(8 * 3600);
     }
 
@@ -475,8 +526,8 @@ class SleepSampleSessionParserTest {
 
         ParsedSleepDay day = parser.parse(dump, ZONE, reference());
 
-        assertThat(day.sleep().mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
-        assertThat(day.sleep().mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T06:00:00Z"));
+        assertThat(day.sleep().night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
+        assertThat(day.sleep().night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T06:00:00Z"));
         assertThat(day.sleep().totals().coreSeconds()).isEqualTo(7 * 3600);
         assertThat(day.collectedAt()).isEqualTo(OffsetDateTime.parse("2026-07-10T07:30:00Z"));
     }
@@ -492,8 +543,8 @@ class SleepSampleSessionParserTest {
 
         // Union 23:00 → 02:00 = 3h, not the naive 3.5h sum.
         assertThat(sleep.totals().coreSeconds()).isEqualTo(3 * 3600);
-        assertThat(sleep.mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
-        assertThat(sleep.mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T02:00:00Z"));
+        assertThat(sleep.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T23:00:00Z"));
+        assertThat(sleep.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T02:00:00Z"));
     }
 
     @Test
@@ -524,6 +575,33 @@ class SleepSampleSessionParserTest {
         assertThatThrownBy(() -> parser.parse(dump, ZONE, reference()))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("no parseable sleep samples");
+    }
+
+    @Test
+    @DisplayName("the sleep day is resolvable without reading a sample, so a refused dump is still filed")
+    void the_sleep_day_is_resolvable_without_interpreting_the_dump() {
+        // This is what lets the raw archive be raw-FIRST: a dump the plausibility guards refuse — or one
+        // that does not parse at all — must still land under the night it was about, because that is
+        // precisely the row worth keeping.
+        DeviceSleepSamples usable = new DeviceSleepSamples("10/07/2026 at 7:30 AM", List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM")));
+        DeviceSleepSamples unparseable = new DeviceSleepSamples("10/07/2026 at 7:30 AM", List.of(
+            sample("Core", "not-a-date", "also-not-a-date")));
+        DeviceSleepSamples undated = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM")));
+
+        // The dump's own capture date anchors the day; an unreadable body does not change that.
+        assertThat(parser.sleepDayOf(usable, ZONE, reference())).isEqualTo(LocalDate.of(2026, 7, 10));
+        assertThat(parser.sleepDayOf(unparseable, ZONE, reference()))
+            .isEqualTo(LocalDate.of(2026, 7, 10));
+        // Without a capture date the caller's anchor decides, exactly as in parse().
+        assertThat(parser.sleepDayOf(undated, ZONE, OffsetDateTime.parse("2026-07-11T08:00:00Z")))
+            .isEqualTo(LocalDate.of(2026, 7, 11));
+        // The zone applies here too: 03:00Z is still the 10th in Bogota, not the 11th.
+        assertThat(parser.sleepDayOf(undated, ZoneId.of("America/Bogota"),
+            OffsetDateTime.parse("2026-07-11T03:00:00Z"))).isEqualTo(LocalDate.of(2026, 7, 10));
+        assertThatThrownBy(() -> parser.sleepDayOf(null, ZONE, reference()))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
