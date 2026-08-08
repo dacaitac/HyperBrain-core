@@ -273,6 +273,41 @@ class UserCommandConsumerIT {
     }
 
     @Test
+    @DisplayName("two overlapping backfill windows converge: nothing duplicated, nothing left unrecorded")
+    void overlapping_backfill_windows_converge_and_lose_no_night() {
+        // How Daniel actually sends history: overlapping batches, on purpose. It has to hold together
+        // on two counts at once. Convergence — the night both windows carry is written once, because
+        // both writes are keyed on the night rather than on the send. And completeness — the oldest
+        // night of a window is dropped (a range query may have cut it in half, and a truncated reading
+        // must never overwrite a complete row nor the bytes behind it), so the ONLY thing that keeps
+        // that night is the other window, which carries it in the middle where nothing could have cut
+        // it. This is the test that proves the two halves of that argument meet.
+        UUID later = UUID.randomUUID();
+        send(replanWithNightsBody(later, NOON, "10/07/2026 at 11:00 AM", 8, 9, 10), later.toString());
+        // The 8th is this window's oldest and is deliberately left out: two nights land, not three.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(2));
+
+        // The earlier window overlaps it by two nights (the 8th and the 9th) and reaches further back.
+        UUID earlier = UUID.randomUUID();
+        send(replanWithNightsBody(earlier, NOON, "09/07/2026 at 11:00 AM", 6, 7, 8, 9),
+            earlier.toString());
+        await().atMost(TIMEOUT).untilAsserted(() ->
+            assertThat(countProcessed("user-command:" + earlier)).isEqualTo(1));
+
+        // Four nights, one row each. The 9th arrived in both windows and was written once; the 8th,
+        // dropped as the oldest of the later window, is recovered from the middle of the earlier one;
+        // the 6th is the earlier window's own oldest and stays for a window older still.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(4));
+        assertThat(jdbcTemplate.queryForList(
+            "SELECT (end_time AT TIME ZONE 'UTC')::date::text FROM tel_sleep_record "
+                + "WHERE user_id = ? ORDER BY end_time", String.class, USER))
+            .containsExactly("2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10");
+        // And the raw archive converges the same way — one row per night, never one per send.
+        assertThat(archivedDumpCount()).isEqualTo(4);
+        assertThat(countArchivedWithStatus("NORMALIZED")).isEqualTo(4);
+    }
+
+    @Test
     @DisplayName("a dump the plausibility guards refuse is archived anyway, flagged, and scores nothing")
     void a_refused_dump_is_archived_for_diagnosis() {
         UUID commandId = UUID.randomUUID();
@@ -638,6 +673,41 @@ class UserCommandConsumerIT {
                 }
                 """.formatted(commandId, occurredAt, dump);
         }
+    }
+
+    /**
+     * A backfill window covering the given sleep days of July 2026: one 23:00 → 05:00 night each, all
+     * in one dump, captured at {@code capturedAt} (which is what anchors the run). The shape of the
+     * command is the everyday one — only the range the Shortcut queried is wider.
+     *
+     * @param capturedAt the dump's own capture date, in the provider's local format
+     * @param sleepDays  the days of July the nights are labelled by — the day he woke into, ascending
+     */
+    private static String replanWithNightsBody(UUID commandId, OffsetDateTime occurredAt,
+                                               String capturedAt, int... sleepDays) {
+        StringBuilder samples = new StringBuilder();
+        for (int sleepDay : sleepDays) {
+            if (!samples.isEmpty()) {
+                samples.append(",\n              ");
+            }
+            samples.append(
+                "{\"stage\":\"Core\",\"startDate\":\"%02d/07/2026 at 11:00 PM\",\"endDate\":\"%02d/07/2026 at 5:00 AM\",\"duration\":\"6:00:00\"}"
+                    .formatted(sleepDay - 1, sleepDay));
+        }
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "%s",
+                "sample": [
+                  %s
+                ]
+              }
+            }
+            """.formatted(commandId, occurredAt, capturedAt, samples);
     }
 
     private static String sleepScoreBody(UUID commandId, int score, LocalDate date,

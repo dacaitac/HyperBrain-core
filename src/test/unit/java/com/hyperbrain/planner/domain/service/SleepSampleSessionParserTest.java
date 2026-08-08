@@ -145,6 +145,142 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
+    @DisplayName("the history a backfill carries holds real naps — which is what «none in the past» means")
+    void the_history_of_the_backfill_holds_naps_worth_recording() throws Exception {
+        // The guarantee that matters most in the whole package is a NEGATIVE one: a backfill records no
+        // «Siesta» for a day gone by, because each would be an executable with a calendar event and a
+        // Notion page. A negative assertion is only worth anything if the positive could have happened,
+        // so this pins that it could: two nights of his real fortnight carry a nap well above the
+        // quarter of an hour NapActivityRecorder records from — 104 min on the 5th, 189 on the 7th —
+        // and neither is the day the run is standing on (8 Aug, which has no nap at all). Drop the
+        // anchor-day guard and two «Siesta» activities appear in the past; that is what the pipeline
+        // test's «no naps» assertion is really guarding, and this is why it is not vacuous.
+        DeviceSleepSamples dump = loadFixture("/fixtures/shortcut_sleep_backfill.json");
+
+        List<SleepDayReading> nights =
+            parser.readSleepDays(dump, ZONE, OffsetDateTime.parse("2026-08-08T11:32:00Z"));
+
+        assertThat(napsOf(nights, LocalDate.of(2026, 8, 5)))
+            .singleElement()
+            .satisfies(nap -> assertThat(nap.asleepSeconds()).isEqualTo(6240));
+        assertThat(napsOf(nights, LocalDate.of(2026, 8, 7)))
+            .singleElement()
+            .satisfies(nap -> assertThat(nap.asleepSeconds()).isEqualTo(11340));
+        // Both are past the floor below which an episode is not worth a calendar entry (15 min).
+        assertThat(napsOf(nights, LocalDate.of(2026, 8, 5)).getFirst().asleepSeconds())
+            .isGreaterThan(15 * 60);
+        assertThat(napsOf(nights, LocalDate.of(2026, 8, 7)).getFirst().asleepSeconds())
+            .isGreaterThan(15 * 60);
+        // And the anchor's own night carries none, so nothing legitimate hides the retroactive ones.
+        assertThat(napsOf(nights, LocalDate.of(2026, 8, 8))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("no night of the real fortnight holds two sessions closer than the gap that separates them")
+    void the_sessions_of_a_night_are_never_close_enough_to_overlap() throws Exception {
+        // The premise the measured time rests on. A night's accounted time is the SUM of its sessions'
+        // unions, and adding unions is only sound when the sets are disjoint — the very assumption that
+        // was wrong one level down, where the asleep and the awake tracks were added as if they could
+        // not overlap. Here it holds by construction rather than by luck: the clusterer opens a new
+        // session only when a sample starts more than the session gap after the running end of the
+        // current one, so consecutive sessions are separated by MORE than that gap and cannot share an
+        // instant. This pins it on the data that matters, and on a night deliberately built to press it.
+        DeviceSleepSamples dump = loadFixture("/fixtures/shortcut_sleep_backfill.json");
+
+        List<SleepDayReading> nights =
+            parser.readSleepDays(dump, ZONE, OffsetDateTime.parse("2026-08-08T11:32:00Z"));
+
+        assertThat(nights).allSatisfy(reading ->
+            assertSessionsAreSeparated(((ParsedSleepDay) reading).sleep().sessions()));
+
+        // Three sessions of one sleep day, each pair separated by barely more than the 3 h gap — the
+        // tightest a day can be packed and still be read as several sessions.
+        DeviceSleepSamples packed = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),
+            sample("Core", "09/07/2026 at 11:01 PM", "10/07/2026 at 5:00 AM"),
+            sample("Core", "10/07/2026 at 8:01 AM", "10/07/2026 at 9:00 AM")));
+
+        AggregatedSleep sleep =
+            theOnlyNight(packed, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep();
+
+        assertThat(sleep.sessions()).hasSize(3);
+        assertSessionsAreSeparated(sleep.sessions());
+    }
+
+    @Test
+    @DisplayName("however much the tracks overlap, a night is never refused for its measured time")
+    void the_measured_window_guard_cannot_fire_however_much_the_tracks_overlap() {
+        // Three sessions of one sleep day, each with an Awake stretch laid over the sleep it revises —
+        // the shape Apple Watch actually produces, taken to its extreme. Read as TST + WASO the day
+        // accounts for 54 000 s inside a 33 600 s window, half again as much as was measured, and the
+        // old guard threw the night away. Measured as the union of both tracks on one timeline it is
+        // the 32 400 s that were really recorded, and it fits.
+        //
+        // This is the general statement of it: because a session's accounted union lies inside that
+        // session's own window by construction, and the night's window is those same windows summed,
+        // the accounted time can never exceed it. The guard is an assertion of that invariant, kept on
+        // purpose — no input reaches it — and this test is what would notice if the two ever stopped
+        // agreeing.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),      // 1 h
+            sample("Awake", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),     // laid over all of it
+            sample("In Bed", "09/07/2026 at 11:20 PM", "10/07/2026 at 5:40 AM"),
+            sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 5:30 AM"),     // 6 h
+            sample("Awake", "09/07/2026 at 11:30 PM", "10/07/2026 at 2:30 AM"),    // laid over half of it
+            sample("Core", "10/07/2026 at 9:00 AM", "10/07/2026 at 11:00 AM"),     // 2 h
+            sample("Awake", "10/07/2026 at 9:00 AM", "10/07/2026 at 11:00 AM")));  // laid over all of it
+
+        SleepStageSample totals =
+            theOnlyNight(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")).sleep().totals();
+
+        long window = Duration.between(totals.start(), totals.end()).toSeconds();
+        assertThat(totals.totalSleepSeconds()).isEqualTo(9 * 3600);
+        assertThat(totals.awakeSeconds()).isEqualTo(6 * 3600);
+        assertThat(window).isEqualTo(9 * 3600 + 20 * 60);
+        // What the old arithmetic saw: far past the 5 % of slack the guard allows. It was refused.
+        assertThat(totals.totalSleepSeconds() + totals.awakeSeconds())
+            .isGreaterThan((long) (1.05 * window));
+        // What is measured now: the union of both tracks, which fits inside the window with room left.
+        assertThat(totals.totalSleepSeconds()).isLessThanOrEqualTo(window);
+    }
+
+    @Test
+    @DisplayName("a session straddling the closing hour is archived whole under the night that holds it")
+    void a_straddling_session_is_archived_whole_under_its_own_night() {
+        // Membership is decided by a session's start and the session is then kept WHOLE — and the raw
+        // bytes have to follow the same rule as the seconds. A doze that began at 17:30 belongs to the
+        // sleep day closing at 18:00, so the samples of its second half must be filed under THAT night
+        // and not under the one that opens while it is still going: the archive is the only copy left to
+        // re-derive a night from, and a night re-derived from half a session is a different night. Left
+        // to their own starts those samples would be filed under the next night — polluting its bytes,
+        // or vanishing altogether when that night is not read at all.
+        DeviceSleepSamples.Sample opensBeforeSix = sample(
+            "Core", "09/07/2026 at 5:30 PM", "09/07/2026 at 7:30 PM");
+        DeviceSleepSamples.Sample runsPastSix = sample(
+            "Core", "09/07/2026 at 7:30 PM", "09/07/2026 at 9:00 PM");
+        DeviceSleepSamples.Sample theNextNight = sample(
+            "Core", "10/07/2026 at 1:00 AM", "10/07/2026 at 6:00 AM");
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "07/07/2026 at 11:00 PM", "08/07/2026 at 5:00 AM"), // oldest: not trusted
+            opensBeforeSix, runsPastSix, theNextNight));
+
+        List<SleepDayReading> nights =
+            parser.readSleepDays(dump, ZONE, OffsetDateTime.parse("2026-07-10T12:00:00Z"));
+
+        assertThat(nights).extracting(SleepDayReading::sleepDay)
+            .containsExactly(LocalDate.of(2026, 7, 9), LocalDate.of(2026, 7, 10));
+        // Both halves of the straddling session under the 9th, and nothing of it under the 10th.
+        assertThat(nights.getFirst().samples().samples())
+            .containsExactly(opensBeforeSix, runsPastSix);
+        assertThat(nights.getLast().samples().samples()).containsExactly(theNextNight);
+        // And the seconds agree with the bytes: the session is summed entire on the 9th, 17:30 → 21:00.
+        AggregatedSleep straddling = ((ParsedSleepDay) nights.getFirst()).sleep();
+        assertThat(straddling.night().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T17:30:00Z"));
+        assertThat(straddling.night().end()).isEqualTo(OffsetDateTime.parse("2026-07-09T21:00:00Z"));
+        assertThat(straddling.totals().coreSeconds()).isEqualTo(3 * 3600 + 1800);
+    }
+
+    @Test
     @DisplayName("a dump spanning several sleep days yields one reading per night, each with its own sleep")
     void reads_one_night_per_sleep_day() {
         // The reason this exists: the same channel that carries last night carries a wide date range
@@ -911,6 +1047,27 @@ class SleepSampleSessionParserTest {
         List<SleepDayReading> readings = parser.readSleepDays(dump, zone, reference);
         assertThat(readings).singleElement().isInstanceOf(RefusedSleepDay.class);
         return (RefusedSleepDay) readings.getFirst();
+    }
+
+    /** The naps a given night of a multi-night reading holds. */
+    private static List<SleepSession> napsOf(List<SleepDayReading> nights, LocalDate sleepDay) {
+        return nights.stream()
+            .filter(reading -> reading.sleepDay().equals(sleepDay))
+            .map(reading -> ((ParsedSleepDay) reading).sleep().naps())
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no reading for sleep day " + sleepDay));
+    }
+
+    /**
+     * Asserts that consecutive sessions are separated by more than the gap that splits them, which is
+     * what makes their accounted unions safe to add up into the night's measured time.
+     */
+    private static void assertSessionsAreSeparated(List<SleepSession> sessions) {
+        for (int i = 1; i < sessions.size(); i++) {
+            assertThat(Duration.between(sessions.get(i - 1).end(), sessions.get(i).start()))
+                .as("gap between session %d and %d", i - 1, i)
+                .isGreaterThan(SleepSampleSessionParser.DEFAULT_SESSION_GAP);
+        }
     }
 
     private static DeviceSleepSamples.Sample sample(String stage, String start, String end) {
