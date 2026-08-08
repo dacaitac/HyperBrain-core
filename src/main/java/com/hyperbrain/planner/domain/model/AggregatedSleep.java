@@ -23,13 +23,19 @@ import java.util.List;
  *       the learned wake time to the middle of the afternoon.</li>
  *   <li>{@code sessions} — every session in chronological order, night and naps alike. This is what
  *       tells the day <em>when</em> the user slept, not only how much.</li>
+ *   <li>{@code overlapSeconds} — how much of the sleep more than one stage claimed at once. It changes
+ *       no total (the stages are split over it, never summed twice); it is kept because without it
+ *       there is no way to tell a night the watch read cleanly from one it revised three times, and no
+ *       way to recalibrate the score afterwards against the rows already written.</li>
  * </ul>
  *
- * @param totals      the summed stage durations, in a window whose span is the summed time in bed
- * @param mainSession the longest session — the row's real hours; never null
- * @param sessions    every summed session, chronological; never null nor empty
+ * @param totals         the summed stage durations, in a window whose span is the summed time in bed
+ * @param mainSession    the longest session — the row's real hours; never null
+ * @param sessions       every summed session, chronological; never null nor empty
+ * @param overlapSeconds seconds of sleep covered by two or more stages at once; never negative
  */
-public record AggregatedSleep(SleepStageSample totals, SleepSession mainSession, List<SleepSession> sessions) {
+public record AggregatedSleep(SleepStageSample totals, SleepSession mainSession,
+                              List<SleepSession> sessions, long overlapSeconds) {
 
     public AggregatedSleep {
         if (totals == null || mainSession == null) {
@@ -38,7 +44,23 @@ public record AggregatedSleep(SleepStageSample totals, SleepSession mainSession,
         if (sessions == null || sessions.isEmpty()) {
             throw new IllegalArgumentException("aggregated sleep requires at least one session");
         }
+        if (overlapSeconds < 0) {
+            throw new IllegalArgumentException("overlap seconds must be non-negative: " + overlapSeconds);
+        }
         sessions = List.copyOf(sessions);
+    }
+
+    /**
+     * Builds an aggregate whose stages were never contested — the shape of a payload that arrives
+     * already aggregated, where no overlap was observed because none could be.
+     *
+     * @param totals      the summed stage durations; never null
+     * @param mainSession the session giving the row its hours; never null
+     * @param sessions    every summed session, chronological; never null nor empty
+     */
+    public AggregatedSleep(SleepStageSample totals, SleepSession mainSession,
+                           List<SleepSession> sessions) {
+        this(totals, mainSession, sessions, 0L);
     }
 
     /**

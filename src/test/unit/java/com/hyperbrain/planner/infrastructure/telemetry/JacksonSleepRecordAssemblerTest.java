@@ -134,6 +134,29 @@ class JacksonSleepRecordAssemblerTest {
     }
 
     @Test
+    @DisplayName("the contested seconds are persisted beside the stages, so past rows can be judged")
+    void the_overlap_measurement_is_persisted() {
+        // Not a duration of the night but a property of the reading: how much of the sleep more than one
+        // stage claimed, which is what the proportional split had to divide. Without it on the row there
+        // is no way to tell a night the watch read cleanly from one it re-staged three times, and no way
+        // to recalibrate the score afterwards against the rows already written.
+        SleepSession night = new SleepSession(START, END, 6 * 3600);
+        SleepStageSample totals = new SleepStageSample(
+            START, END, 0, 17280, 5184, 6336, 0, 600);
+
+        DeviceSleepRecord contested = assembler.assemble(
+            new AggregatedSleep(totals, night, List.of(night), 13380), COLLECTED, null);
+        DeviceSleepRecord clean = assembler.assemble(
+            new AggregatedSleep(totals, night, List.of(night)), COLLECTED, null);
+
+        assertThat(contested.stagesJson()).contains("\"overlap_seconds\":13380");
+        assertThat(clean.stagesJson()).contains("\"overlap_seconds\":0");
+        // And it changes no total: the stages are split over the overlap, never summed twice.
+        assertThat(contested.durationMinutes()).isEqualTo(clean.durationMinutes());
+        assertThat(contested.sleepScore()).isEqualTo(clean.sleepScore());
+    }
+
+    @Test
     @DisplayName("a night with no asleep time is not scorable and is rejected before building a record")
     void rejects_unscorable_night() {
         SleepStageSample sample = new SleepStageSample(START, END, 0, 0, 0, 0, 0, 3600);

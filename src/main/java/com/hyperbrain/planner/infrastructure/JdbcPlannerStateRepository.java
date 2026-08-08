@@ -35,6 +35,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -505,6 +506,56 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
              OR core_executable.template_slot_id IS DISTINCT FROM EXCLUDED.template_slot_id)
         """;
 
+    private static final String CYCLE_ID_BY_NAME_SQL = """
+        SELECT id
+        FROM core_cycle
+        WHERE user_id = ? AND name = ?
+        ORDER BY id
+        LIMIT 1
+        """;
+
+    /**
+     * An activity of one cycle whose window overlaps a candidate one — the natural key of an observed
+     * episode. Standard half-open overlap test ({@code existing.start < candidate.end} and
+     * {@code existing.end > candidate.start}), so two episodes that merely touch do not match.
+     */
+    private static final String OVERLAPPING_ACTIVITY_SQL = """
+        SELECT id
+        FROM core_executable
+        WHERE user_id  = ?
+          AND cycle_id = ?
+          AND type     = 'ACTIVITY'
+          AND start_time IS NOT NULL
+          AND end_time   IS NOT NULL
+          AND start_time < ?
+          AND end_time   > ?
+        ORDER BY start_time, id
+        LIMIT 1
+        """;
+
+    /**
+     * Inserts an episode the system observed after the fact: already {@code DONE}, carrying the real
+     * window it happened in. {@code system_generated} stays false because this row <b>is</b> meant to
+     * reach Notion and the calendar — unlike the retrospective accounting rows, which are not.
+     */
+    private static final String INSERT_COMPLETED_ACTIVITY_SQL = """
+        INSERT INTO core_executable
+            (id, user_id, cycle_id, name, type, status, origin, start_time, end_time, system_generated)
+        VALUES (?, ?, ?, ?, 'ACTIVITY', 'DONE', 'PLANNER', ?, ?, false)
+        """;
+
+    /**
+     * Re-times an activity's end. The {@code IS DISTINCT FROM} guard makes the update count an exact
+     * "did this really move", so a re-observation that changed nothing announces nothing.
+     */
+    private static final String RETIME_ACTIVITY_END_SQL = """
+        UPDATE core_executable
+           SET end_time = ?
+         WHERE id   = ?
+           AND type = 'ACTIVITY'
+           AND end_time IS DISTINCT FROM ?
+        """;
+
     /**
      * The day's regenerable blocks with the membership each currently holds — the reconciliation
      * universe and the starting point of the conservative replan (ADR-040 D8). Membership is read
@@ -827,6 +878,33 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             block.start(), block.end(), block.templateSlotId()) > 0;
     }
 
+
+    @Override
+    public Optional<UUID> findCycleIdByName(UUID userId, String cycleName) {
+        return jdbcTemplate.query(CYCLE_ID_BY_NAME_SQL,
+            (rs, rowNum) -> rs.getObject("id", UUID.class), userId, cycleName)
+            .stream().findFirst();
+    }
+
+    @Override
+    public Optional<UUID> findActivityOverlapping(UUID userId, UUID cycleId, OffsetDateTime start,
+                                                  OffsetDateTime end) {
+        return jdbcTemplate.query(OVERLAPPING_ACTIVITY_SQL,
+            (rs, rowNum) -> rs.getObject("id", UUID.class), userId, cycleId, end, start)
+            .stream().findFirst();
+    }
+
+    @Override
+    public void insertCompletedActivity(UUID activityId, UUID userId, UUID cycleId, String name,
+                                        OffsetDateTime start, OffsetDateTime end) {
+        jdbcTemplate.update(INSERT_COMPLETED_ACTIVITY_SQL,
+            activityId, userId, cycleId, name, start, end);
+    }
+
+    @Override
+    public boolean retimeActivityEnd(UUID activityId, OffsetDateTime end) {
+        return jdbcTemplate.update(RETIME_ACTIVITY_END_SQL, end, activityId, end) > 0;
+    }
 
     @Override
     public List<PlannedBlockRecord> loadPlannedBlocksForDay(UUID userId, LocalDate targetDay,

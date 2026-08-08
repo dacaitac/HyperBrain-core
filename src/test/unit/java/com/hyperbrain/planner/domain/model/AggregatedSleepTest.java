@@ -95,6 +95,23 @@ class AggregatedSleepTest {
         assertThatThrownBy(() -> AggregatedSleep.ofSingleSession(null))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("must not be null");
+        assertThatThrownBy(() -> new AggregatedSleep(totals, session, one, -1))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("overlap seconds must be non-negative");
+    }
+
+    @Test
+    @DisplayName("an aggregate built without an overlap measurement reports none, never a guess")
+    void an_unmeasured_aggregate_reports_no_overlap() {
+        // The three-argument form is what an already-aggregated payload produces: nothing was contested
+        // because nothing could be. Defaulting to anything other than zero would fabricate evidence
+        // about a reading nobody looked at.
+        SleepStageSample totals = new SleepStageSample(
+            NIGHT_START, NIGHT_END, 25200, 14400, 3600, 5400, 0, 1800);
+        SleepSession session = new SleepSession(NIGHT_START, NIGHT_END, 23400);
+
+        assertThat(new AggregatedSleep(totals, session, List.of(session)).overlapSeconds()).isZero();
+        assertThat(AggregatedSleep.ofSingleSession(totals).overlapSeconds()).isZero();
     }
 
     @Test

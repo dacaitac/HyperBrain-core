@@ -32,14 +32,14 @@ class SleepSampleSessionParserTest {
     private final SleepSampleSessionParser parser = new SleepSampleSessionParser();
 
     @Test
-    @DisplayName("distils the real Shortcut fixture: the period's night, per-stage interval union")
+    @DisplayName("distils the real Shortcut fixture: the sleep day's night, contested seconds split")
     void parses_real_shortcut_fixture() throws Exception {
         DeviceSleepSamples dump = loadFixture("/fixtures/shortcut_sleep_sample.json");
 
         ParsedSleepDay day = parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-23T23:00:00Z"));
 
-        // The fixture holds two nights and captures at 23 Jul 22:12; only the night that reaches into
-        // the relevant period (22 Jul 23:41 → 23 Jul 07:51) is summed — the one two days back is not.
+        // The fixture holds two nights and captures at 23 Jul 22:12; only the night whose start the
+        // sleep day holds (22 Jul 23:41 → 23 Jul 07:51) is summed — the one two days back is not.
         SleepStageSample sample = day.sleep().totals();
         assertThat(day.sleep().sessions()).hasSize(1);
         assertThat(day.sleep().mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-22T23:41:00Z"));
@@ -48,13 +48,19 @@ class SleepSampleSessionParserTest {
         assertThat(sample.end()).isEqualTo(OffsetDateTime.parse("2026-07-23T07:51:00Z"));
 
         // TST is the union of every asleep interval on one timeline (~7.45 h), NOT the 40 200 s sum of
-        // per-stage unions, which would falsely exceed time in bed.
+        // per-stage unions, which would falsely exceed time in bed. The split does not move it.
         long tst = sample.totalSleepSeconds();
         assertThat(tst).isCloseTo(26820L, within(60L));
-        // Overlap-resolved per-stage seconds (Deep > REM > Core) sum exactly to TST — no double-count.
-        assertThat(sample.deepSeconds()).isEqualTo(9420);
-        assertThat(sample.remSeconds()).isEqualTo(7920);
-        assertThat(sample.coreSeconds()).isEqualTo(9480);
+
+        // Half the night (13 380 s of 26 820) was claimed by more than one stage at once — this is the
+        // number that condemned the old precedence rule. Handing every contested second to the deeper
+        // track read this same night as deep=9420 / rem=7920 / core=9480: a deep fraction of 0.35 and a
+        // Core residue of 0.35 against an adult N1+N2 norm of 0.45–0.55. Splitting them evenly instead
+        // moves the mass back where the physiology says it was, on identical raw data.
+        assertThat(day.sleep().overlapSeconds()).isEqualTo(13380);
+        assertThat(sample.deepSeconds()).isEqualTo(4800);
+        assertThat(sample.remSeconds()).isEqualTo(6810);
+        assertThat(sample.coreSeconds()).isEqualTo(15210);
         assertThat(sample.unspecifiedSeconds()).isZero();
         assertThat(sample.coreSeconds() + sample.deepSeconds() + sample.remSeconds()
             + sample.unspecifiedSeconds()).isEqualTo(tst);
@@ -117,19 +123,22 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
-    @DisplayName("an evening run does not reach back a whole extra day for yesterday's nap")
-    void excludes_a_nap_older_than_a_day() {
+    @DisplayName("an evening run keeps the after-18:00 nap the old 24 h clamp used to lose entirely")
+    void keeps_the_evening_nap_the_old_lookback_clamp_dropped() {
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
-            sample("Core", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),    // yesterday evening
-            sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 6:00 AM"))); // last night
+            sample("Core", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),    // opens this sleep day
+            sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 6:00 AM"))); // the night
 
         AggregatedSleep sleep =
             parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T22:00:00Z")).sleep();
 
-        // The 24 h bound closes the period at 09 Jul 22:00: the 19:00 nap belongs to yesterday's row.
-        assertThat(sleep.sessions()).hasSize(1);
+        // A 19:00 nap on the 9th is inside the sleep day that opened at 18:00 on the 9th, whichever hour
+        // the run happens at. The rolling 24 h clamp used to close the period at 09 Jul 22:00 on an
+        // evening run — and since the next morning's window opens at 18:00 on the 10th, no row claimed
+        // that hour of sleep at all. It was simply lost.
+        assertThat(sleep.sessions()).hasSize(2);
         assertThat(sleep.sessions().getFirst().start())
-            .isEqualTo(OffsetDateTime.parse("2026-07-09T23:30:00Z"));
+            .isEqualTo(OffsetDateTime.parse("2026-07-09T19:00:00Z"));
     }
 
     @Test
@@ -171,31 +180,32 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
-    @DisplayName("a session that ends exactly as the period opens is out; a minute later it is in")
-    void the_period_boundary_is_half_open() {
+    @DisplayName("membership is decided by the session's START: 18:00 sharp is in, a minute before is out")
+    void the_sleep_day_holds_a_session_by_its_start() {
         // The boundary decides which row a nap lands on, so which side owns the instant itself is not a
-        // detail: an inclusive bound would put the same nap on two consecutive days.
-        AggregatedSleep flushWithTheBoundary = parser.parse(new DeviceSleepSamples(null, List.of(
-            sample("Core", "09/07/2026 at 3:00 PM", "09/07/2026 at 6:00 PM"),    // ends AT 18:00
+        // detail: an inclusive-on-both-ends bound would put the same nap on two consecutive days.
+        AggregatedSleep startsOnTheBoundary = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 6:00 PM", "09/07/2026 at 7:00 PM"),    // starts AT 18:00
             sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"))),
             ZONE, reference()).sleep();
 
-        AggregatedSleep aMinuteInside = parser.parse(new DeviceSleepSamples(null, List.of(
-            sample("Core", "09/07/2026 at 3:00 PM", "09/07/2026 at 6:01 PM"),    // ends 18:01
+        AggregatedSleep startsAMinuteEarlier = parser.parse(new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 5:59 PM", "09/07/2026 at 7:00 PM"),    // starts 17:59
             sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 6:00 AM"))),
             ZONE, reference()).sleep();
 
-        assertThat(flushWithTheBoundary.sessions()).hasSize(1);
-        assertThat(aMinuteInside.sessions()).hasSize(2);
+        assertThat(startsOnTheBoundary.sessions()).hasSize(2);
+        // Dropped whole, not truncated at 18:00: the session belongs to the previous sleep day entirely.
+        assertThat(startsAMinuteEarlier.sessions()).hasSize(1);
     }
 
     @Test
-    @DisplayName("the same nap is kept or dropped by the HOUR the replan ran, not by the day it belongs to")
-    void the_verdict_on_an_early_evening_nap_depends_on_when_the_run_happens() {
-        // A nap at 19:00 on the 9th sits inside the sleep day the 18:00 rule opens for the 10th. Whether
-        // it is counted depends entirely on when the dump is captured, because the 24 h clamp is measured
-        // from the anchor rather than from the sleep day: a morning run reaches back to 18:00 and keeps
-        // it, an evening run only reaches back 24 h and cuts it off. Same night, same nap, two rows.
+    @DisplayName("the same nap lands on the same row whatever hour the replan happened to run at")
+    void the_sleep_day_of_a_nap_does_not_depend_on_when_the_run_happens() {
+        // A nap at 19:00 on the 9th sits inside the sleep day that opens at 18:00 on the 9th, and there
+        // is only one answer to which row it belongs to. Under the rolling 24 h clamp the answer depended
+        // on the hour of the run: a morning replan reached back to 18:00 and kept it, an evening replan
+        // reached back only 24 h and cut it off — same night, same nap, two different rows.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 7:00 PM", "09/07/2026 at 8:00 PM"),
             sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 6:00 AM")));
@@ -205,19 +215,18 @@ class SleepSampleSessionParserTest {
         AggregatedSleep eveningRun =
             parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T22:00:00Z")).sleep();
 
-        assertThat(morningRun.sessions()).hasSize(2);
-        assertThat(eveningRun.sessions()).hasSize(1);
-        // And the sleep the day is scored on differs by the whole nap, on identical raw data.
+        assertThat(morningRun.sessions()).isEqualTo(eveningRun.sessions()).hasSize(2);
         assertThat(morningRun.totals().totalSleepSeconds())
-            .isEqualTo(eveningRun.totals().totalSleepSeconds() + 3600);
+            .isEqualTo(eveningRun.totals().totalSleepSeconds());
     }
 
     @Test
-    @DisplayName("a nap taken after 18:00 is summed into this run's row AND into tomorrow's")
-    void an_evening_nap_is_counted_by_two_consecutive_sleep_days() {
-        // The other half of the same asymmetry. A 19:00 nap on the 10th is inside the 24 h an evening
-        // run reaches back over, and it is also inside the sleep day the 18:00 rule opens for the 11th —
-        // so an evening replan and the next morning's replan both count it, on two different rows.
+    @DisplayName("a nap taken after 18:00 belongs to tomorrow's row only — never to both")
+    void an_evening_nap_belongs_to_exactly_one_sleep_day() {
+        // The other half of the same defect. A 19:00 nap on the 10th used to be inside the 24 h an
+        // evening run reached back over AND inside the sleep day the 18:00 rule opened for the 11th, so
+        // an evening replan and the next morning's replan both counted it, on two different rows. The
+        // 18:00 that closes a sleep day is now the same 18:00 that opens the next: exactly one claims it.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 11:30 PM", "10/07/2026 at 6:00 AM"),  // the night
             sample("Core", "10/07/2026 at 7:00 PM", "10/07/2026 at 8:00 PM"))); // the evening nap
@@ -227,9 +236,11 @@ class SleepSampleSessionParserTest {
         AggregatedSleep tomorrowMorning =
             parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-11T08:00:00Z")).sleep();
 
+        SleepSession night = new SleepSession(OffsetDateTime.parse("2026-07-09T23:30:00Z"),
+            OffsetDateTime.parse("2026-07-10T06:00:00Z"), 6 * 3600 + 1800);
         SleepSession nap = new SleepSession(OffsetDateTime.parse("2026-07-10T19:00:00Z"),
             OffsetDateTime.parse("2026-07-10T20:00:00Z"), 3600);
-        assertThat(tonight.sessions()).contains(nap);
+        assertThat(tonight.sessions()).containsExactly(night);
         assertThat(tomorrowMorning.sessions()).containsExactly(nap);
     }
 
@@ -319,47 +330,139 @@ class SleepSampleSessionParserTest {
     }
 
     @Test
-    @DisplayName("a night that began before the period opens is summed whole, not truncated")
-    void keeps_a_session_that_straddles_the_period_boundary() {
+    @DisplayName("a night that runs past the hour the sleep day closes is summed whole, not truncated")
+    void keeps_a_session_that_straddles_the_closing_boundary() {
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 9:30 PM", "10/07/2026 at 5:30 AM")));
 
         AggregatedSleep sleep =
-            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T22:00:00Z")).sleep();
+            parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T05:00:00Z")).sleep();
 
-        // The period opens at 09 Jul 22:00, half an hour after he fell asleep; the session still counts
-        // entire, because it is the session that reaches into the period, not the sample.
+        // A replan at 05:00 closes the sleep day on itself, half an hour before he woke up. The session
+        // is still summed entire: membership is decided by its start and the session is then kept whole,
+        // so no other row may claim the hours that fall past the boundary.
         assertThat(sleep.mainSession().start()).isEqualTo(OffsetDateTime.parse("2026-07-09T21:30:00Z"));
+        assertThat(sleep.mainSession().end()).isEqualTo(OffsetDateTime.parse("2026-07-10T05:30:00Z"));
         assertThat(sleep.totals().coreSeconds()).isEqualTo(8 * 3600);
     }
 
     @Test
-    @DisplayName("a dump whose sleep is all older than the period is rejected (no stale row is written)")
-    void rejects_a_dump_with_nothing_in_the_period() {
+    @DisplayName("a dump whose sleep all belongs to another sleep day is rejected (no stale row)")
+    void rejects_a_dump_with_nothing_in_the_sleep_day() {
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "07/07/2026 at 11:00 PM", "08/07/2026 at 6:00 AM")));
 
         assertThatThrownBy(() -> parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T08:00:00Z")))
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("no sleep session in the relevant period");
+            .hasMessageContaining("no sleep session in the sleep day");
     }
 
     @Test
-    @DisplayName("resolves cross-stage overlaps by deepest-wins so per-stage seconds sum to the asleep union")
-    void resolves_cross_stage_overlap_by_deepest_wins() {
-        // Core spans the whole 2 h; Deep and REM overlap inside it — the deeper stage wins the instant.
+    @DisplayName("a dump claiming more asleep + awake time than the window it measured is refused")
+    void rejects_more_sleep_than_the_measured_window_can_hold() {
+        // Awake laid over the whole first half of the night: the window measures 6 h but the reading
+        // claims 9 h of it accounted for. Scoring that would put a number on efficiency and WASO that
+        // no measurement supports.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 5:00 AM"),
+            sample("Awake", "09/07/2026 at 11:00 PM", "10/07/2026 at 2:00 AM")));
+
+        assertThatThrownBy(() -> parser.parse(dump, ZONE, reference()))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("exceed the 21600s window that was measured");
+    }
+
+    @Test
+    @DisplayName("a sleep day holding more than 16 h of sleep is refused as a corrupt reading")
+    void rejects_more_than_sixteen_hours_of_sleep() {
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 6:00 PM", "10/07/2026 at 11:00 AM"))); // 17 h straight
+
+        assertThatThrownBy(() -> parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T14:00:00Z")))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("of sleep exceed the 16h a sleep day can hold");
+    }
+
+    @Test
+    @DisplayName("a measured window wider than a day is refused, however little sleep it holds")
+    void rejects_a_measured_window_wider_than_a_day() {
+        // Two in-bed stretches of 18 h and 8 h sum to a 26 h window. Little of it is asleep, so neither
+        // of the other two guards sees anything wrong — yet no sleep day was ever 26 h long.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("In Bed", "09/07/2026 at 6:00 PM", "10/07/2026 at 12:00 PM"),
+            sample("Core", "09/07/2026 at 6:00 PM", "09/07/2026 at 8:00 PM"),
+            sample("In Bed", "10/07/2026 at 5:00 PM", "11/07/2026 at 1:00 AM"),
+            sample("Core", "10/07/2026 at 5:00 PM", "10/07/2026 at 6:00 PM")));
+
+        assertThatThrownBy(() -> parser.parse(dump, ZONE, OffsetDateTime.parse("2026-07-10T23:00:00Z")))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("measured window exceeds the 24h of a sleep day");
+    }
+
+    @Test
+    @DisplayName("splits a contested instant evenly among the stages covering it, never by precedence")
+    void splits_a_contested_instant_proportionally() {
+        // Core spans the whole 2 h; Deep and REM are revisions the watch laid on top of part of it.
         DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
             sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 1:00 AM"),   // 23:00–01:00
-            sample("Deep", "09/07/2026 at 11:30 PM", "10/07/2026 at 12:00 AM"),  // 30 m carved from Core
-            sample("REM", "10/07/2026 at 12:00 AM", "10/07/2026 at 12:15 AM"))); // 15 m carved from Core
+            sample("Deep", "09/07/2026 at 11:30 PM", "10/07/2026 at 12:00 AM"),  // 30 m over Core
+            sample("REM", "10/07/2026 at 12:00 AM", "10/07/2026 at 12:15 AM"))); // 15 m over Core
 
-        SleepStageSample s = parser.parse(dump, ZONE, reference()).sleep().totals();
+        ParsedSleepDay day = parser.parse(dump, ZONE, reference());
+        SleepStageSample s = day.sleep().totals();
 
-        assertThat(s.deepSeconds()).isEqualTo(30 * 60);
-        assertThat(s.remSeconds()).isEqualTo(15 * 60);
-        assertThat(s.coreSeconds()).isEqualTo(2 * 3600 - 45 * 60);
+        // 23:00–23:30 Core alone (1800) + 23:30–00:00 halved with Deep (900) + 00:00–00:15 halved with
+        // REM (450) + 00:15–01:00 Core alone (2700). Deepest-wins gave Core 4500 and handed the deeper
+        // tracks the full 2700 contested seconds; the overlap says nothing about which stage was right.
+        assertThat(s.coreSeconds()).isEqualTo(1800 + 900 + 450 + 2700);
+        assertThat(s.deepSeconds()).isEqualTo(900);
+        assertThat(s.remSeconds()).isEqualTo(450);
         assertThat(s.totalSleepSeconds()).isEqualTo(2 * 3600);
-        assertThat(s.coreSeconds() + s.deepSeconds() + s.remSeconds()).isEqualTo(s.totalSleepSeconds());
+        assertThat(day.sleep().overlapSeconds()).isEqualTo(30 * 60 + 15 * 60);
+    }
+
+    @Test
+    @DisplayName("the four stages sum exactly to the asleep union, however many of them pile up")
+    void the_stages_always_sum_to_total_sleep_time() {
+        // The invariant that is not negotiable: whatever the split does to the mix, no second of sleep
+        // may be counted twice nor lost. Four tracks over the same hour is the worst case the watch
+        // produces after a couple of restagings.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "10/07/2026 at 12:00 AM", "10/07/2026 at 1:00 AM"),
+            sample("Deep", "10/07/2026 at 12:00 AM", "10/07/2026 at 1:00 AM"),
+            sample("REM", "10/07/2026 at 12:00 AM", "10/07/2026 at 1:00 AM"),
+            sample("Asleep", "10/07/2026 at 12:00 AM", "10/07/2026 at 1:00 AM")));
+
+        ParsedSleepDay day = parser.parse(dump, ZONE, reference());
+        SleepStageSample s = day.sleep().totals();
+
+        assertThat(s.coreSeconds()).isEqualTo(900);
+        assertThat(s.deepSeconds()).isEqualTo(900);
+        assertThat(s.remSeconds()).isEqualTo(900);
+        assertThat(s.unspecifiedSeconds()).isEqualTo(900);
+        assertThat(s.coreSeconds() + s.deepSeconds() + s.remSeconds() + s.unspecifiedSeconds())
+            .isEqualTo(s.totalSleepSeconds())
+            .isEqualTo(3600);
+        // The whole hour was contested — that is what the measurement is for.
+        assertThat(day.sleep().overlapSeconds()).isEqualTo(3600);
+    }
+
+    @Test
+    @DisplayName("a night no stage contested measures zero overlap")
+    void an_uncontested_night_measures_no_overlap() {
+        // Without this the measurement would be unreadable: a number that is never zero says nothing
+        // about the nights that actually were re-staged.
+        DeviceSleepSamples dump = new DeviceSleepSamples(null, List.of(
+            sample("Core", "09/07/2026 at 11:00 PM", "10/07/2026 at 2:00 AM"),
+            sample("Deep", "10/07/2026 at 2:00 AM", "10/07/2026 at 3:00 AM"),
+            sample("REM", "10/07/2026 at 3:00 AM", "10/07/2026 at 4:00 AM")));
+
+        ParsedSleepDay day = parser.parse(dump, ZONE, reference());
+
+        assertThat(day.sleep().overlapSeconds()).isZero();
+        assertThat(day.sleep().totals().coreSeconds()).isEqualTo(3 * 3600);
+        assertThat(day.sleep().totals().deepSeconds()).isEqualTo(3600);
+        assertThat(day.sleep().totals().remSeconds()).isEqualTo(3600);
     }
 
     @Test

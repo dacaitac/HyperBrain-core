@@ -75,6 +75,7 @@ class UserCommandConsumerIT {
         jdbcTemplate.update("UPDATE core_executable SET imputed_time_block_id = NULL");
         jdbcTemplate.update("DELETE FROM core_time_block");
         jdbcTemplate.update("DELETE FROM core_executable");
+        jdbcTemplate.update("DELETE FROM core_cycle");
         try (var conn = jdbcTemplate.getDataSource().getConnection()) {
             DataFixture.insertSystemUser(conn);
         }
@@ -176,6 +177,40 @@ class UserCommandConsumerIT {
         assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON))
             .extracting(session -> session.start().toString() + ".." + session.end().toString())
             .containsExactly("2026-07-09T23:00Z..2026-07-10T06:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
+    }
+
+    @Test
+    @DisplayName("the day's nap becomes ONE done activity under «Sueño», however many replans re-send it")
+    void a_nap_is_recorded_once_as_a_done_activity() {
+        // The dump is re-sent on every replan of the day, so the second pass is the real test: a second
+        // insert would leave two activities and two calendar events for one afternoon.
+        UUID sleepCycle = insertSleepCycle();
+
+        UUID first = UUID.randomUUID();
+        send(replanWithNightAndNapBody(first, NOON), first.toString());
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(napCount(sleepCycle)).isEqualTo(1));
+
+        UUID second = UUID.randomUUID();
+        send(replanWithNightAndNapBody(second, HALF_PAST_NOON), second.toString());
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+
+        // Still one activity, over the nap's real hours — and the night is not among them.
+        assertThat(napCount(sleepCycle)).isEqualTo(1);
+        Map<String, Object> nap = jdbcTemplate.queryForMap(
+            "SELECT name, status, start_time, end_time FROM core_executable "
+                + "WHERE type = 'ACTIVITY' AND cycle_id = ?", sleepCycle);
+        assertThat(nap).containsEntry("name", "Siesta").containsEntry("status", "DONE");
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE type = 'ACTIVITY' AND cycle_id = ?",
+            OffsetDateTime.class, sleepCycle))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 10, 0, 0, 0, ZoneOffset.UTC));
+
+        // And it reached the satellites the same way every other executable does: through the outbox.
+        Integer announced = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableCreatedEvent' "
+                + "AND aggregate_id IN (SELECT id::text FROM core_executable WHERE type = 'ACTIVITY')",
+            Integer.class);
+        assertThat(announced).isEqualTo(1);
     }
 
     @Test
@@ -443,6 +478,23 @@ class UserCommandConsumerIT {
         return jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
+    }
+
+    /** The user's «Sueño» cycle, which is what a recorded nap is filed under. */
+    private UUID insertSleepCycle() {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_cycle (id, user_id, name, type, status)
+            VALUES (?, ?, 'Sueño', 'PHASE', 'ACTIVE')
+            """, id, USER);
+        return id;
+    }
+
+    private int napCount(UUID sleepCycleId) {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE user_id = ? AND type = 'ACTIVITY' "
+                + "AND cycle_id = ?", Integer.class, USER, sleepCycleId);
+        return count == null ? 0 : count;
     }
 
     private int sleepRecordCount() {

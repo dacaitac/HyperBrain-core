@@ -53,6 +53,7 @@ class UserCommandServiceTest {
     private SleepScoreStore sleepScoreStore;
     private SleepRecordAssembler sleepRecordAssembler;
     private SleepSampleSessionParser sleepSampleSessionParser;
+    private NapActivityRecorder napActivityRecorder;
     private UserCommandService service;
 
     @BeforeEach
@@ -64,13 +65,14 @@ class UserCommandServiceTest {
         sleepScoreStore = mock(SleepScoreStore.class);
         sleepRecordAssembler = mock(SleepRecordAssembler.class);
         sleepSampleSessionParser = mock(SleepSampleSessionParser.class);
+        napActivityRecorder = mock(NapActivityRecorder.class);
         service = newService(false);
     }
 
     private UserCommandService newService(boolean asyncMaterializationEnabled) {
         return new UserCommandService(
             processedMessageStore, agendaGenerationService, agendaJobEmitter, plannerStateRepository,
-            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser,
+            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser, napActivityRecorder,
             Clock.fixed(NOW, ZoneOffset.UTC), STALENESS_HOURS, asyncMaterializationEnabled);
     }
 
@@ -185,12 +187,14 @@ class UserCommandServiceTest {
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
 
-        // Then the dump is parsed, the device record (no raw origin) written, then the replan runs
-        InOrder inOrder = inOrder(
-            sleepSampleSessionParser, sleepRecordAssembler, sleepScoreStore, agendaGenerationService);
+        // Then the dump is parsed, the device record (no raw origin) written, the day's naps recorded
+        // as activities, and only then the replan runs
+        InOrder inOrder = inOrder(sleepSampleSessionParser, sleepRecordAssembler, sleepScoreStore,
+            napActivityRecorder, agendaGenerationService);
         inOrder.verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
         inOrder.verify(sleepRecordAssembler).assemble(sleep, COLLECTED_AT, null);
         inOrder.verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
+        inOrder.verify(napActivityRecorder).record(USER_ID, sleep);
         inOrder.verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
         verifyNoInteractions(agendaJobEmitter);
     }
@@ -289,9 +293,9 @@ class UserCommandServiceTest {
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
 
-        // Then no device record is written, yet the replan still runs
+        // Then no device record is written, no nap is invented from it, yet the replan still runs
         verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
-        verifyNoInteractions(sleepScoreStore, sleepRecordAssembler);
+        verifyNoInteractions(sleepScoreStore, sleepRecordAssembler, napActivityRecorder);
     }
 
     @Test

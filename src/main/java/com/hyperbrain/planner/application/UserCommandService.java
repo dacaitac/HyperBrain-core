@@ -56,7 +56,8 @@ import java.util.UUID;
  * dedup insert before the job is emitted, so the {@code AgendaJobConsumer} reads it. The sleep write
  * is best-effort: an unscorable payload is logged and skipped without failing the replan, and it is
  * recorded even when the replan itself is dropped by the staleness guard (the night is real
- * regardless of consumer lag).
+ * regardless of consumer lag). Once the sleep is recorded, the day's <b>naps</b> are turned into
+ * completed activities by {@link NapActivityRecorder} — the same transaction, the same outbox.
  */
 @Service
 public class UserCommandService {
@@ -72,6 +73,7 @@ public class UserCommandService {
     private final SleepScoreStore sleepScoreStore;
     private final SleepRecordAssembler sleepRecordAssembler;
     private final SleepSampleSessionParser sleepSampleSessionParser;
+    private final NapActivityRecorder napActivityRecorder;
     private final Clock clock;
     private final Duration replanStalenessBound;
     private final boolean asyncMaterializationEnabled;
@@ -84,6 +86,7 @@ public class UserCommandService {
         SleepScoreStore sleepScoreStore,
         SleepRecordAssembler sleepRecordAssembler,
         SleepSampleSessionParser sleepSampleSessionParser,
+        NapActivityRecorder napActivityRecorder,
         Clock clock,
         @Value("${app.user-commands.replan-staleness-hours:2}") long replanStalenessHours,
         @Value("${app.planner.materialization.async-enabled:false}") boolean asyncMaterializationEnabled
@@ -95,6 +98,7 @@ public class UserCommandService {
         this.sleepScoreStore = sleepScoreStore;
         this.sleepRecordAssembler = sleepRecordAssembler;
         this.sleepSampleSessionParser = sleepSampleSessionParser;
+        this.napActivityRecorder = napActivityRecorder;
         this.clock = clock;
         this.replanStalenessBound = Duration.ofHours(replanStalenessHours);
         this.asyncMaterializationEnabled = asyncMaterializationEnabled;
@@ -170,12 +174,17 @@ public class UserCommandService {
      * failing the whole command — the replan is the primary action and must not be lost to a bad
      * enrichment. Parsing and scoring are pure (no SQL), so catching their failure leaves no partial
      * state; a genuine store fault still propagates for retry.
+     *
+     * <p>The day's naps are then recorded as completed activities (Daniel, 2026-08-08) through
+     * {@link NapActivityRecorder}, so time that went to sleeping shows up in Notion and in the calendar
+     * as what it was. That write is a genuine domain write, not enrichment of the score: it shares this
+     * command's transaction and a failure in it propagates.
      */
     private void recordDeviceSleep(UUID userId, UserCommand command, ZoneId zone) {
+        ParsedSleepDay day;
         DeviceSleepRecord record;
         try {
-            ParsedSleepDay day =
-                sleepSampleSessionParser.parse(command.sleepSession(), zone, command.occurredAt());
+            day = sleepSampleSessionParser.parse(command.sleepSession(), zone, command.occurredAt());
             record = sleepRecordAssembler.assemble(day.sleep(), day.collectedAt(), null);
         } catch (IllegalArgumentException ex) {
             log.warn("Unusable sleep dump on replan command {} skipped: {}",
@@ -185,6 +194,7 @@ public class UserCommandService {
         sleepScoreStore.upsertDeviceSleepRecord(userId, record, zone);
         log.info("Device sleep (score {}) from replan command {} recorded for user {}",
             record.sleepScore(), command.commandId(), userId);
+        napActivityRecorder.record(userId, day.sleep());
     }
 
     private void recordSleepScore(UUID userId, SleepScoreInput input, OffsetDateTime occurredAt) {

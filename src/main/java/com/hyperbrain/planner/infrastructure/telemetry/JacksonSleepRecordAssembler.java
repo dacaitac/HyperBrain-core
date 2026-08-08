@@ -51,8 +51,8 @@ class JacksonSleepRecordAssembler implements SleepRecordAssembler {
     }
 
     /**
-     * Serializes the summed stage durations, the derived metrics, the sub-scores and the sessions the
-     * totals were summed from, for {@code tel_sleep_record.stages}.
+     * Serializes the summed stage durations, the overlap measurement, the derived metrics, the
+     * sub-scores and the sessions the totals were summed from, for {@code tel_sleep_record.stages}.
      */
     private String stagesJson(AggregatedSleep sleep, SleepScoreResult result) {
         SleepStageSample sample = sleep.totals();
@@ -63,6 +63,11 @@ class JacksonSleepRecordAssembler implements SleepRecordAssembler {
         root.put("rem_seconds", sample.remSeconds());
         root.put("unspecified_seconds", sample.unspecifiedSeconds());
         root.put("awake_seconds", sample.awakeSeconds());
+        // Not a duration of the night but a measurement of the reading: how much of the sleep more
+        // than one stage claimed at once, which is what the proportional split had to divide. Kept on
+        // the row so the stage mix of past nights can be judged, and the score recalibrated, against
+        // how contested the data behind it was.
+        root.put("overlap_seconds", sleep.overlapSeconds());
         root.put("tst_hours", result.tstHours());
         root.put("efficiency", result.efficiency());
         root.put("deep_fraction", result.deepFraction());
