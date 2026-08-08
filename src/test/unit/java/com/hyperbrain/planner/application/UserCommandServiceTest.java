@@ -9,6 +9,7 @@ import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.model.UserCommandType;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.planner.domain.port.out.SleepDumpArchive;
 import com.hyperbrain.planner.domain.port.out.SleepRecordAssembler;
 import com.hyperbrain.planner.domain.port.out.SleepScoreStore;
 import com.hyperbrain.planner.domain.service.SleepSampleSessionParser;
@@ -29,6 +30,7 @@ import java.util.UUID;
 
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -45,6 +47,9 @@ class UserCommandServiceTest {
     private static final Instant NOW = Instant.parse("2026-07-11T03:00:00Z");
     private static final OffsetDateTime COLLECTED_AT =
         OffsetDateTime.of(2026, 7, 11, 6, 30, 0, 0, ZoneOffset.UTC);
+    /** The raw dump's archived row — what the typed record points back at. */
+    private static final UUID RAW_DUMP_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
+    private static final LocalDate SLEEP_DAY = LocalDate.of(2026, 7, 11);
 
     private ProcessedMessageStore processedMessageStore;
     private AgendaGenerationService agendaGenerationService;
@@ -53,6 +58,8 @@ class UserCommandServiceTest {
     private SleepScoreStore sleepScoreStore;
     private SleepRecordAssembler sleepRecordAssembler;
     private SleepSampleSessionParser sleepSampleSessionParser;
+    private SleepDumpArchive sleepDumpArchive;
+    private NapActivityRecorder napActivityRecorder;
     private UserCommandService service;
 
     @BeforeEach
@@ -64,14 +71,23 @@ class UserCommandServiceTest {
         sleepScoreStore = mock(SleepScoreStore.class);
         sleepRecordAssembler = mock(SleepRecordAssembler.class);
         sleepSampleSessionParser = mock(SleepSampleSessionParser.class);
+        sleepDumpArchive = mock(SleepDumpArchive.class);
+        napActivityRecorder = mock(NapActivityRecorder.class);
         service = newService(false);
     }
 
     private UserCommandService newService(boolean asyncMaterializationEnabled) {
         return new UserCommandService(
             processedMessageStore, agendaGenerationService, agendaJobEmitter, plannerStateRepository,
-            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser,
+            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser, sleepDumpArchive,
+            napActivityRecorder,
             Clock.fixed(NOW, ZoneOffset.UTC), STALENESS_HOURS, asyncMaterializationEnabled);
+    }
+
+    /** Stubs the raw-first archive: the dump is filed under its night before anything reads it. */
+    private void givenTheDumpIsArchived(DeviceSleepSamples dump, OffsetDateTime occurredAt) {
+        when(sleepSampleSessionParser.sleepDayOf(dump, BOGOTA, occurredAt)).thenReturn(SLEEP_DAY);
+        when(sleepDumpArchive.archive(USER_ID, dump, SLEEP_DAY, occurredAt)).thenReturn(RAW_DUMP_ID);
     }
 
     private static DeviceSleepSamples sleepDump() {
@@ -89,7 +105,7 @@ class UserCommandServiceTest {
 
     private static DeviceSleepRecord assembledRecord(AggregatedSleep sleep, OffsetDateTime collectedAt) {
         return new DeviceSleepRecord(
-            sleep.mainSession().start(), sleep.mainSession().end(), 480, 100,
+            sleep.night().start(), sleep.night().end(), 480, 100,
             "{\"low_confidence\":false}", collectedAt, null);
     }
 
@@ -109,7 +125,7 @@ class UserCommandServiceTest {
         // Then the whole-window replan runs in-process; the async emitter and sleep path are untouched
         verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
         verifyNoInteractions(agendaJobEmitter, sleepScoreStore, sleepRecordAssembler,
-            sleepSampleSessionParser);
+            sleepSampleSessionParser, sleepDumpArchive);
     }
 
     @Test
@@ -162,7 +178,7 @@ class UserCommandServiceTest {
 
         // Then nothing replans, no state is loaded — but the command stays marked processed
         verifyNoInteractions(agendaGenerationService, agendaJobEmitter, plannerStateRepository,
-            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser);
+            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser, sleepDumpArchive);
         verify(processedMessageStore).markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA");
     }
 
@@ -177,20 +193,23 @@ class UserCommandServiceTest {
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        givenTheDumpIsArchived(dump, occurredAt);
         when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
             .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
-        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, null)).thenReturn(record);
+        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, RAW_DUMP_ID)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
 
-        // Then the dump is parsed, the device record (no raw origin) written, then the replan runs
-        InOrder inOrder = inOrder(
-            sleepSampleSessionParser, sleepRecordAssembler, sleepScoreStore, agendaGenerationService);
+        // Then the dump is parsed, the device record (no raw origin) written, the day's naps recorded
+        // as activities, and only then the replan runs
+        InOrder inOrder = inOrder(sleepSampleSessionParser, sleepRecordAssembler, sleepScoreStore,
+            napActivityRecorder, agendaGenerationService);
         inOrder.verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
-        inOrder.verify(sleepRecordAssembler).assemble(sleep, COLLECTED_AT, null);
+        inOrder.verify(sleepRecordAssembler).assemble(sleep, COLLECTED_AT, RAW_DUMP_ID);
         inOrder.verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
+        inOrder.verify(napActivityRecorder).record(USER_ID, sleep);
         inOrder.verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
         verifyNoInteractions(agendaJobEmitter);
     }
@@ -208,9 +227,10 @@ class UserCommandServiceTest {
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        givenTheDumpIsArchived(dump, occurredAt);
         when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
             .thenReturn(new ParsedSleepDay(sleep, occurredAt));
-        when(sleepRecordAssembler.assemble(sleep, occurredAt, null)).thenReturn(record);
+        when(sleepRecordAssembler.assemble(sleep, occurredAt, RAW_DUMP_ID)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -218,7 +238,7 @@ class UserCommandServiceTest {
 
         // Then the parse was anchored there, and the instant it resolved is the collection instant
         verify(sleepSampleSessionParser).parse(dump, BOGOTA, occurredAt);
-        verify(sleepRecordAssembler).assemble(sleep, occurredAt, null);
+        verify(sleepRecordAssembler).assemble(sleep, occurredAt, RAW_DUMP_ID);
         verify(sleepScoreStore).upsertDeviceSleepRecord(USER_ID, record, BOGOTA);
     }
 
@@ -233,9 +253,10 @@ class UserCommandServiceTest {
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        givenTheDumpIsArchived(dump, occurredAt);
         when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
             .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
-        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, null)).thenReturn(record);
+        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, RAW_DUMP_ID)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -260,9 +281,10 @@ class UserCommandServiceTest {
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        givenTheDumpIsArchived(dump, occurredAt);
         when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
             .thenReturn(new ParsedSleepDay(sleep, COLLECTED_AT));
-        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, null)).thenReturn(record);
+        when(sleepRecordAssembler.assemble(sleep, COLLECTED_AT, RAW_DUMP_ID)).thenReturn(record);
 
         // When
         service.handle(USER_ID, new UserCommand(
@@ -282,6 +304,7 @@ class UserCommandServiceTest {
         when(processedMessageStore.markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA"))
             .thenReturn(true);
         when(plannerStateRepository.loadUserZone(USER_ID)).thenReturn(BOGOTA);
+        givenTheDumpIsArchived(dump, occurredAt);
         when(sleepSampleSessionParser.parse(dump, BOGOTA, occurredAt))
             .thenThrow(new IllegalArgumentException("no parseable sleep samples in the dump"));
 
@@ -289,9 +312,14 @@ class UserCommandServiceTest {
         service.handle(USER_ID, new UserCommand(
             COMMAND_ID, UserCommandType.REPLAN_AGENDA, occurredAt, null, dump));
 
-        // Then no device record is written, yet the replan still runs
+        // Then no device record is written, no nap is invented from it, yet the replan still runs
         verify(agendaGenerationService).replanAcrossWindow(USER_ID, occurredAt, BOGOTA);
-        verifyNoInteractions(sleepScoreStore, sleepRecordAssembler);
+        verifyNoInteractions(sleepScoreStore, sleepRecordAssembler, napActivityRecorder);
+        // And the refused dump is NOT thrown away — it is archived and flagged, which is the only
+        // reason a night with no score can be explained after the fact.
+        verify(sleepDumpArchive).archive(USER_ID, dump, SLEEP_DAY, occurredAt);
+        verify(sleepDumpArchive).markUnusable(RAW_DUMP_ID);
+        verify(sleepDumpArchive, never()).markInterpreted(RAW_DUMP_ID);
     }
 
     @Test
@@ -312,7 +340,8 @@ class UserCommandServiceTest {
 
         // Then
         verify(sleepScoreStore).upsertDailyScore(USER_ID, date, 85, occurredAt, BOGOTA);
-        verifyNoInteractions(agendaGenerationService, sleepRecordAssembler, sleepSampleSessionParser);
+        verifyNoInteractions(agendaGenerationService, sleepRecordAssembler, sleepSampleSessionParser,
+            sleepDumpArchive);
     }
 
     @Test
@@ -333,7 +362,8 @@ class UserCommandServiceTest {
 
         // Then the store was consulted once and nothing else ran
         verify(sleepScoreStore).upsertDailyScore(USER_ID, date, 90, occurredAt, BOGOTA);
-        verifyNoInteractions(agendaGenerationService, sleepRecordAssembler, sleepSampleSessionParser);
+        verifyNoInteractions(agendaGenerationService, sleepRecordAssembler, sleepSampleSessionParser,
+            sleepDumpArchive);
     }
 
     @Test
@@ -350,7 +380,7 @@ class UserCommandServiceTest {
 
         // Then nothing downstream runs — the sleep is not re-parsed nor re-written on redelivery
         verifyNoInteractions(agendaGenerationService, agendaJobEmitter, plannerStateRepository,
-            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser);
+            sleepScoreStore, sleepRecordAssembler, sleepSampleSessionParser, sleepDumpArchive);
         verify(processedMessageStore).markProcessed("user-command:" + COMMAND_ID, "REPLAN_AGENDA");
         verifyNoMoreInteractions(processedMessageStore);
     }

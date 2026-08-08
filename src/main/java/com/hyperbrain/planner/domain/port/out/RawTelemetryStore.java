@@ -26,6 +26,22 @@ public interface RawTelemetryStore {
     Optional<UUID> insertPending(RawTelemetryRow row);
 
     /**
+     * Lands a raw row that is expected to be <b>re-sent and revised</b>, keeping exactly one row per
+     * {@code dedup_key} and making it the most recent version: on conflict the stored payload, the
+     * occurrence instant, the schema version and the landing time are all overwritten in place, and the
+     * status returns to {@code PENDING} because what is now stored has not been interpreted yet.
+     *
+     * <p>This is the opposite policy to {@link #insertPending}, and deliberately so. There, a semantic
+     * duplicate is a re-delivery of an immutable fact and must be ignored. Here the same key stands for
+     * a fact the provider keeps correcting — a night the watch re-stages and the phone re-sends on every
+     * replan — so the newest version is the one worth keeping.
+     *
+     * @param row the raw envelope to land; never null, {@code dedupKey} required
+     * @return the id of the landed row: freshly generated on insert, the existing one on overwrite
+     */
+    UUID upsertLatest(RawTelemetryRow row);
+
+    /**
      * Transitions a raw row's normalization status (PENDING → NORMALIZED / SKIPPED / ERROR).
      *
      * @param id     the raw row id; never null
@@ -34,8 +50,18 @@ public interface RawTelemetryStore {
     void markStatus(UUID id, NormalizationStatus status);
 
     /**
-     * Deletes NORMALIZED and SKIPPED raw rows older than the retention window (ERROR rows are kept
-     * for diagnosis), using the retention partial index.
+     * Deletes NORMALIZED and SKIPPED raw rows older than the retention window, using the retention
+     * partial index. Two kinds of row are spared, and for two different reasons:
+     * <ul>
+     *   <li><b>ERROR rows</b> — kept for diagnosis, as they always have been.</li>
+     *   <li><b>The raw sleep archive</b> ({@link SleepDumpArchive#EVENT_TYPE}) — kept
+     *       <b>indefinitely</b> (Daniel, 2026-08-08: «no es necesario borrar nada, tenemos espacio de
+     *       sobra»). These rows exist for exactly one purpose: to survive a change in the way sleep is
+     *       read, so the nights already scored can be recomputed. Six production rows were lost that
+     *       way once, when the only thing kept was the collapsed totals. A row purged at ninety days
+     *       is a row that cannot answer the question the archive was built to answer, so the exemption
+     *       is part of the archive's contract and not a tuning of the window.</li>
+     * </ul>
      *
      * @param retentionDays the retention window in days
      * @return the number of rows purged

@@ -70,11 +70,13 @@ class UserCommandConsumerIT {
         PlannerBlockView.create(jdbcTemplate);
         jdbcTemplate.update("DELETE FROM outbox_events");
         jdbcTemplate.update("DELETE FROM tel_sleep_record");
+        jdbcTemplate.update("DELETE FROM context_event");
         jdbcTemplate.update("DELETE FROM processed_message");
         jdbcTemplate.update("DELETE FROM core_execution_profile");
         jdbcTemplate.update("UPDATE core_executable SET imputed_time_block_id = NULL");
         jdbcTemplate.update("DELETE FROM core_time_block");
         jdbcTemplate.update("DELETE FROM core_executable");
+        jdbcTemplate.update("DELETE FROM core_cycle");
         try (var conn = jdbcTemplate.getDataSource().getConnection()) {
             DataFixture.insertSystemUser(conn);
         }
@@ -117,7 +119,7 @@ class UserCommandConsumerIT {
     }
 
     @Test
-    @DisplayName("REPLAN_AGENDA carrying a raw HealthKit dump distils a device night (real hours, no raw origin) and replans")
+    @DisplayName("REPLAN_AGENDA carrying a raw HealthKit dump distils a device night, archives it raw and replans")
     void replan_with_sleep_records_device_record_and_plans() {
         // Given one schedulable task
         insertTask("Deep work", 0.9, 60);
@@ -127,7 +129,7 @@ class UserCommandConsumerIT {
         send(replanWithSleepBody(commandId, NOON), commandId.toString());
 
         // Then a complete device record lands: real hours (end_time set), a score, the derived
-        // duration (Core 6h + Deep 1h + REM 30m = 450 min), and no raw origin (context_event_id NULL)
+        // duration (Core 6h + Deep 1h + REM 30m = 450 min), and a link to the archived raw dump
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
         Map<String, Object> row = jdbcTemplate.queryForMap("""
             SELECT end_time, sleep_score, duration_minutes, context_event_id
@@ -136,7 +138,9 @@ class UserCommandConsumerIT {
         assertThat(row.get("end_time")).isNotNull();
         assertThat((Integer) row.get("sleep_score")).isGreaterThan(0);
         assertThat(row.get("duration_minutes")).isEqualTo(450);
-        assertThat(row.get("context_event_id")).isNull();
+        // The typed row points back at the dump it was derived from: totals cannot be un-collapsed, so
+        // without the raw envelope a night already scored can never be recomputed (ADR-016 raw-first).
+        assertThat(row.get("context_event_id")).isEqualTo(archivedDumpId());
 
         // And the agenda still materializes from the replan (same transaction)
         await().atMost(TIMEOUT).untilAsserted(() -> assertThat(countPlannedBlocks()).isEqualTo(1));
@@ -176,6 +180,116 @@ class UserCommandConsumerIT {
         assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON))
             .extracting(session -> session.start().toString() + ".." + session.end().toString())
             .containsExactly("2026-07-09T23:00Z..2026-07-10T06:40Z", "2026-07-10T10:00Z..2026-07-10T11:56Z");
+    }
+
+    @Test
+    @DisplayName("the raw dump is archived verbatim, one row per night, rewritten by every re-send")
+    void the_raw_dump_is_archived_and_rewritten_per_night() {
+        // Six production rows could not be recomputed when the reading of sleep changed, because only
+        // the collapsed totals had been kept. The raw envelope is what makes that recoverable — and
+        // because the phone re-sends the same night on every replan and the watch re-stages it in
+        // between, there must be exactly one row per night, holding the newest reading.
+        UUID first = UUID.randomUUID();
+        send(replanWithSleepBody(first, NOON), first.toString());
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(archivedDumpCount()).isEqualTo(1));
+
+        UUID second = UUID.randomUUID();
+        send(replanWithNightAndNapBody(second, HALF_PAST_NOON), second.toString());
+        await().atMost(TIMEOUT).untilAsserted(() ->
+            assertThat(archivedDump().get("payload").toString()).contains("11:56"));
+
+        // Still one row for that night, and it is the second dump — not two near-duplicates.
+        assertThat(archivedDumpCount()).isEqualTo(1);
+        Map<String, Object> raw = archivedDump();
+        assertThat(raw).containsEntry("source", "INTEGRATION")
+            .containsEntry("provider", "APPLE_HEALTH")
+            // Not the canonical SLEEP_SESSION type: that payload is one aggregated session, this is a
+            // list of raw stage intervals, and a re-normalizer must never confuse the two.
+            .containsEntry("event_type", "SLEEP_STAGE_DUMP")
+            .containsEntry("normalization_status", "NORMALIZED")
+            .containsEntry("dedup_key",
+                "APPLE_HEALTH:SLEEP_STAGE_DUMP:" + USER + ":2026-07-10");
+        // Verbatim where it counts: the provider's own local time strings and stage labels, not
+        // instants the parser derived from them. (JSONB stores a normalized object — key order and
+        // spacing are the column's, the values are the dump's.)
+        assertThat(raw.get("payload").toString())
+            .contains("09/07/2026 at 11:00 PM", "\"Awake\"", "10/07/2026 at 11:56 AM");
+    }
+
+    @Test
+    @DisplayName("a dump the plausibility guards refuse is archived anyway, flagged, and scores nothing")
+    void a_refused_dump_is_archived_for_diagnosis() {
+        UUID commandId = UUID.randomUUID();
+        send(replanWithImplausibleSleepBody(commandId, NOON), commandId.toString());
+
+        // The replan still runs — the sleep is enrichment, never the primary action.
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(archivedDumpCount()).isEqualTo(1));
+        assertThat(sleepRecordCount()).isZero();
+        // ERROR and not SKIPPED, so the retention sweep spares it: this row is the only thing that can
+        // explain, after the fact, why a night has no score.
+        assertThat(archivedDump()).containsEntry("normalization_status", "ERROR");
+    }
+
+    @Test
+    @DisplayName("a night slept in two phases is ONE night, and its second half is never a «Siesta»")
+    void a_broken_night_is_one_night_end_to_end() {
+        // Daniel, 2026-08-08: «anoche dormí en dos fases porque me desperté en la madrugada». Reading
+        // the row's hours off the longer stretch declared he got up at 03:00 — which the sleep frontier
+        // then learned as his wake time — and put a calendar event titled «Siesta» at half past six.
+        UUID sleepCycle = insertSleepCycle();
+        UUID commandId = UUID.randomUUID();
+
+        send(replanWithBrokenNightBody(commandId, NOON), commandId.toString());
+
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+        // The row spans the whole night on the clock, hole included: 23:00 to 08:00.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 9, 23, 0, 0, 0, ZoneOffset.UTC));
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT end_time FROM tel_sleep_record WHERE user_id = ?", OffsetDateTime.class, USER))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 8, 0, 0, 0, ZoneOffset.UTC));
+        // Nothing is filed as a nap, and both stretches still survive so the day knows WHEN he slept.
+        assertThat(napCount(sleepCycle)).isZero();
+        assertThat(plannerStateRepository.loadRecentSleepSessions(USER, NOON)).hasSize(2);
+        // And the score is computed on the 5 h 30 actually slept, not on the 9 h the row spans.
+        assertThat(jdbcTemplate.queryForMap(
+            "SELECT duration_minutes FROM tel_sleep_record WHERE user_id = ?", USER))
+            .containsEntry("duration_minutes", 330);
+    }
+
+    @Test
+    @DisplayName("the day's nap becomes ONE done activity under «Sueño», however many replans re-send it")
+    void a_nap_is_recorded_once_as_a_done_activity() {
+        // The dump is re-sent on every replan of the day, so the second pass is the real test: a second
+        // insert would leave two activities and two calendar events for one afternoon.
+        UUID sleepCycle = insertSleepCycle();
+
+        UUID first = UUID.randomUUID();
+        send(replanWithNightAndNapBody(first, NOON), first.toString());
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(napCount(sleepCycle)).isEqualTo(1));
+
+        UUID second = UUID.randomUUID();
+        send(replanWithNightAndNapBody(second, HALF_PAST_NOON), second.toString());
+        await().atMost(TIMEOUT).untilAsserted(() -> assertThat(sleepRecordCount()).isEqualTo(1));
+
+        // Still one activity, over the nap's real hours — and the night is not among them.
+        assertThat(napCount(sleepCycle)).isEqualTo(1);
+        Map<String, Object> nap = jdbcTemplate.queryForMap(
+            "SELECT name, status, start_time, end_time FROM core_executable "
+                + "WHERE type = 'ACTIVITY' AND cycle_id = ?", sleepCycle);
+        assertThat(nap).containsEntry("name", "Siesta").containsEntry("status", "DONE");
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE type = 'ACTIVITY' AND cycle_id = ?",
+            OffsetDateTime.class, sleepCycle))
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 10, 0, 0, 0, ZoneOffset.UTC));
+
+        // And it reached the satellites the same way every other executable does: through the outbox.
+        Integer announced = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'ExecutableCreatedEvent' "
+                + "AND aggregate_id IN (SELECT id::text FROM core_executable WHERE type = 'ACTIVITY')",
+            Integer.class);
+        assertThat(announced).isEqualTo(1);
     }
 
     @Test
@@ -376,6 +490,50 @@ class UserCommandConsumerIT {
             """.formatted(commandId, occurredAt);
     }
 
+    /**
+     * A dump the plausibility guards refuse: Awake laid over the whole first half of the night, so it
+     * claims 9 h of a 6 h window. Nothing scorable comes out of it, and that is the point.
+     */
+    private static String replanWithImplausibleSleepBody(UUID commandId, OffsetDateTime occurredAt) {
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "10/07/2026 at 12:05 PM",
+                "sample": [
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 5:00 AM","duration":"6:00:00"},
+                  {"stage":"Awake","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 2:00 AM","duration":"3:00:00"}
+                ]
+              }
+            }
+            """.formatted(commandId, occurredAt);
+    }
+
+    /**
+     * A night broken in the small hours: 23:00–03:00 and then 06:30–08:00, the shape Daniel actually
+     * slept. Both stretches start before nine, so both are the night.
+     */
+    private static String replanWithBrokenNightBody(UUID commandId, OffsetDateTime occurredAt) {
+        return """
+            {
+              "command_id": "%s",
+              "command_type": "REPLAN_AGENDA",
+              "origin": "USER",
+              "occurred_at": "%s",
+              "sleep": {
+                "date": "10/07/2026 at 12:05 PM",
+                "sample": [
+                  {"stage":"Core","startDate":"09/07/2026 at 11:00 PM","endDate":"10/07/2026 at 3:00 AM","duration":"4:00:00"},
+                  {"stage":"Core","startDate":"10/07/2026 at 6:30 AM","endDate":"10/07/2026 at 8:00 AM","duration":"1:30:00"}
+                ]
+              }
+            }
+            """.formatted(commandId, occurredAt);
+    }
+
     private static String replanWithSleepBody(UUID commandId, OffsetDateTime occurredAt) {
         // Raw HealthKit dump (the Shortcut's shape) in the user's zone (UTC in this suite), local time
         // strings with the U+202F narrow no-break space Apple inserts before AM/PM. Core 6 h + Deep 1 h
@@ -443,6 +601,40 @@ class UserCommandConsumerIT {
         return jdbcTemplate.queryForObject(
             "SELECT min(date_start) FROM planner_blocks WHERE status = 'PLANNED' AND origin = 'PLANNER'",
             OffsetDateTime.class);
+    }
+
+    private int archivedDumpCount() {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP'",
+            Integer.class, USER);
+        return count == null ? 0 : count;
+    }
+
+    private Map<String, Object> archivedDump() {
+        return jdbcTemplate.queryForMap(
+            "SELECT id, source, provider, event_type, payload, dedup_key, normalization_status "
+                + "FROM context_event WHERE user_id = ? AND event_type = 'SLEEP_STAGE_DUMP'", USER);
+    }
+
+    private UUID archivedDumpId() {
+        return (UUID) archivedDump().get("id");
+    }
+
+    /** The user's «Sueño» cycle, which is what a recorded nap is filed under. */
+    private UUID insertSleepCycle() {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_cycle (id, user_id, name, type, status)
+            VALUES (?, ?, 'Sueño', 'PHASE', 'ACTIVE')
+            """, id, USER);
+        return id;
+    }
+
+    private int napCount(UUID sleepCycleId) {
+        Integer count = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE user_id = ? AND type = 'ACTIVITY' "
+                + "AND cycle_id = ?", Integer.class, USER, sleepCycleId);
+        return count == null ? 0 : count;
     }
 
     private int sleepRecordCount() {

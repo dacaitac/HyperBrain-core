@@ -16,6 +16,7 @@ import java.time.ZoneId;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -210,6 +211,59 @@ public interface PlannerStateRepository {
      * @return the day's planner blocks with their executable names; never null, may be empty
      */
     List<PlannedBlockRecord> loadPlannedBlocksForDay(UUID userId, LocalDate targetDay, ZoneId zone);
+
+    /**
+     * Finds the user's cycle carrying an exact name. Used to attach system-authored executables to the
+     * commitment they belong to (the nap that goes under «Sueño») without hardcoding an id: the cycle
+     * is the user's, created by the user, and its id differs per environment.
+     *
+     * @param userId    the owning user; never null
+     * @param cycleName the exact cycle name to look up; never null
+     * @return the cycle's id, or empty when the user has no cycle by that name
+     */
+    Optional<UUID> findCycleIdByName(UUID userId, String cycleName);
+
+    /**
+     * Finds an {@code ACTIVITY} of the given cycle whose window overlaps {@code [start, end)} — the
+     * natural key of an observed episode, which has no external id of its own.
+     *
+     * <p>This is what makes recording an observation idempotent: the same episode re-observed (the
+     * dump is re-sent on every replan, and the watch revises its staging) matches the row already
+     * there instead of creating a second one, with a second calendar event behind it.
+     *
+     * @param userId  the owning user; never null
+     * @param cycleId the cycle the activity must belong to; never null
+     * @param start   the observed window's start; never null
+     * @param end     the observed window's end; never null
+     * @return the earliest overlapping activity's id, or empty when none overlaps
+     */
+    Optional<UUID> findActivityOverlapping(UUID userId, UUID cycleId, OffsetDateTime start,
+                                           OffsetDateTime end);
+
+    /**
+     * Inserts an already-completed {@code ACTIVITY}: an episode the system observed after the fact,
+     * not a plan. Written with the planner's own origin and {@code system_generated = false} so the
+     * standard propagators mirror it to Notion and to the calendar like any other executable.
+     *
+     * @param activityId the id to persist it under; never null
+     * @param userId     the owning user; never null
+     * @param cycleId    the cycle it belongs to; never null
+     * @param name       the executable's display name; never null
+     * @param start      when the episode began; never null
+     * @param end        when it ended; never null and after {@code start}
+     */
+    void insertCompletedActivity(UUID activityId, UUID userId, UUID cycleId, String name,
+                                 OffsetDateTime start, OffsetDateTime end);
+
+    /**
+     * Moves an activity's end instant to a revised one, leaving everything else untouched.
+     *
+     * @param activityId the activity to re-time; never null
+     * @param end        the revised end instant; never null
+     * @return true when the row actually moved — the caller's signal to announce it, so an unchanged
+     *         re-observation stays silent instead of churning the satellites
+     */
+    boolean retimeActivityEnd(UUID activityId, OffsetDateTime end);
 
     /**
      * Reads the display names of the given executables for the LLM-facing read model (#61, H3): the

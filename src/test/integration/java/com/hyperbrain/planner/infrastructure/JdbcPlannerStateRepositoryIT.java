@@ -603,7 +603,111 @@ class JdbcPlannerStateRepositoryIT {
             .isInstanceOf(UnsupportedOperationException.class);
     }
 
+    // ─── the observed episode: cycle lookup, overlap key, insert and re-time ───
+
+    @Test
+    @DisplayName("the sleep cycle is found by its exact name, scoped to the user that asked")
+    void the_cycle_is_found_by_name_per_user() {
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        UUID otherUser = insertOtherUser();
+        insertCycle(otherUser, "Sueño");
+
+        assertThat(repository.findCycleIdByName(USER, "Sueño")).contains(sleepCycle);
+        // A near miss is a miss: the name is the key, so the system never attaches a nap to the wrong
+        // commitment because two cycles read alike.
+        assertThat(repository.findCycleIdByName(USER, "Sueno")).isEmpty();
+        assertThat(repository.findCycleIdByName(USER, "sueño")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("an observed episode is inserted DONE, under the cycle, over its real window")
+    void a_completed_activity_is_inserted_done_and_mirrored() {
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        UUID nap = UUID.randomUUID();
+
+        repository.insertCompletedActivity(nap, USER, sleepCycle, "Siesta", at(14, 0), at(15, 0));
+
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+            "SELECT name, type, status, cycle_id, origin, system_generated FROM core_executable "
+                + "WHERE id = ?", nap);
+        assertThat(row).containsEntry("name", "Siesta")
+            .containsEntry("type", "ACTIVITY")
+            .containsEntry("status", "DONE")
+            .containsEntry("cycle_id", sleepCycle)
+            // Authored by the system, not by the user, so the source-aware merge treats it as ours...
+            .containsEntry("origin", "PLANNER")
+            // ...and NOT a retrospective accounting row: this one is meant to reach the satellites.
+            .containsEntry("system_generated", false);
+        assertThat(startOf(nap)).isEqualTo(at(14, 0));
+        assertThat(endOf(nap)).isEqualTo(at(15, 0));
+    }
+
+    @Test
+    @DisplayName("the overlap key finds the episode already recorded, and only inside the same cycle")
+    void the_overlap_key_finds_the_recorded_episode() {
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        UUID otherCycle = insertCycle(USER, "Trabajo");
+        UUID nap = UUID.randomUUID();
+        repository.insertCompletedActivity(nap, USER, sleepCycle, "Siesta", at(14, 0), at(15, 0));
+
+        // The same afternoon re-observed with a revised end: it overlaps, so it is the same episode.
+        assertThat(repository.findActivityOverlapping(USER, sleepCycle, at(14, 0), at(15, 12)))
+            .contains(nap);
+        // A window that merely touches it does not overlap — two naps back to back stay two naps.
+        assertThat(repository.findActivityOverlapping(USER, sleepCycle, at(15, 0), at(16, 0)))
+            .isEmpty();
+        // And the key is scoped: another cycle's activities are none of the sleep cycle's business.
+        assertThat(repository.findActivityOverlapping(USER, otherCycle, at(14, 0), at(15, 0)))
+            .isEmpty();
+    }
+
+    @Test
+    @DisplayName("re-timing moves the end and reports it; re-timing to the same end reports nothing")
+    void retiming_reports_only_a_real_move() {
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        UUID nap = UUID.randomUUID();
+        repository.insertCompletedActivity(nap, USER, sleepCycle, "Siesta", at(14, 0), at(15, 0));
+
+        assertThat(repository.retimeActivityEnd(nap, at(15, 12))).isTrue();
+        // The update count is the caller's "did this really move": an unchanged re-observation must not
+        // announce anything, or every replan of the day would churn Notion and the calendar.
+        assertThat(repository.retimeActivityEnd(nap, at(15, 12))).isFalse();
+
+        assertThat(endOf(nap)).isEqualTo(at(15, 12));
+        assertThat(startOf(nap)).isEqualTo(at(14, 0));
+    }
+
+    @Test
+    @DisplayName("a recorded nap is DONE, so it never becomes a wall nor a commitment to move")
+    void a_recorded_nap_does_not_wall_the_day() {
+        UUID sleepCycle = insertCycle(USER, "Sueño");
+        repository.insertCompletedActivity(
+            UUID.randomUUID(), USER, sleepCycle, "Siesta", at(14, 0), at(15, 0));
+
+        assertThat(repository.loadOccupiedIntervals(USER, DAY_START, DAY_END)).isEmpty();
+        assertThat(repository.loadMovableCommitments(USER, DAY_START, DAY_END)).isEmpty();
+    }
+
     // ─── fixtures ──────────────────────────────────────────────────────────────
+
+    private OffsetDateTime startOf(UUID executableId) {
+        return jdbcTemplate.queryForObject(
+            "SELECT start_time FROM core_executable WHERE id = ?", OffsetDateTime.class, executableId);
+    }
+
+    private OffsetDateTime endOf(UUID executableId) {
+        return jdbcTemplate.queryForObject(
+            "SELECT end_time FROM core_executable WHERE id = ?", OffsetDateTime.class, executableId);
+    }
+
+    private UUID insertCycle(UUID userId, String name) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_cycle (id, user_id, name, type, status)
+            VALUES (?, ?, ?, 'PHASE', 'ACTIVE')
+            """, id, userId, name);
+        return id;
+    }
 
     private MciWig onlyWig() {
         List<MciWig> portfolio = repository.loadWigPortfolio(USER, NOON);

@@ -5,6 +5,7 @@ import com.hyperbrain.planner.domain.model.ParsedSleepDay;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
+import com.hyperbrain.planner.domain.port.out.SleepDumpArchive;
 import com.hyperbrain.planner.domain.port.out.SleepRecordAssembler;
 import com.hyperbrain.planner.domain.port.out.SleepScoreStore;
 import com.hyperbrain.planner.domain.service.SleepSampleSessionParser;
@@ -56,7 +57,10 @@ import java.util.UUID;
  * dedup insert before the job is emitted, so the {@code AgendaJobConsumer} reads it. The sleep write
  * is best-effort: an unscorable payload is logged and skipped without failing the replan, and it is
  * recorded even when the replan itself is dropped by the staleness guard (the night is real
- * regardless of consumer lag).
+ * regardless of consumer lag). The dump itself is archived raw beforehand, one row per night, so the
+ * nights already scored can be recomputed if the reading of sleep changes again. Once the sleep is
+ * recorded, the day's <b>naps</b> are turned into completed activities by {@link NapActivityRecorder}
+ * — the same transaction, the same outbox.
  */
 @Service
 public class UserCommandService {
@@ -72,6 +76,8 @@ public class UserCommandService {
     private final SleepScoreStore sleepScoreStore;
     private final SleepRecordAssembler sleepRecordAssembler;
     private final SleepSampleSessionParser sleepSampleSessionParser;
+    private final SleepDumpArchive sleepDumpArchive;
+    private final NapActivityRecorder napActivityRecorder;
     private final Clock clock;
     private final Duration replanStalenessBound;
     private final boolean asyncMaterializationEnabled;
@@ -84,6 +90,8 @@ public class UserCommandService {
         SleepScoreStore sleepScoreStore,
         SleepRecordAssembler sleepRecordAssembler,
         SleepSampleSessionParser sleepSampleSessionParser,
+        SleepDumpArchive sleepDumpArchive,
+        NapActivityRecorder napActivityRecorder,
         Clock clock,
         @Value("${app.user-commands.replan-staleness-hours:2}") long replanStalenessHours,
         @Value("${app.planner.materialization.async-enabled:false}") boolean asyncMaterializationEnabled
@@ -95,6 +103,8 @@ public class UserCommandService {
         this.sleepScoreStore = sleepScoreStore;
         this.sleepRecordAssembler = sleepRecordAssembler;
         this.sleepSampleSessionParser = sleepSampleSessionParser;
+        this.sleepDumpArchive = sleepDumpArchive;
+        this.napActivityRecorder = napActivityRecorder;
         this.clock = clock;
         this.replanStalenessBound = Duration.ofHours(replanStalenessHours);
         this.asyncMaterializationEnabled = asyncMaterializationEnabled;
@@ -170,21 +180,39 @@ public class UserCommandService {
      * failing the whole command — the replan is the primary action and must not be lost to a bad
      * enrichment. Parsing and scoring are pure (no SQL), so catching their failure leaves no partial
      * state; a genuine store fault still propagates for retry.
+     *
+     * <p><b>The dump is archived before it is read</b> (raw-first, ADR-016), through
+     * {@link SleepDumpArchive}: totals alone cannot be un-collapsed, and when the way sleep is read
+     * changes there has to be something left to recompute the nights from. The archived row is then
+     * marked by the outcome — interpreted when a record was written, unusable when the payload was
+     * refused — and the typed record carries its id, so a row can always be traced back to the bytes it
+     * came from.
+     *
+     * <p>The day's naps are then recorded as completed activities (Daniel, 2026-08-08) through
+     * {@link NapActivityRecorder}, so time that went to sleeping shows up in Notion and in the calendar
+     * as what it was. That write is a genuine domain write, not enrichment of the score: it shares this
+     * command's transaction and a failure in it propagates.
      */
     private void recordDeviceSleep(UUID userId, UserCommand command, ZoneId zone) {
+        UUID archivedDumpId = sleepDumpArchive.archive(userId, command.sleepSession(),
+            sleepSampleSessionParser.sleepDayOf(command.sleepSession(), zone, command.occurredAt()),
+            command.occurredAt());
+        ParsedSleepDay day;
         DeviceSleepRecord record;
         try {
-            ParsedSleepDay day =
-                sleepSampleSessionParser.parse(command.sleepSession(), zone, command.occurredAt());
-            record = sleepRecordAssembler.assemble(day.sleep(), day.collectedAt(), null);
+            day = sleepSampleSessionParser.parse(command.sleepSession(), zone, command.occurredAt());
+            record = sleepRecordAssembler.assemble(day.sleep(), day.collectedAt(), archivedDumpId);
         } catch (IllegalArgumentException ex) {
-            log.warn("Unusable sleep dump on replan command {} skipped: {}",
+            sleepDumpArchive.markUnusable(archivedDumpId);
+            log.warn("Unusable sleep dump on replan command {} archived and skipped: {}",
                 command.commandId(), ex.getMessage());
             return;
         }
         sleepScoreStore.upsertDeviceSleepRecord(userId, record, zone);
+        sleepDumpArchive.markInterpreted(archivedDumpId);
         log.info("Device sleep (score {}) from replan command {} recorded for user {}",
             record.sleepScore(), command.commandId(), userId);
+        napActivityRecorder.record(userId, day.sleep());
     }
 
     private void recordSleepScore(UUID userId, SleepScoreInput input, OffsetDateTime occurredAt) {
