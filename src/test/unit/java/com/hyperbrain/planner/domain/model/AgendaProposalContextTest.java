@@ -65,9 +65,19 @@ class AgendaProposalContextTest {
             .isInstanceOf(UnsupportedOperationException.class);
     }
 
+    @Test
+    @DisplayName("no recorded sleep is an empty list, never null — the prompt asks it whether it is there")
+    void absent_sleep_sessions_are_an_empty_list() {
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "reason")),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), null);
+
+        assertThat(context.sleepSessions()).isEmpty();
+    }
+
     private static AgendaProposalContext context(Map<UUID, RetimingBand> bands) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "reason")),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), bands);
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), bands, List.of());
     }
 }

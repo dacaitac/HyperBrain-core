@@ -161,7 +161,7 @@ class AgendaProposalServiceTest {
             UUID.randomUUID(), WAKE.plusMinutes(120), WAKE.plusMinutes(180), true);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
-            WAKE, BEDTIME, List.of(agendaWall), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
+            WAKE, BEDTIME, List.of(agendaWall), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -182,7 +182,7 @@ class AgendaProposalServiceTest {
             UUID.randomUUID(), WAKE.plusMinutes(120), WAKE.plusMinutes(180), false);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
-            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
+            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -206,7 +206,7 @@ class AgendaProposalServiceTest {
             List.of(block(A, WAKE.plusHours(12), WAKE.plusHours(13)),
                 block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(90))),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(),
-            Map.of(A, household));
+            Map.of(A, household), List.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -227,7 +227,7 @@ class AgendaProposalServiceTest {
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE.plusHours(12), WAKE.plusHours(13))),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(),
-            Map.of(A, household));
+            Map.of(A, household), List.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -294,7 +294,7 @@ class AgendaProposalServiceTest {
             throw new AssertionError("gateway must not be called for an empty run");
         };
         AgendaProposalContext empty = new AgendaProposalContext(
-            List.of(), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
+            List.of(), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of());
 
         assertThat(service(neverCalled).propose(empty)).isEmpty();
     }
@@ -307,7 +307,7 @@ class AgendaProposalServiceTest {
             "floor reason", List.of(C), "Deep work morning");
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(themed, block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"MOVE",
@@ -334,7 +334,7 @@ class AgendaProposalServiceTest {
         AgendaBlock themed = new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false,
             "floor reason", List.of(C), "Deep work morning");
         AgendaProposalContext context = new AgendaProposalContext(
-            List.of(themed), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of());
+            List.of(themed), WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of());
         String json = """
             {"decisions":[
               {"block_id":"11111111-1111-1111-1111-111111111111","placement":"KEEP"}
@@ -357,13 +357,13 @@ class AgendaProposalServiceTest {
         return new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL",
-            Map.of(A, "Write the report", B, "Review PRs"), Map.of());
+            Map.of(A, "Write the report", B, "Review PRs"), Map.of(), List.of());
     }
 
     private static AgendaProposalContext wigContext() {
         return new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60)), block(B, WAKE.plusMinutes(60), WAKE.plusMinutes(120))),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(A), 3, "NEUTRAL", Map.of(), Map.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(A), 3, "NEUTRAL", Map.of(), Map.of(), List.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {

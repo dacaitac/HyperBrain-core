@@ -44,6 +44,11 @@ import java.util.UUID;
  *
  * <p>A commitment with nowhere left to go on its day <b>stays where it is</b>. Dropping it or pushing
  * it to tomorrow would be the planner deciding something only the user may.
+ *
+ * <p><b>The commitments also arrive here as walls of their own</b>, because they occupy the day like
+ * anything else that holds a calendar window. That makes the order matter: a commitment this run has
+ * just re-timed must wall <b>where it landed</b>, not where it was, or the next one would be dodging a
+ * ghost and stacking itself onto the hour that was just freed. So each move rewrites its own wall.
  */
 @Component
 public class MovedCommitmentRescuer {
@@ -95,6 +100,8 @@ public class MovedCommitmentRescuer {
             OffsetDateTime end = start.plusMinutes(commitment.durationMinutes());
             if (scheduling.retimeWithinDay(commitment.executableId(), start, end, zone)) {
                 moved.add(commitment.executableId());
+                // Its old window came in as a wall of its own; it is stale the moment the move lands.
+                occupancy.removeIf(wall -> commitment.executableId().equals(wall.executableId()));
                 occupancy.add(new OccupiedInterval(commitment.executableId(), start, end, false));
             }
         }

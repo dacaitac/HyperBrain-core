@@ -1,6 +1,7 @@
 package com.hyperbrain.planner.infrastructure.telemetry;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.service.SleepScoreCalculator;
@@ -13,7 +14,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@DisplayName("JacksonSleepRecordAssembler — SleepStageSample → scored DeviceSleepRecord")
+@DisplayName("JacksonSleepRecordAssembler — AggregatedSleep → scored DeviceSleepRecord")
 class JacksonSleepRecordAssemblerTest {
 
     private static final UUID CONTEXT_EVENT = UUID.fromString("22222222-2222-2222-2222-222222222222");
@@ -30,7 +31,8 @@ class JacksonSleepRecordAssemblerTest {
         // TST 8h (core 17280, deep 5184, rem 6336), TIB 8.5h, WASO 10min → score 100.
         SleepStageSample sample = new SleepStageSample(START, END, 0, 17280, 5184, 6336, 0, 600);
 
-        DeviceSleepRecord record = assembler.assemble(sample, COLLECTED, CONTEXT_EVENT);
+        DeviceSleepRecord record =
+            assembler.assemble(AggregatedSleep.ofSingleSession(sample), COLLECTED, CONTEXT_EVENT);
 
         assertThat(record.startTime()).isEqualTo(START);
         assertThat(record.endTime()).isEqualTo(END);
@@ -49,7 +51,7 @@ class JacksonSleepRecordAssemblerTest {
     void assembles_record_without_raw_origin() {
         SleepStageSample sample = new SleepStageSample(START, END, 0, 17280, 5184, 6336, 0, 600);
 
-        DeviceSleepRecord record = assembler.assemble(sample, COLLECTED, null);
+        DeviceSleepRecord record = assembler.assemble(AggregatedSleep.ofSingleSession(sample), COLLECTED, null);
 
         assertThat(record.contextEventId()).isNull();
         assertThat(record.sleepScore()).isEqualTo(100);
@@ -62,7 +64,7 @@ class JacksonSleepRecordAssemblerTest {
         SleepStageSample sample = new SleepStageSample(
             START, OffsetDateTime.parse("2026-07-11T08:00:00Z"), 0, 0, 0, 0, 28800, 600);
 
-        DeviceSleepRecord record = assembler.assemble(sample, COLLECTED, null);
+        DeviceSleepRecord record = assembler.assemble(AggregatedSleep.ofSingleSession(sample), COLLECTED, null);
 
         assertThat(record.sleepScore()).isGreaterThan(0);
         assertThat(record.stagesJson()).contains("\"low_confidence\":true");
@@ -73,7 +75,7 @@ class JacksonSleepRecordAssemblerTest {
     void rejects_unscorable_night() {
         SleepStageSample sample = new SleepStageSample(START, END, 0, 0, 0, 0, 0, 3600);
 
-        assertThatThrownBy(() -> assembler.assemble(sample, COLLECTED, null))
+        assertThatThrownBy(() -> assembler.assemble(AggregatedSleep.ofSingleSession(sample), COLLECTED, null))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("not scorable");
     }

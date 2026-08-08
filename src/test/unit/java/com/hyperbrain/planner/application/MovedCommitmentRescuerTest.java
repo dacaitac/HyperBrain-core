@@ -130,6 +130,28 @@ class MovedCommitmentRescuerTest {
         assertThat(start.getAllValues()).containsExactly(at(11), at(12));
     }
 
+    @Test
+    @DisplayName("its own window is among the walls now, and it never blocks its own rescue")
+    void a_commitment_does_not_wall_itself_out_of_its_rescue() {
+        // Given: commitments occupy the day, so the one being rescued arrives here as a wall of its own.
+        // What keeps that from stopping it is the trigger itself — only a commitment already behind the
+        // run's lower bound is moved, and the search starts at that bound — so the stale wall is out of
+        // reach by construction. This pins that reasoning: widen the trigger to a commitment still ahead
+        // and the rescue would start colliding with the very thing it is moving.
+        givenCommitments(new MovableCommitment(SESSION, at(9), at(10)));
+        when(scheduling.retimeWithinDay(eq(SESSION), any(), any(), eq(UTC))).thenReturn(true);
+        List<OccupiedInterval> walls = List.of(new OccupiedInterval(SESSION, at(9), at(10), false));
+
+        // When
+        List<UUID> moved = rescuer.rescue(USER, DAY, UTC, at(11), at(22), walls);
+
+        // Then: the first free stretch, not a slot pushed aside by its own shadow.
+        ArgumentCaptor<OffsetDateTime> start = ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(scheduling).retimeWithinDay(eq(SESSION), start.capture(), any(), eq(UTC));
+        assertThat(start.getValue()).isEqualTo(at(11));
+        assertThat(moved).containsExactly(SESSION);
+    }
+
     private void givenCommitments(MovableCommitment... commitments) {
         when(repository.loadMovableCommitments(eq(USER), any(), any()))
             .thenReturn(List.of(commitments));

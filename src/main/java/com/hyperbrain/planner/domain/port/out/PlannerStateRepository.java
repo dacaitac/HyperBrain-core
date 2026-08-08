@@ -8,6 +8,7 @@ import com.hyperbrain.planner.domain.model.PlannerBlockIdentity;
 import com.hyperbrain.planner.domain.model.PlannerBlockRow;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
 import com.hyperbrain.planner.domain.model.SleepFrontierInputs;
+import com.hyperbrain.planner.domain.model.SleepSession;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -64,6 +65,18 @@ public interface PlannerStateRepository {
     Integer loadLastNightSleepScore(UUID userId, OffsetDateTime now);
 
     /**
+     * Reads the sleep the user has actually had in the last day — every session, night and naps
+     * alike, in chronological order. This is the day's answer to <em>when</em> he slept, which the
+     * score alone cannot give: an afternoon nap that ended at 13:56 says something about 14:00 that no
+     * number does.
+     *
+     * @param userId the owning user
+     * @param now    the reference instant the last-day lookback is measured from
+     * @return the sessions that ended within the lookback, chronological; empty when there are none
+     */
+    List<SleepSession> loadRecentSleepSessions(UUID userId, OffsetDateTime now);
+
+    /**
      * Reads the target day's schedulable executables ranked by their persisted {@code priority_score}
      * (highest first — the floor reads the score, never recomputes the Prioritizer), each carrying its
      * remaining-effort inputs and {@code energy_drain}.
@@ -108,9 +121,17 @@ public interface PlannerStateRepository {
     List<MciWig> loadWigPortfolio(UUID userId, OffsetDateTime now);
 
     /**
-     * Reads the hard walls to plan around: the windows of the existing {@code TIME_BLOCK} executables
-     * that hold time (ADR-039 — every lifecycle state except the {@code FOCUS}-origin accounting rows)
-     * and the read-only AGENDA executable windows (ADR-009) that intersect the planning day.
+     * Reads the hard walls to plan around, from every kind of row that holds time on the planning day:
+     * <ul>
+     *   <li>the existing {@code TIME_BLOCK} executables (ADR-039 — every lifecycle state except the
+     *       {@code FOCUS}-origin accounting rows);</li>
+     *   <li>the read-only AGENDA executable windows (ADR-009);</li>
+     *   <li>the standing commitments — {@code ACTIVITY} and {@code LEARNING_SESSION} — that are not yet
+     *       settled. They own a calendar window, so they occupy it. That the planner may still move one
+     *       in hour (ADR-040 D9, and only through {@code loadMovableCommitments}) does not make it
+     *       weightless while it stands: <b>movable is not invisible</b>, and reading it as such is what
+     *       let the day be laid on top of them.</li>
+     * </ul>
      *
      * @param userId    the owning user
      * @param dayStart  the planning window lower bound

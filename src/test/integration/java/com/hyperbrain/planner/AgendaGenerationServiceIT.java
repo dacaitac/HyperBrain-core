@@ -142,6 +142,39 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("wall: no window is laid on a standing ACTIVITY — movable in hour is not invisible")
+    void does_not_lay_a_window_over_a_standing_activity() {
+        // The production day, reproduced. «Desayunar» is an ACTIVITY holding 10:30-11:30, straddling the
+        // «Descanso» band (10:30-11:00) and the first hour of «Oficio» (11:00-13:00). It can never be a
+        // window member — it already is a block of time in its own right — and it was not read as
+        // occupancy either, so it belonged to neither list and the day was laid straight over it:
+        // «Descanso» at 10:30 and «Oficio» at 11:00, both on top of breakfast.
+        insertActivity("Desayunar", at(10, 30), at(11, 30));
+        // Enough work that the floor deals a member into every band of the day, «Descanso» and «Oficio»
+        // included: a day too light to reach them would pass this test for the wrong reason.
+        for (int i = 0; i < 14; i++) {
+            insertTask("Tarea " + i, 0.9 - i * 0.01, 30);
+        }
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // The day is really planned, and not one of its windows lands on breakfast. Naming the
+        // offenders is deliberate: the failure reads back as the production report did.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'PLANNER'", Integer.class))
+            .isGreaterThan(5);
+        List<String> trespassers = jdbcTemplate.queryForList("""
+            SELECT theme FROM planner_blocks
+            WHERE date_start < ? AND date_end > ?
+            """, String.class, at(11, 30), at(10, 30));
+        assertThat(trespassers).isEmpty();
+        // And the activity itself is never given a block: it is a wall, not a candidate.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM planner_blocks b JOIN core_executable e ON e.id = b.executable_id "
+                + "WHERE e.type = 'ACTIVITY'", Integer.class)).isZero();
+    }
+
+    @Test
     @DisplayName("F1: the WIG lead measure of the active MCI is reserved first")
     void reserves_wig_first() {
         UUID mci = insertCycle("MCI", "ACTIVE",
@@ -772,6 +805,18 @@ class AgendaGenerationServiceIT {
             INSERT INTO core_executable (id, user_id, name, type, status, origin, start_time, end_time)
             VALUES (?, ?, ?, 'TIME_BLOCK', 'PLANNED', 'USER', ?, ?)
             """, UUID.randomUUID(), USER, name, start, end);
+    }
+
+    /** A commitment of the user's that owns its own hour, as it arrives from Notion or the calendar. */
+    private void insertActivity(String name, OffsetDateTime start, OffsetDateTime end) {
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
+            VALUES (?, ?, ?, 'ACTIVITY', 'TODO', ?, ?)
+            """, UUID.randomUUID(), USER, name, start, end);
+    }
+
+    private static OffsetDateTime at(int hour, int minute) {
+        return OffsetDateTime.of(DAY, LocalTime.of(hour, minute), UTC);
     }
 
     private void insertAgendaEvent(String name, OffsetDateTime start, OffsetDateTime end) {

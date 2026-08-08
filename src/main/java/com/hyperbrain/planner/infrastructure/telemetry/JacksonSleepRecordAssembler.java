@@ -2,9 +2,12 @@ package com.hyperbrain.planner.infrastructure.telemetry;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.model.SleepScoreResult;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.port.out.SleepRecordAssembler;
 import com.hyperbrain.planner.domain.service.SleepScoreCalculator;
@@ -15,8 +18,13 @@ import java.util.UUID;
 
 /**
  * Jackson-backed {@link SleepRecordAssembler}: runs the pure {@link SleepScoreCalculator} over the
- * sample and serializes the stage breakdown + derived metrics into the {@code tel_sleep_record.stages}
- * JSON. The JSON serialization is why this lives in infrastructure while the port stays in the domain.
+ * aggregate's totals and serializes the stage breakdown, the derived metrics and the day's sessions
+ * into the {@code tel_sleep_record.stages} JSON. The JSON serialization is why this lives in
+ * infrastructure while the port stays in the domain.
+ *
+ * <p>The {@code sessions} array is the only place the naps survive: the row has exactly two instant
+ * columns and they are spoken for by the main session (the chronotype the sleep frontier learns from),
+ * so an afternoon nap can only be recorded beside them, not in them.
  */
 @Component
 class JacksonSleepRecordAssembler implements SleepRecordAssembler {
@@ -32,17 +40,22 @@ class JacksonSleepRecordAssembler implements SleepRecordAssembler {
     }
 
     @Override
-    public DeviceSleepRecord assemble(SleepStageSample sample, OffsetDateTime collectedAt,
+    public DeviceSleepRecord assemble(AggregatedSleep sleep, OffsetDateTime collectedAt,
                                       UUID contextEventId) {
-        SleepScoreResult result = calculator.score(sample);
-        int durationMinutes = (int) Math.round(sample.totalSleepSeconds() / SECONDS_PER_MINUTE);
+        SleepStageSample totals = sleep.totals();
+        SleepScoreResult result = calculator.score(totals);
+        int durationMinutes = (int) Math.round(totals.totalSleepSeconds() / SECONDS_PER_MINUTE);
         return new DeviceSleepRecord(
-            sample.start(), sample.end(), durationMinutes, result.score(),
-            stagesJson(sample, result), collectedAt, contextEventId);
+            sleep.mainSession().start(), sleep.mainSession().end(), durationMinutes, result.score(),
+            stagesJson(sleep, result), collectedAt, contextEventId);
     }
 
-    /** Serializes the stage durations, derived metrics and sub-scores for {@code tel_sleep_record.stages}. */
-    private String stagesJson(SleepStageSample sample, SleepScoreResult result) {
+    /**
+     * Serializes the summed stage durations, the derived metrics, the sub-scores and the sessions the
+     * totals were summed from, for {@code tel_sleep_record.stages}.
+     */
+    private String stagesJson(AggregatedSleep sleep, SleepScoreResult result) {
+        SleepStageSample sample = sleep.totals();
         ObjectNode root = objectMapper.createObjectNode();
         root.put("in_bed_seconds", sample.inBedSeconds());
         root.put("core_seconds", sample.coreSeconds());
@@ -62,6 +75,13 @@ class JacksonSleepRecordAssembler implements SleepRecordAssembler {
         subScores.put("deep", result.deepSubScore());
         subScores.put("rem", result.remSubScore());
         subScores.put("waso", result.wasoSubScore());
+        ArrayNode sessions = root.putArray("sessions");
+        for (SleepSession session : sleep.sessions()) {
+            ObjectNode node = sessions.addObject();
+            node.put("start", session.start().toString());
+            node.put("end", session.end().toString());
+            node.put("asleep_seconds", session.asleepSeconds());
+        }
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException ex) {

@@ -20,7 +20,8 @@ import java.util.UUID;
  *   <li>{@code windows} — the day's laid windows (ADR-040): the unit of scheduling. Already resolved
  *       against the template, the real wake instant and the hard walls, so the generator only decides
  *       WHAT goes in each one, never WHERE a window sits;</li>
- *   <li>{@code occupied} — the hard walls already spoken for (existing blocks, AGENDA windows);</li>
+ *   <li>{@code occupied} — the hard walls already spoken for (existing blocks, AGENDA windows, the
+ *       standing activities and study sessions);</li>
  *   <li>{@code energyProfile} — the resolved F3 margin / F6 quota and its readable criterion;</li>
  *   <li>{@code dataComplete} — false when a required signal was missing, steering the generator into
  *       the F5 degraded floor.</li>

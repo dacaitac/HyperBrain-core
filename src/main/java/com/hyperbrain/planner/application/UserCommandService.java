@@ -1,7 +1,7 @@
 package com.hyperbrain.planner.application;
 
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
-import com.hyperbrain.planner.domain.model.ParsedSleepNight;
+import com.hyperbrain.planner.domain.model.ParsedSleepDay;
 import com.hyperbrain.planner.domain.model.SleepScoreInput;
 import com.hyperbrain.planner.domain.model.UserCommand;
 import com.hyperbrain.planner.domain.port.out.PlannerStateRepository;
@@ -49,7 +49,7 @@ import java.util.UUID;
  * WARN — see the store's contract.
  *
  * <p><b>Replan sleep enrichment (provisional bridge).</b> A {@code REPLAN_AGENDA} may carry a device
- * sleep session (HealthKit stages forwarded by an iOS Shortcut). When present it is recorded as a
+ * sleep dump (HealthKit stages forwarded by an iOS Shortcut). When present it is recorded as a
  * device record — via the shared {@link SleepRecordAssembler} + {@link SleepScoreStore}, the same
  * seam the telemetry pipeline uses — <em>before</em> replanning and inside the one dedup transaction,
  * so the replan (sync or async) sees the fresh sleep; in the async path the write commits with the
@@ -160,22 +160,23 @@ public class UserCommandService {
     }
 
     /**
-     * Distils the command's HealthKit dump into the most recent night and records it as a device
-     * record (device precedence), reusing the same assembler + store the telemetry pipeline uses. The
-     * dump is parsed with the user's timezone (its local strings carry none); the capture instant is
-     * the record's {@code collected_at}, falling back to the command's {@code occurred_at} when the
-     * dump omits it. A dump that yields no scorable night (nothing parseable, no asleep time) is logged
-     * and skipped rather than failing the whole command — the replan is the primary action and must
-     * not be lost to a bad enrichment. Parsing and scoring are pure (no SQL), so catching their failure
-     * leaves no partial state; a genuine store fault still propagates for retry.
+     * Distils the command's HealthKit dump into the sleep of the current sleep day — the night plus
+     * the naps that followed it, summed — and records it as a device record (device precedence),
+     * reusing the same assembler + store the telemetry pipeline uses. The dump is parsed with the
+     * user's timezone (its local strings carry none) and anchored on the command's
+     * {@code occurred_at}, which both bounds the relevant period and stands in as
+     * {@code collected_at} when the dump carries no capture date. A dump that yields no scorable sleep
+     * (nothing parseable, nothing in the period, no asleep time) is logged and skipped rather than
+     * failing the whole command — the replan is the primary action and must not be lost to a bad
+     * enrichment. Parsing and scoring are pure (no SQL), so catching their failure leaves no partial
+     * state; a genuine store fault still propagates for retry.
      */
     private void recordDeviceSleep(UUID userId, UserCommand command, ZoneId zone) {
         DeviceSleepRecord record;
         try {
-            ParsedSleepNight night = sleepSampleSessionParser.parse(command.sleepSession(), zone);
-            OffsetDateTime collectedAt =
-                night.collectedAt() != null ? night.collectedAt() : command.occurredAt();
-            record = sleepRecordAssembler.assemble(night.sample(), collectedAt, null);
+            ParsedSleepDay day =
+                sleepSampleSessionParser.parse(command.sleepSession(), zone, command.occurredAt());
+            record = sleepRecordAssembler.assemble(day.sleep(), day.collectedAt(), null);
         } catch (IllegalArgumentException ex) {
             log.warn("Unusable sleep dump on replan command {} skipped: {}",
                 command.commandId(), ex.getMessage());

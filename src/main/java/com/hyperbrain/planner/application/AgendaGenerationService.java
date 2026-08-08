@@ -19,6 +19,7 @@ import com.hyperbrain.planner.domain.model.PlanningWindow;
 import com.hyperbrain.planner.domain.model.PlannerDayState;
 import com.hyperbrain.planner.domain.model.RetimingBand;
 import com.hyperbrain.planner.domain.model.SchedulableExecutable;
+import com.hyperbrain.planner.domain.model.SleepSession;
 import com.hyperbrain.planner.domain.model.SleepWindow;
 import com.hyperbrain.planner.domain.model.ValidatedAgenda;
 import com.hyperbrain.planner.domain.model.ValidationContext;
@@ -383,10 +384,19 @@ public class AgendaGenerationService {
         Map<String, RetimingBand> bands = retimingBandResolver.resolve(
             targetDay, zone, window.frontierStart(), window.lowerBound(), window.frontierEnd());
 
+        // When the user slept is context for the day it happened on, and only for it: last night's
+        // hours — and this afternoon's nap — say something about today's ordering and nothing about the
+        // day after tomorrow, which the same replan run also lays. A later day carries no sessions
+        // rather than yesterday's, which the model would read as if they were its own.
+        List<SleepSession> sleepSessions =
+            targetDay.equals(now.atZoneSameInstant(zone).toLocalDate())
+                ? repository.loadRecentSleepSessions(userId, now)
+                : List.of();
+
         PlannerDayState state = new PlannerDayState(
             window.lowerBound(), window.frontierEnd(), windows, membershipBySlot(existingPlan), ranked,
             wigPortfolio, planningWalls, energy, dataComplete);
-        return new PreparedDay(state, window, planningWalls, energy.criterion(), bands);
+        return new PreparedDay(state, window, planningWalls, energy.criterion(), bands, sleepSessions);
     }
 
     /**
@@ -424,17 +434,25 @@ public class AgendaGenerationService {
 
     /**
      * Assembles the LLM-facing read model (#61) from the resolved day and the floor's block set: the
-     * candidate blocks, the sleep frontier, the hard walls (ACTIVITY stays a movable candidate, never a
-     * wall), the WIG ids, the F6 quota and the untrusted executable titles (the only extra read, done
-     * here on the LLM path so the floor path stays untouched).
+     * candidate blocks, the sleep frontier, the hard walls, the WIG ids, the F6 quota and the untrusted
+     * executable titles (the only extra read, done here on the LLM path so the floor path stays
+     * untouched).
      *
      * <p><b>The walls travel in two lists because they answer to two different owners</b>, and both are
      * fixed: the read-only AGENDA windows (ADR-009) and the day's real occupancy — the blocks the user
-     * created himself, the ones already closed, and the ones this run may no longer re-time. The run's
-     * own regenerable blocks are already subtracted upstream (see {@code withoutRegenerable}), so this
-     * never walls the model out of the very windows it is being asked to arrange. The synthetic meal
-     * anchors carry no executable and stay out: they are a rhythm the deterministic floor protects, not
-     * somebody's commitment, and shaping the day around them is the model's authority.
+     * created himself, the ones already closed, the ones this run may no longer re-time, and the
+     * activities and study sessions standing on the day. The run's own regenerable blocks are already
+     * subtracted upstream (see {@code withoutRegenerable}), so this never walls the model out of the
+     * very windows it is being asked to arrange. The synthetic meal anchors carry no executable and stay
+     * out — and that filter is precisely what lets a commitment through, because a commitment does carry
+     * one: a meal is a rhythm the deterministic floor protects and shaping the day around it is the
+     * model's authority, whereas an activity is an hour of the user's that is already gone.
+     *
+     * <p><b>And the sleep travels as hours, not only as a number.</b> The energy criterion says how
+     * rested the day is; the sessions say <em>when</em> he was asleep — including a nap that ended this
+     * afternoon, which is the difference between proposing deep work at 14:00 to someone fresh from the
+     * morning and to someone who has just woken up. It is context for the model's judgement, never a
+     * wall: nothing about it is re-imposed by the guard.
      *
      * <p><b>The bands travel too, keyed by block.</b> They are not walls — nothing is forbidden from
      * overlapping a band — but the bound of the retiming the model may do to each block: the band of
@@ -465,7 +483,8 @@ public class AgendaGenerationService {
             prepared.state().energyProfile().highLoadQuota(),
             floorAgenda.energyCriterion(),
             repository.loadExecutableTitles(candidateIds),
-            blockBands(floorAgenda, prepared.bands()));
+            blockBands(floorAgenda, prepared.bands()),
+            prepared.sleepSessions());
     }
 
     /**
@@ -544,6 +563,14 @@ public class AgendaGenerationService {
         // already run over: activities and study sessions keep their day and lose only their hour.
         // They are never members of a window — they carry a calendar window of their own — so this is
         // the single place the planner writes onto something the user created in his own calendar.
+        //
+        // The rescue runs AFTER the day is laid, and that order is safe for one reason: it only ever
+        // moves a commitment whose window is entirely behind the run's lower bound, while the windows
+        // are clamped to start at that same bound. What it moves therefore never clipped a window in
+        // the first place, so no window was laid against a position that is about to change. Where it
+        // lands is chosen against the walls PLUS the blocks just accepted, so the new hour cannot fall
+        // on anything this run planned either. A commitment still ahead is untouched and walls exactly
+        // where it stands — which is what the day was laid against.
         if (fromNow) {
             commitmentRescuer.rescue(userId, targetDay, zone, window.lowerBound(),
                 window.frontierEnd(), occupiedIncluding(occupied, validated.accepted()));
@@ -681,7 +708,8 @@ public class AgendaGenerationService {
         PlanningWindow window,
         List<OccupiedInterval> occupied,
         String energyCriterion,
-        Map<String, RetimingBand> bands
+        Map<String, RetimingBand> bands,
+        List<SleepSession> sleepSessions
     ) {
         /** @return true when a forward window exists to plan (state is present) */
         boolean plannable() {
@@ -690,7 +718,7 @@ public class AgendaGenerationService {
 
         /** An unplannable day (zero-width forward window): no state, no walls, criterion preserved. */
         static PreparedDay unplannable(PlanningWindow window, String energyCriterion) {
-            return new PreparedDay(null, window, List.of(), energyCriterion, Map.of());
+            return new PreparedDay(null, window, List.of(), energyCriterion, Map.of(), List.of());
         }
     }
 

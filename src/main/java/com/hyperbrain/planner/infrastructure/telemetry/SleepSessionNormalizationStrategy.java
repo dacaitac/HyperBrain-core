@@ -1,6 +1,7 @@
 package com.hyperbrain.planner.infrastructure.telemetry;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.hyperbrain.planner.domain.model.AggregatedSleep;
 import com.hyperbrain.planner.domain.model.DeviceSleepRecord;
 import com.hyperbrain.planner.domain.model.SleepStageSample;
 import com.hyperbrain.planner.domain.port.out.SleepRecordAssembler;
@@ -73,8 +74,10 @@ class SleepSessionNormalizationStrategy implements TelemetryNormalizationStrateg
             seconds(payload, "unspecified_seconds"),
             seconds(payload, "awake_seconds"));
 
-        DeviceSleepRecord deviceRecord =
-            sleepRecordAssembler.assemble(sample, record.collectedAt(), record.contextEventId());
+        // The canonical payload already carries one aggregated session, so the aggregate is that
+        // sample: its own window is the truth, and it is its own main session.
+        DeviceSleepRecord deviceRecord = sleepRecordAssembler.assemble(
+            AggregatedSleep.ofSingleSession(sample), record.collectedAt(), record.contextEventId());
         sleepScoreStore.upsertDeviceSleepRecord(record.userId(), deviceRecord, record.zone());
     }
 }

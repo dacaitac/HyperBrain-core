@@ -18,10 +18,10 @@ import java.util.UUID;
  * The bounded hard-wall guard of the LLM proposal (HU-01c H3, authority model 2026-07-21). Unlike the
  * deterministic floor's {@code AgendaValidator}, which strips individual offending blocks, this guard
  * enforces the LLM's authority model: the model owns the <b>arrangement</b> (the when, the reordering,
- * humanization, dropping non-WIG blocks, moving ACTIVITY), and the guard re-imposes only the four
- * inviolable walls. It is <b>all-or-nothing</b>: if the proposal clears every wall it is accepted whole;
- * if it breaches any, the whole proposal is rejected and the caller degrades to the humanized floor —
- * the guard never half-corrects.
+ * humanization, dropping non-WIG blocks), and the guard re-imposes only the inviolable walls. It is
+ * <b>all-or-nothing</b>: if the proposal clears every wall it is accepted whole; if it breaches any, the
+ * whole proposal is rejected and the caller degrades to the humanized floor — the guard never
+ * half-corrects.
  *
  * <p><b>Walls re-imposed</b> (a breach of any → DEGRADED):
  * <ol>
@@ -31,7 +31,8 @@ import java.util.UUID;
  *   <li>{@code SLEEP_FRONTIER} — every surviving block stays inside {@code [wake, bedtime]} (ADR-013 D2);</li>
  *   <li>{@code AGENDA_READ_ONLY} — no surviving block overlaps a read-only AGENDA window (ADR-009);</li>
  *   <li>{@code OCCUPIED_BLOCK} — no surviving block overlaps a window somebody already owns: a block the
- *       user created himself, one already closed, or one this run may no longer re-time;</li>
+ *       user created himself, one already closed, one this run may no longer re-time, or an activity or
+ *       study session standing on the day;</li>
  *   <li>{@code BAND_CONFINEMENT} — no <b>moved</b> block leaves the band of the day it was born in
  *       ({@link com.hyperbrain.planner.domain.model.RetimingBand}).</li>
  * </ol>
