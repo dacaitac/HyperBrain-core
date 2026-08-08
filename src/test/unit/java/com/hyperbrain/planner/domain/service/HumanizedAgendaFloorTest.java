@@ -96,7 +96,8 @@ class HumanizedAgendaFloorTest {
     private static PlannerDayState state(List<DayWindow> windows,
                                          List<SchedulableExecutable> ranked) {
         return new PlannerDayState(
-            at(7), at(22), windows, java.util.Map.of(), ranked, List.of(), List.of(), NEUTRAL, true);
+            at(7), at(22), windows, java.util.Map.of(), ranked, List.of(), List.of(), java.util.Set.of(),
+            NEUTRAL, true);
     }
 
     private static DayWindow window(String slotId, int startHour, int endHour, SlotPurpose purpose) {

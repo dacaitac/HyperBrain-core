@@ -6,6 +6,7 @@ import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.DayWindow;
 import com.hyperbrain.planner.domain.model.EnergyProfile;
 import com.hyperbrain.planner.domain.model.EnergyTier;
+import com.hyperbrain.planner.domain.model.ExcludedExecutable;
 import com.hyperbrain.planner.domain.model.ExclusionReason;
 import com.hyperbrain.planner.domain.model.ExecutableType;
 import com.hyperbrain.planner.domain.model.MciWig;
@@ -24,6 +25,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 @DisplayName("AgendaGenerator — the window is the unit of scheduling (ADR-040)")
 class AgendaGeneratorTest {
@@ -117,6 +119,31 @@ class AgendaGeneratorTest {
         AgendaBlock other = agenda.blocks().stream()
             .filter(block -> !block.wig()).findFirst().orElseThrow();
         assertThat(other.templateSlotId()).isEqualTo("WORK");
+    }
+
+    @Test
+    @DisplayName("the goal the user already placed in a block of his own claims no second window")
+    void the_goal_already_held_by_the_user_is_left_alone() {
+        // Given: the lead measure is not among the candidates — the admission already keeps out work a
+        // block this run may not re-place is holding — but the F1 reservation does not read the
+        // candidates at all, so only this set stops it.
+        UUID leadMeasure = UUID.randomUUID();
+        List<DayWindow> windows = List.of(
+            window("WORK", 7, 8, SlotPurpose.WORK),
+            window("GOAL", 9, 11, SlotPurpose.GOAL));
+
+        Agenda agenda = generator.generate(new PlannerDayState(
+            at(7), at(22), windows, java.util.Map.of(), List.of(task(0.9)), List.of(wig(leadMeasure)),
+            List.of(), java.util.Set.of(leadMeasure), NEUTRAL, true));
+
+        // Then: no goal block is reserved for it, the goal band stays available to the day, and the cut
+        // is explained rather than silent.
+        assertThat(agenda.blocks()).noneMatch(AgendaBlock::wig);
+        assertThat(agenda.blocks()).allSatisfy(block ->
+            assertThat(block.members()).doesNotContain(leadMeasure));
+        assertThat(agenda.excluded())
+            .extracting(ExcludedExecutable::executableId, ExcludedExecutable::reason)
+            .contains(tuple(leadMeasure, ExclusionReason.ALREADY_HELD_BY_USER));
     }
 
     @Test
@@ -274,7 +301,7 @@ class AgendaGeneratorTest {
                                          List<MciWig> wigs,
                                          java.util.Map<String, List<UUID>> existing) {
         return new PlannerDayState(
-            at(7), at(22), windows, existing, ranked, wigs, List.of(), NEUTRAL, true);
+            at(7), at(22), windows, existing, ranked, wigs, List.of(), java.util.Set.of(), NEUTRAL, true);
     }
 
     private static DayWindow window(String slotId, int startHour, int endHour, SlotPurpose purpose) {

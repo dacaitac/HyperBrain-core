@@ -16,9 +16,12 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 
 /**
  * Verifies that the Planner's read side sees the <b>deployed</b> block model against a real
@@ -492,6 +495,65 @@ class JdbcPlannerStateRepositoryIT {
         assertThat(wig.degradedDaysWithoutBlock()).isEqualTo(STREAK_BOUND);
     }
 
+    // ─── what the day's walls already hold ─────────────────────────────────────
+
+    @Test
+    @DisplayName("a wall answers with what it holds, in the order the user arranged it")
+    void block_members_are_read_in_container_order() {
+        UUID block = insertUserBlock("Oficio", at(7, 0), at(10, 0));
+        UUID first = insertTask("Factura A");
+        UUID second = insertTask("Factura B");
+        // Written out of order on purpose: the answer is the arrangement, not the insertion.
+        containAt(second, block, 1);
+        containAt(first, block, 0);
+
+        assertThat(repository.loadBlockMembers(List.of(block)))
+            .containsExactly(entry(block, List.of(first, second)));
+    }
+
+    @Test
+    @DisplayName("a wall that holds nothing is simply absent — an empty window is not an empty answer")
+    void a_block_holding_nothing_is_absent() {
+        UUID empty = insertUserBlock("Ventana vacía", at(7, 0), at(10, 0));
+        UUID unknown = UUID.randomUUID();
+
+        assertThat(repository.loadBlockMembers(List.of(empty, unknown))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a day with no walls asks for nothing and gets nothing — no query, no empty IN list")
+    void no_blocks_asked_yields_an_empty_map() {
+        // The placeholder list is built from the argument, so an empty ask must short-circuit rather
+        // than reach PostgreSQL with «IN ()».
+        assertThat(repository.loadBlockMembers(List.of())).isEmpty();
+    }
+
+    @Test
+    @DisplayName("each wall answers for itself: two blocks never pool their membership")
+    void members_are_grouped_by_their_own_block() {
+        UUID morning = insertUserBlock("Oficio", at(7, 0), at(10, 0));
+        UUID evening = insertUserBlock("Torbellino", at(19, 0), at(21, 0));
+        UUID invoice = insertTask("Factura");
+        UUID errand = insertTask("Recado");
+        containAt(invoice, morning, 0);
+        containAt(errand, evening, 0);
+
+        assertThat(repository.loadBlockMembers(List.of(morning, evening)))
+            .containsOnly(entry(morning, List.of(invoice)), entry(evening, List.of(errand)));
+    }
+
+    @Test
+    @DisplayName("the membership handed out is nobody's to mutate: the floor and the prompt share it")
+    void the_membership_read_is_immutable() {
+        UUID block = insertUserBlock("Oficio", at(7, 0), at(10, 0));
+        containAt(insertTask("Factura"), block, 0);
+
+        Map<UUID, List<UUID>> members = repository.loadBlockMembers(List.of(block));
+
+        assertThatThrownBy(() -> members.get(block).add(UUID.randomUUID()))
+            .isInstanceOf(UnsupportedOperationException.class);
+    }
+
     // ─── fixtures ──────────────────────────────────────────────────────────────
 
     private MciWig onlyWig() {
@@ -572,6 +634,12 @@ class JdbcPlannerStateRepositoryIT {
     private void contain(UUID memberId, UUID blockId) {
         jdbcTemplate.update("UPDATE core_executable SET container_block_id = ? WHERE id = ?",
             blockId, memberId);
+    }
+
+    private void containAt(UUID memberId, UUID blockId, int ord) {
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = ? WHERE id = ?",
+            blockId, ord, memberId);
     }
 
     private void insertFrozenBlock(UUID anchorId, OffsetDateTime start, OffsetDateTime end) {

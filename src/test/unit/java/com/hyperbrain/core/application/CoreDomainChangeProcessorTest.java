@@ -3,6 +3,7 @@ package com.hyperbrain.core.application;
 import com.hyperbrain.core.application.rule.BlockClosureReleaseRule;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
+import com.hyperbrain.core.application.rule.ContainmentAuthorityRule;
 import com.hyperbrain.core.application.rule.ContainmentCopyRule;
 import com.hyperbrain.core.application.rule.ContainmentEligibilityRule;
 import com.hyperbrain.core.application.rule.EndTimeInvariantRule;
@@ -30,6 +31,7 @@ class CoreDomainChangeProcessorTest {
     private EndTimeInvariantRule endTimeRule;
     private CompletionReactivationRule completionReactivationRule;
     private ContainmentEligibilityRule containmentEligibilityRule;
+    private ContainmentAuthorityRule containmentAuthorityRule;
     private ContainmentCopyRule containmentCopyRule;
     private ProgressRecalculationRule progressRule;
     private CompletionOutcomeRule completionOutcomeRule;
@@ -42,13 +44,15 @@ class CoreDomainChangeProcessorTest {
         endTimeRule = mock(EndTimeInvariantRule.class);
         completionReactivationRule = mock(CompletionReactivationRule.class);
         containmentEligibilityRule = mock(ContainmentEligibilityRule.class);
+        containmentAuthorityRule = mock(ContainmentAuthorityRule.class);
         containmentCopyRule = mock(ContainmentCopyRule.class);
         progressRule = mock(ProgressRecalculationRule.class);
         completionOutcomeRule = mock(CompletionOutcomeRule.class);
         habitRule = mock(RecurrenceCloneRule.class);
         blockClosureReleaseRule = mock(BlockClosureReleaseRule.class);
         processor = new CoreDomainChangeProcessor(
-            endTimeRule, completionReactivationRule, containmentEligibilityRule, containmentCopyRule,
+            endTimeRule, completionReactivationRule, containmentEligibilityRule,
+            containmentAuthorityRule, containmentCopyRule,
             progressRule, completionOutcomeRule, habitRule, blockClosureReleaseRule);
     }
 
@@ -60,6 +64,7 @@ class CoreDomainChangeProcessorTest {
         ExecutableSnapshot afterEndTime = ExecutableSnapshotBuilder.snapshot().name("a").build();
         ExecutableSnapshot afterReactivation = ExecutableSnapshotBuilder.snapshot().name("b").build();
         ExecutableSnapshot afterEligibility = ExecutableSnapshotBuilder.snapshot().name("be").build();
+        ExecutableSnapshot afterAuthority = ExecutableSnapshotBuilder.snapshot().name("ba").build();
         ExecutableSnapshot afterCopy = ExecutableSnapshotBuilder.snapshot().name("bc").build();
         ExecutableSnapshot afterProgress = ExecutableSnapshotBuilder.snapshot().name("e").build();
         ExecutableSnapshot afterOutcome = ExecutableSnapshotBuilder.snapshot().name("eo").build();
@@ -71,7 +76,9 @@ class CoreDomainChangeProcessorTest {
             .thenReturn(afterReactivation);
         when(containmentEligibilityRule.apply(same(previous), same(afterReactivation), eq(ExternalSystem.NOTION)))
             .thenReturn(afterEligibility);
-        when(containmentCopyRule.apply(same(previous), same(afterEligibility), eq(ExternalSystem.NOTION)))
+        when(containmentAuthorityRule.apply(same(previous), same(afterEligibility), eq(ExternalSystem.NOTION)))
+            .thenReturn(afterAuthority);
+        when(containmentCopyRule.apply(same(previous), same(afterAuthority), eq(ExternalSystem.NOTION)))
             .thenReturn(afterCopy);
         when(progressRule.apply(same(previous), same(afterCopy), eq(ExternalSystem.NOTION)))
             .thenReturn(afterProgress);
@@ -86,11 +93,12 @@ class CoreDomainChangeProcessorTest {
 
         assertThat(result).isSameAs(afterRelease);
         InOrder order = inOrder(endTimeRule, completionReactivationRule, containmentEligibilityRule,
-            containmentCopyRule, progressRule, completionOutcomeRule, habitRule,
-            blockClosureReleaseRule);
+            containmentAuthorityRule, containmentCopyRule, progressRule, completionOutcomeRule,
+            habitRule, blockClosureReleaseRule);
         order.verify(endTimeRule).apply(any(), any(), any());
         order.verify(completionReactivationRule).apply(any(), any(), any());
         order.verify(containmentEligibilityRule).apply(any(), any(), any());
+        order.verify(containmentAuthorityRule).apply(any(), any(), any());
         order.verify(containmentCopyRule).apply(any(), any(), any());
         order.verify(progressRule).apply(any(), any(), any());
         order.verify(completionOutcomeRule).apply(any(), any(), any());

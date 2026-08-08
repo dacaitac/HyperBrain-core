@@ -54,7 +54,7 @@ class AgendaProposalPromptBuilderTest {
             UUID.randomUUID(), WAKE.plusMinutes(60), WAKE.plusMinutes(120), false);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(), List.of());
+            WAKE, BEDTIME, List.of(), List.of(userBlock), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(), List.of(), Map.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -63,6 +63,68 @@ class AgendaProposalPromptBuilderTest {
             .contains(userBlock.start().toString())
             .contains(userBlock.end().toString());
         assertThat(prompt.system()).contains("OCCUPIED");
+    }
+
+    @Test
+    @DisplayName("the day he pre-organised reaches the model named and with its contents, not as bare geometry")
+    void user_carries_the_walls_named_and_with_their_membership() {
+        // Clipped geometry only says «this hour is gone». What the model needs in order to organise the
+        // rest of the day is what the day IS: the stand-up that is really on the calendar today, and the
+        // block Daniel arranged himself with the work he already put inside it.
+        UUID standUp = UUID.fromString("33333333-3333-3333-3333-333333333333");
+        UUID hisBlock = UUID.fromString("44444444-4444-4444-4444-444444444444");
+        UUID hisWork = UUID.fromString("55555555-5555-5555-5555-555555555555");
+        OccupiedInterval agenda = new OccupiedInterval(standUp, WAKE.plusHours(1), WAKE.plusHours(1).plusMinutes(15), true);
+        OccupiedInterval block = new OccupiedInterval(hisBlock, WAKE.plusHours(12), WAKE.plusHours(15), false);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
+            WAKE, BEDTIME, List.of(agenda), List.of(block), Set.of(), 3, "NEUTRAL",
+            Map.of(A, "Task", standUp, "Daily", hisBlock, "Oficio", hisWork, "Facturas"),
+            Map.of(), List.of(), Map.of(hisBlock, List.of(hisWork)));
+
+        LlmPrompt prompt = builder.build(context);
+
+        // The control data names each wall by id and says what his block holds...
+        assertThat(prompt.user())
+            .contains("\"id\" : \"" + standUp + "\"")
+            .contains("\"id\" : \"" + hisBlock + "\"")
+            .contains("\"holds\"")
+            .contains("\"" + hisWork + "\"");
+        // ...while the titles themselves stay inside the untrusted fence: a wall's name comes from the
+        // very same external sources a task's does.
+        String fenced = prompt.user().substring(
+            prompt.user().indexOf(AgendaProposalPromptBuilder.UNTRUSTED_OPEN));
+        assertThat(fenced)
+            .contains(standUp + ": Daily")
+            .contains(hisBlock + ": Oficio")
+            .contains(hisWork + ": Facturas");
+        assertThat(prompt.system()).contains("occupied_blocks").contains("holds");
+    }
+
+    @Test
+    @DisplayName("a synthetic anchor stays anonymous geometry: there is no name to point at")
+    void a_wall_without_an_executable_carries_no_id_and_no_name() {
+        // The meal walls are folded into the day by the floor itself; they are nobody's commitment, so
+        // giving them an id the untrusted section cannot name would leave the model pointing at a title
+        // that does not exist — and inventing one would read as a commitment nobody made.
+        OccupiedInterval meal = new OccupiedInterval(null, WAKE.plusHours(5), WAKE.plusHours(6), false);
+        AgendaProposalContext context = new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
+            WAKE, BEDTIME, List.of(), List.of(meal), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"),
+            Map.of(), List.of(), Map.of());
+
+        LlmPrompt prompt = builder.build(context);
+
+        // Its hour still reaches the model — it is a wall like any other — but it is named nowhere:
+        // no "id" in the control data, and no line of its own in the untrusted section.
+        assertThat(prompt.user())
+            .contains(meal.start().toString())
+            .contains(meal.end().toString())
+            .doesNotContain("\"id\"");
+        String fenced = prompt.user().substring(
+            prompt.user().indexOf(AgendaProposalPromptBuilder.UNTRUSTED_OPEN));
+        assertThat(fenced.lines().filter(line -> line.matches("[0-9a-f-]{36}: .*")).toList())
+            .containsExactly(A + ": Task");
     }
 
     @Test
@@ -80,7 +142,7 @@ class AgendaProposalPromptBuilderTest {
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(),
-            List.of(night, nap));
+            List.of(night, nap), Map.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -107,7 +169,7 @@ class AgendaProposalPromptBuilderTest {
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"), Map.of(),
-            List.of(night, nap));
+            List.of(night, nap), Map.of());
 
         String user = builder.build(context).user();
 
@@ -137,7 +199,7 @@ class AgendaProposalPromptBuilderTest {
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE.plusHours(12), WAKE.plusHours(13), false, false, "r")),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, "Task"),
-            Map.of(A, household), List.of());
+            Map.of(A, household), List.of(), Map.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -166,7 +228,7 @@ class AgendaProposalPromptBuilderTest {
             List.of(new AgendaBlock(A, WAKE.plusHours(12), WAKE.plusHours(13), false, false, "r"),
                 new AgendaBlock(B, WAKE, WAKE.plusMinutes(60), false, false, "r")),
             WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL",
-            Map.of(A, "Household", B, "Loose"), Map.of(A, household), List.of());
+            Map.of(A, "Household", B, "Loose"), Map.of(A, household), List.of(), Map.of());
 
         LlmPrompt prompt = builder.build(context);
 
@@ -284,6 +346,6 @@ class AgendaProposalPromptBuilderTest {
     private static AgendaProposalContext context(String title) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "r")),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title), Map.of(), List.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(A, title), Map.of(), List.of(), Map.of());
     }
 }

@@ -30,4 +30,17 @@ public enum ExternalSystem {
             return UNKNOWN;
         }
     }
+
+    /**
+     * Whether a change carrying this origin was made by a person on a satellite — the two surfaces the
+     * user actually edits, Notion and Apple — as opposed to one the system itself wrote. Several domain
+     * rules turn on exactly that distinction (a human move is re-asserted with a visible note; a human
+     * containment hands the block over to him), so the predicate lives here rather than being restated
+     * per rule.
+     *
+     * @return true for {@link #APPLE} and {@link #NOTION}
+     */
+    public boolean isHumanEdit() {
+        return this == APPLE || this == NOTION;
+    }
 }

@@ -27,5 +27,10 @@ public enum ExclusionReason {
      * A WIG dropped from the day's reservation because the degraded block budget was smaller than the
      * active portfolio and the required-pace ordering placed it below the cut. Keyed by the MCI cycle id.
      */
-    WIG_BUDGET_EXCEEDED
+    WIG_BUDGET_EXCEEDED,
+    /**
+     * The user already gave this work an hour of his own: it sits inside a block of today that this run
+     * may not re-place, so the floor leaves it there instead of reserving a second window for it.
+     */
+    ALREADY_HELD_BY_USER
 }

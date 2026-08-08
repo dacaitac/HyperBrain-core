@@ -166,6 +166,20 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
                OR container_ord IS DISTINCT FROM ?)
         """;
 
+    /**
+     * The hand-over of a block the user rearranged by hand. Guarded to the regenerable set inside the
+     * predicate, so it is race-safe and a second observation of the same edit writes nothing: once the
+     * block is his, it is no longer {@code PLANNER}.
+     */
+    private static final String CLAIM_BLOCK_FOR_USER_SQL = """
+        UPDATE core_executable
+        SET origin = 'USER'
+        WHERE id     = ?
+          AND type   = 'TIME_BLOCK'
+          AND origin = 'PLANNER'
+          AND status = 'PLANNED'
+        """;
+
     private static final String CLEAR_CONTAINER_SQL = """
         UPDATE core_executable
         SET container_block_id = NULL, container_planned_minutes = NULL, container_ord = NULL
@@ -424,6 +438,11 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
     public boolean assignContainer(UUID memberId, UUID blockId, Integer plannedMinutes, int ord) {
         return jdbcTemplate.update(ASSIGN_CONTAINER_SQL,
             blockId, plannedMinutes, ord, memberId, blockId, plannedMinutes, ord) > 0;
+    }
+
+    @Override
+    public boolean claimBlockForUser(UUID blockId) {
+        return jdbcTemplate.update(CLAIM_BLOCK_FOR_USER_SQL, blockId) > 0;
     }
 
     @Override

@@ -393,10 +393,17 @@ public class AgendaGenerationService {
                 ? repository.loadRecentSleepSessions(userId, now)
                 : List.of();
 
+        // What the day's untouchable windows already hold. The ranked read already keeps that work out
+        // of the candidates, but the F1 goal reservation does not go through the ranking at all, so the
+        // set has to travel with the state. The same read feeds the LLM's view of the day, which is why
+        // it is done once here and carried, rather than twice.
+        Map<UUID, List<UUID>> wallMembers = repository.loadBlockMembers(wallIds(planningWalls));
+
         PlannerDayState state = new PlannerDayState(
             window.lowerBound(), window.frontierEnd(), windows, membershipBySlot(existingPlan), ranked,
-            wigPortfolio, planningWalls, energy, dataComplete);
-        return new PreparedDay(state, window, planningWalls, energy.criterion(), bands, sleepSessions);
+            wigPortfolio, planningWalls, heldByWalls(wallMembers), energy, dataComplete);
+        return new PreparedDay(state, window, planningWalls, energy.criterion(), bands, sleepSessions,
+            wallMembers);
     }
 
     /**
@@ -458,6 +465,15 @@ public class AgendaGenerationService {
      * overlapping a band — but the bound of the retiming the model may do to each block: the band of
      * the day it was born in, widened to plausible hours when that band holds a meal. A block from no
      * band simply carries no entry and stays unconfined.
+     *
+     * <p><b>And the walls travel named, with what they hold.</b> Clipped geometry tells the model that
+     * an hour is gone; it does not tell it what the day is. The day Daniel leaves pre-organised — his
+     * own blocks with the work he put inside them — and the commitments standing on it are precisely
+     * the signal that today has a stand-up at eight and a review at half past two, or that today is a
+     * Saturday and has neither (Daniel, 2026-08-08). The template is the generic reference; this is the
+     * real shape of the day, and the model plans the rest of it around that instead of around holes.
+     * The names ride in the same untrusted map the candidate titles do — they come from the very same
+     * external sources — so the prompt keeps fencing every one of them.
      */
     private AgendaProposalContext buildProposalContext(PreparedDay prepared, Agenda floorAgenda) {
         List<OccupiedInterval> agendaWalls = prepared.occupied().stream()
@@ -470,9 +486,6 @@ public class AgendaGenerationService {
             .filter(AgendaBlock::wig)
             .map(AgendaBlock::executableId)
             .collect(Collectors.toSet());
-        Set<UUID> candidateIds = floorAgenda.blocks().stream()
-            .map(AgendaBlock::executableId)
-            .collect(Collectors.toSet());
         return new AgendaProposalContext(
             floorAgenda.blocks(),
             prepared.window().frontierStart(),
@@ -482,9 +495,40 @@ public class AgendaGenerationService {
             wigIds,
             prepared.state().energyProfile().highLoadQuota(),
             floorAgenda.energyCriterion(),
-            repository.loadExecutableTitles(candidateIds),
+            repository.loadExecutableTitles(
+                namedIds(floorAgenda, agendaWalls, occupiedWalls, prepared.wallMembers())),
             blockBands(floorAgenda, prepared.bands()),
-            prepared.sleepSessions());
+            prepared.sleepSessions(),
+            prepared.wallMembers());
+    }
+
+    /** The ids of the walls that are real windows — a synthetic meal anchor carries no executable. */
+    private static List<UUID> wallIds(List<OccupiedInterval> walls) {
+        return walls.stream()
+            .map(OccupiedInterval::executableId)
+            .filter(id -> id != null)
+            .toList();
+    }
+
+    /** Everything the day's untouchable windows hold, flattened — the F1 reservation's "hands off" set. */
+    private static Set<UUID> heldByWalls(Map<UUID, List<UUID>> wallMembers) {
+        return wallMembers.values().stream().flatMap(List::stream).collect(Collectors.toSet());
+    }
+
+    /**
+     * Everything the prompt has to be able to name: the candidate blocks, both wall lists and whatever
+     * those walls hold. One read, one map — a wall the model can see but not name is the anonymous
+     * geometry this exists to replace.
+     */
+    private static Set<UUID> namedIds(Agenda floorAgenda, List<OccupiedInterval> agendaWalls,
+                                      List<OccupiedInterval> occupiedWalls,
+                                      Map<UUID, List<UUID>> wallMembers) {
+        Set<UUID> ids = new LinkedHashSet<>();
+        floorAgenda.blocks().forEach(block -> ids.add(block.executableId()));
+        ids.addAll(wallIds(agendaWalls));
+        ids.addAll(wallIds(occupiedWalls));
+        wallMembers.values().forEach(ids::addAll);
+        return ids;
     }
 
     /**
@@ -709,7 +753,8 @@ public class AgendaGenerationService {
         List<OccupiedInterval> occupied,
         String energyCriterion,
         Map<String, RetimingBand> bands,
-        List<SleepSession> sleepSessions
+        List<SleepSession> sleepSessions,
+        Map<UUID, List<UUID>> wallMembers
     ) {
         /** @return true when a forward window exists to plan (state is present) */
         boolean plannable() {
@@ -718,7 +763,8 @@ public class AgendaGenerationService {
 
         /** An unplannable day (zero-width forward window): no state, no walls, criterion preserved. */
         static PreparedDay unplannable(PlanningWindow window, String energyCriterion) {
-            return new PreparedDay(null, window, List.of(), energyCriterion, Map.of(), List.of());
+            return new PreparedDay(null, window, List.of(), energyCriterion, Map.of(), List.of(),
+                Map.of());
         }
     }
 

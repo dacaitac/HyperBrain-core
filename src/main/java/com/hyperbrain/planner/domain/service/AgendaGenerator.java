@@ -105,7 +105,7 @@ public class AgendaGenerator {
         WigReservationPlan plan = wigPortfolioSelector.select(state.wigPortfolio(), wigBudget);
         Map<DayWindow, UUID> wigWindows = new LinkedHashMap<>();
         for (MciWig wig : plan.ordered()) {
-            claimWigWindow(wig, free, wigWindows, placed);
+            claimWigWindow(wig, free, wigWindows, placed, state, excluded);
         }
         excluded.addAll(plan.excluded());
 
@@ -247,11 +247,25 @@ public class AgendaGenerator {
      * Claims a window for an MCI's lead measure — a goal-purpose window when one is free, otherwise the
      * earliest window left. The claimed window is removed from the pool, so a goal window holds its lead
      * measure and nothing else: the template calls that band «Meta», and honouring that is the point.
+     *
+     * <p><b>Unless the user already gave it an hour of his own.</b> This reservation is the one path
+     * that does not draw from the ranked candidates — it takes the lead measure straight from the
+     * portfolio — so the admission guard that keeps a replan out of the blocks the user arranged does
+     * not reach it, and a goal he had already placed inside his own block was pulled back out of it on
+     * every run. A lead measure a wall of this day already holds is left exactly where he put it, and
+     * the day keeps the window for other work; the exclusion is recorded rather than silent, because
+     * the floor explains every cut. This is scoped to <em>today's</em> walls on purpose: a lead measure
+     * still sitting in yesterday's closed block is precisely the one that must receive a block today.
      */
     private static void claimWigWindow(MciWig wig, List<DayWindow> free,
-                                       Map<DayWindow, UUID> claimed, Set<UUID> placed) {
+                                       Map<DayWindow, UUID> claimed, Set<UUID> placed,
+                                       PlannerDayState state, List<ExcludedExecutable> excluded) {
         UUID leadMeasureId = wig.leadMeasureId();
         if (leadMeasureId == null || placed.contains(leadMeasureId) || free.isEmpty()) {
+            return;
+        }
+        if (state.spokenFor().contains(leadMeasureId)) {
+            excluded.add(new ExcludedExecutable(leadMeasureId, ExclusionReason.ALREADY_HELD_BY_USER));
             return;
         }
         DayWindow window = free.stream()

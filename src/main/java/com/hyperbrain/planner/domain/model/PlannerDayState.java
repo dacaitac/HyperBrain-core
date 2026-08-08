@@ -3,6 +3,7 @@ package com.hyperbrain.planner.domain.model;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -22,6 +23,11 @@ import java.util.UUID;
  *       WHAT goes in each one, never WHERE a window sits;</li>
  *   <li>{@code occupied} — the hard walls already spoken for (existing blocks, AGENDA windows, the
  *       standing activities and study sessions);</li>
+ *   <li>{@code spokenFor} — the executables those walls already hold: work the user put inside a block
+ *       this run may not re-place. They are absent from {@code rankedExecutables} for the same reason
+ *       (the admission drops them), and this set exists because one path does not go through the
+ *       ranking at all — the F1 goal reservation, which claims a window for a lead measure straight
+ *       from the portfolio;</li>
  *   <li>{@code energyProfile} — the resolved F3 margin / F6 quota and its readable criterion;</li>
  *   <li>{@code dataComplete} — false when a required signal was missing, steering the generator into
  *       the F5 degraded floor.</li>
@@ -38,6 +44,7 @@ import java.util.UUID;
  * @param rankedExecutables schedulables ordered highest priority first; never null
  * @param wigPortfolio      the active MCIs for the F1 per-MCI reservation; never null, may be empty
  * @param occupied          the hard walls to plan around; never null
+ * @param spokenFor         the executables those walls already hold; never null, may be empty
  * @param energyProfile     the resolved load parameters and criterion; never null
  * @param dataComplete      whether the inputs were complete (false → F5 degraded)
  */
@@ -49,6 +56,7 @@ public record PlannerDayState(
     List<SchedulableExecutable> rankedExecutables,
     List<MciWig> wigPortfolio,
     List<OccupiedInterval> occupied,
+    Set<UUID> spokenFor,
     EnergyProfile energyProfile,
     boolean dataComplete
 ) {
@@ -69,5 +77,6 @@ public record PlannerDayState(
         rankedExecutables = rankedExecutables == null ? List.of() : List.copyOf(rankedExecutables);
         wigPortfolio = wigPortfolio == null ? List.of() : List.copyOf(wigPortfolio);
         occupied = occupied == null ? List.of() : List.copyOf(occupied);
+        spokenFor = spokenFor == null ? Set.of() : Set.copyOf(spokenFor);
     }
 }

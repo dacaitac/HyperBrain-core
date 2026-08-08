@@ -220,18 +220,32 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
           -- Work already held by a block this run may NOT re-time is not a candidate at all.
           -- Containment is monovalent, so merely offering it would silently move it out of the block
           -- that holds it — and by the time a row is written the move has already happened, which is
-          -- why the guard has to live here and not in the persistence. Two cases:
-          --   * slot authority (ADR-026 D6): a USER block the user timed by hand, or a block already
-          --     under way. Otherwise your authority would last exactly until the next replan.
-          --   * the past is never rewritten (ADR-040 D8): a planner block whose start has already gone
-          --     by. A morning already lived is not a draft, and its members stay in it.
+          -- why the guard has to live here and not in the persistence.
+          --
+          -- The rule is the exact complement of the regenerable set: the ONLY membership this run may
+          -- take apart is the membership of the blocks it is about to re-place (see
+          -- REGENERABLE_BLOCKS_SQL — planner-authored, still PLANNED, still ahead). Everything else
+          -- holds what it holds: a USER block the user timed by hand (slot authority, ADR-026 D6), a
+          -- block already under way or already closed (the past is never rewritten, ADR-040 D8) — and
+          -- the block Daniel creates by hand in Notion, which is what a status list got wrong in
+          -- production. That block is born through the ordinary ingestion of an executable, so it
+          -- arrives as TODO; while the guard demanded PLANNED/IN_PROGRESS it did not recognise his
+          -- blocks at all, and every replan emptied «WakeUP», «Oficio» and «Torbellino» and dealt
+          -- their tasks around the day. As with the occupancy wall, no state of a real block means
+          -- "this membership is free" — the only thing that means it is the block not being there.
+          --
           -- Planner blocks still ahead are deliberately NOT guarded: those are the ones this run
           -- re-places, and walling them out would push the whole day onto tomorrow.
+          --
+          -- FOCUS is the single exclusion, exactly as it is in the occupancy read: a focus row is
+          -- retrospective accounting of work already running, never somebody's arrangement, so it
+          -- holds no authority over what it points at. It is written as IS DISTINCT FROM rather than
+          -- a whitelist of origins because a block born in Notion carries no origin at all.
           AND NOT EXISTS (
               SELECT 1 FROM core_executable holder
               WHERE holder.id     = e.container_block_id
                 AND holder.type   = 'TIME_BLOCK'
-                AND holder.status IN ('PLANNED', 'IN_PROGRESS')
+                AND holder.origin IS DISTINCT FROM 'FOCUS'
                 AND NOT (holder.origin     = 'PLANNER'
                      AND holder.status     = 'PLANNED'
                      AND holder.start_time >= ?))
@@ -563,6 +577,18 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
     private static final String EXECUTABLE_TITLES_SQL =
         "SELECT id, name FROM core_executable WHERE id IN (%s)";
 
+    /**
+     * What a set of blocks currently holds, in container order — the membership half of the day the
+     * user pre-organised, for the LLM-facing read model. Read straight off {@code container_block_id}
+     * like every other membership read since ADR-039.
+     */
+    private static final String BLOCK_MEMBERS_SQL = """
+        SELECT container_block_id AS block_id, id AS member_id
+        FROM core_executable
+        WHERE container_block_id IN (%s)
+        ORDER BY container_block_id, container_ord NULLS LAST, id
+        """;
+
     private final JdbcTemplate jdbcTemplate;
     private final PlannerConstraints constraints;
     private final ObjectMapper objectMapper;
@@ -872,6 +898,24 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
             titles.put(rs.getObject("id", UUID.class), rs.getString("name"));
         }, ids.toArray());
         return titles;
+    }
+
+    @Override
+    public Map<UUID, List<UUID>> loadBlockMembers(java.util.Collection<UUID> blockIds) {
+        if (blockIds.isEmpty()) {
+            return Map.of();
+        }
+        List<UUID> ids = List.copyOf(blockIds);
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        Map<UUID, List<UUID>> members = new LinkedHashMap<>();
+        jdbcTemplate.query(String.format(BLOCK_MEMBERS_SQL, placeholders), rs -> {
+            members.computeIfAbsent(rs.getObject("block_id", UUID.class), key -> new ArrayList<>())
+                .add(rs.getObject("member_id", UUID.class));
+        }, ids.toArray());
+        // Immutable to the caller: this read model is shared by the floor and the LLM road within one
+        // run, and neither of them owns it.
+        members.replaceAll((blockId, blockMembers) -> List.copyOf(blockMembers));
+        return Map.copyOf(members);
     }
 
     /** Groups the joined block/member rows of {@link #loadRegenerableBlocks} into one block. */

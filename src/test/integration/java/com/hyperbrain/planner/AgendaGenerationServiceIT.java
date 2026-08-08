@@ -465,6 +465,107 @@ class AgendaGenerationServiceIT {
     }
 
     @Test
+    @DisplayName("the day Daniel pre-organised survives the run: work inside his own block stays in it")
+    void work_inside_a_hand_made_block_is_left_alone() {
+        // The production case, and the reason this test exists. Daniel leaves the day laid out the
+        // night before: his own block with the work he put inside it. A block he creates in Notion is
+        // born through the ordinary ingestion of an executable, so it arrives as TODO with no origin at
+        // all — and while the candidate guard demanded PLANNED/IN_PROGRESS it did not recognise the
+        // block, so the run collected his tasks, dealt them around the day and left «WakeUP», «Oficio»
+        // and «Torbellino» empty.
+        UUID handMade = insertHandMadeBlock("Oficio", at(7, 0), at(10, 0));
+        UUID hisWork = insertTask("Facturas", 0.95, 60);
+        contain(handMade, hisWork);
+        // Enough other work that the run really does fill the day around him.
+        for (int i = 0; i < 8; i++) {
+            insertTask("Tarea " + i, 0.8 - i * 0.01, 30);
+        }
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, hisWork))
+            .isEqualTo(handMade);
+        // And the day was genuinely planned around him — an empty day would pass the assertion above
+        // for the wrong reason.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM planner_blocks WHERE origin = 'PLANNER'", Integer.class))
+            .isGreaterThan(2);
+    }
+
+    @Test
+    @DisplayName("the goal he placed in his own block is left there: even the WIG reservation stops at it")
+    void the_wig_he_placed_by_hand_is_left_where_he_put_it() {
+        // The other half of the same decision, and the one path that does not go through the candidate
+        // guard at all: the F1 reservation takes the lead measure straight from the WIG portfolio. So
+        // even after the guard learned to recognise his blocks, the goal work he had already placed in
+        // one of them was pulled back out on every run and given a window of the planner's choosing.
+        UUID mci = insertCycle("MCI", "ACTIVE",
+            LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 31));
+        UUID lead = insertLeadMeasure("Acción predictiva", mci, 0.5);
+        UUID hisBlock = insertHandMadeBlock("Meta de la noche", at(20, 0), at(22, 0));
+        contain(hisBlock, lead);
+        insertTask("Torbellino", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // It is still in his block, and no goal window was reserved for it a second time.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, lead))
+            .isEqualTo(hisBlock);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM planner_blocks WHERE executable_id = ? AND origin = 'PLANNER'",
+            Integer.class, lead)).isZero();
+    }
+
+    @Test
+    @DisplayName("a goal still sitting in yesterday's block is exactly the one that must get a window today")
+    void the_wig_held_by_yesterdays_block_still_gets_its_window() {
+        // The daily mechanic the hands-off set must leave intact. Yesterday's block is not a window of
+        // today, so it holds no authority over today's plan: a lead measure left inside it is the very
+        // case the F1 reservation exists for. Scoping the set to today's walls is what keeps «he
+        // arranged this» from decaying into «it was placed once, never touch it again».
+        UUID mci = insertCycle("MCI", "ACTIVE",
+            LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 31));
+        UUID lead = insertLeadMeasure("Acción predictiva", mci, 0.5);
+        insertPlannerBlock(lead, NOON.minusDays(1));
+
+        Agenda agenda = service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(agenda.blocks()).filteredOn(b -> b.wig()).extracting(b -> b.executableId())
+            .containsExactly(lead);
+        assertThat(agenda.excluded()).extracting(e -> e.reason().name())
+            .doesNotContain("ALREADY_HELD_BY_USER");
+        // And it really moved into a window of today, out of the settled block of yesterday.
+        assertThat(jdbcTemplate.queryForObject("""
+            SELECT b.start_time FROM core_executable b
+            JOIN core_executable m ON m.container_block_id = b.id
+            WHERE m.id = ?
+            """, OffsetDateTime.class, lead)).isAfterOrEqualTo(at(0, 0));
+    }
+
+    @Test
+    @DisplayName("the run's own placement is not mistaken for his: a second run reserves the goal again")
+    void a_replan_still_reserves_the_goal_window() {
+        // The blocks this run is about to re-place are subtracted from the walls before the hands-off
+        // set is read. Were they not, the plan would freeze itself: the goal the planner placed at the
+        // first run would look like work the user had arranged, and no replan could ever move it.
+        UUID mci = insertCycle("MCI", "ACTIVE",
+            LocalDate.of(2026, 7, 1), LocalDate.of(2026, 7, 31));
+        UUID lead = insertLeadMeasure("Acción predictiva", mci, 0.5);
+        insertTask("Torbellino", 0.9, 60);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+        Agenda replanned = service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(replanned.blocks()).filteredOn(b -> b.wig()).extracting(b -> b.executableId())
+            .containsExactly(lead);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, lead))
+            .isNotNull();
+    }
+
+    @Test
     @DisplayName("write-back staging: a planned day announces each block as an executable change")
     void planned_day_stages_agenda_block_event() {
         insertTask("High", 0.9, 60);
@@ -858,6 +959,22 @@ class AgendaGenerationServiceIT {
             VALUES (?, 30)
             """, id);
         return id;
+    }
+
+    /** A block as Daniel's own arrives from Notion: no origin, and the initial status of any executable. */
+    private UUID insertHandMadeBlock(String name, OffsetDateTime start, OffsetDateTime end) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
+            VALUES (?, ?, ?, 'TIME_BLOCK', 'TODO', ?, ?)
+            """, id, USER, name, start, end);
+        return id;
+    }
+
+    private void contain(UUID blockId, UUID memberId) {
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = 0 WHERE id = ?",
+            blockId, memberId);
     }
 
     private void insertTimeBlockExecutable(String name, OffsetDateTime start, OffsetDateTime end) {
