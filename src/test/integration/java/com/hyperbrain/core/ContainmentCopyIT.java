@@ -210,6 +210,25 @@ class ContainmentCopyIT {
     }
 
     @Test
+    @DisplayName("a block whose hour has already gone by still hands over: the guard is authority, not the clock")
+    void a_block_whose_window_already_passed_still_hands_over() {
+        // He arranges the window he is in, so the hand-over must not ask what time it is. The regenerable
+        // set is narrower than this guard on purpose — it also demands the block be still ahead — and
+        // reading that extra condition into the hand-over would let the next replan take apart the
+        // membership he just arranged, which is the exact defect this closes.
+        UUID block = insertBlock();
+        jdbcTemplate.update(
+            "UPDATE core_executable SET start_time = ?, end_time = ? WHERE id = ?",
+            BLOCK_START.minusDays(1), BLOCK_END.minusDays(1), block);
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, block)).isEqualTo("USER");
+    }
+
+    @Test
     @DisplayName("a block already under way is not handed over — it was never the planner's to give")
     void a_started_block_is_left_alone() {
         UUID block = insertBlock();

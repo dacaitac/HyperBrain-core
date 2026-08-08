@@ -105,6 +105,26 @@ class DailyAdherenceRollupServiceIT {
     }
 
     @Test
+    @DisplayName("the day he arranged himself is his day too: a handed-over block counts on both sides")
+    void adherence_counts_every_block_that_held_the_day() {
+        // Authorship is not the question adherence asks. A block the planner handed over when Daniel put
+        // work into it by hand held the day exactly as a planner-composed one did; while the read
+        // demanded PLANNER, the days he ran best scored as days he had no plan. FOCUS is the one
+        // exclusion: it accounts for work already running, it never reserved a window.
+        UUID task = insertTask("Deep work");
+        insertBlock(task, 9, 60, "SETTLED", "PLANNER");
+        insertBlock(task, 11, 45, "SETTLED", "USER");    // handed over when he arranged it by hand
+        insertBlock(task, 14, null, "EXPIRED", "USER");  // his, and he did not run it
+        insertBlock(task, 16, 60, "SETTLED", "FOCUS");   // accounting, not a window
+
+        DailyAdherenceReport report = service.rollup(USER, DAY);
+
+        assertThat(report.blocksPlanned()).isEqualTo(3);
+        assertThat(report.blocksExecuted()).isEqualTo(2);
+        assertThat(report.adherence()).isCloseTo(2.0 / 3.0, within(1e-9));
+    }
+
+    @Test
     @DisplayName("an empty day yields zero adherence and is not abandoned")
     void empty_day_is_zero() {
         DailyAdherenceReport report = service.rollup(USER, DAY);
@@ -196,14 +216,19 @@ class DailyAdherenceRollupServiceIT {
     }
 
     private void insertPlannerBlock(UUID executableId, int startHour, Integer actualMinutes, String status) {
+        insertBlock(executableId, startHour, actualMinutes, status, "PLANNER");
+    }
+
+    private void insertBlock(UUID executableId, int startHour, Integer actualMinutes, String status,
+                             String origin) {
         OffsetDateTime start = OffsetDateTime.of(2026, 7, 20, startHour, 0, 0, 0, UTC);
         jdbcTemplate.update("""
             INSERT INTO core_time_block
                 (id, executable_id, date_start, date_end, status, origin, planned_minutes,
                  actual_duration_minutes, settled_at)
-            VALUES (?, ?, ?, ?, ?, 'PLANNER', 60, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 60, ?, ?)
             """,
-            UUID.randomUUID(), executableId, start, start.plusHours(1), status,
+            UUID.randomUUID(), executableId, start, start.plusHours(1), status, origin,
             actualMinutes, start.plusHours(1));
     }
 

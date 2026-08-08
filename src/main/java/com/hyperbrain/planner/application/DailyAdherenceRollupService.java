@@ -78,7 +78,7 @@ public class DailyAdherenceRollupService {
     public DailyAdherenceReport rollup(UUID userId, LocalDate day) {
         ZoneId zone = plannerStateRepository.loadUserZone(userId);
         List<DailyBlockObservation> blocks =
-            telemetryRepository.loadPlannerBlockObservations(userId, day, zone);
+            telemetryRepository.loadBlockObservations(userId, day, zone);
         int replanCount = telemetryRepository.countReplans(day, zone);
         Boolean ritualCompleted = morningTriggerStore.load(userId).firedOn(day);
 

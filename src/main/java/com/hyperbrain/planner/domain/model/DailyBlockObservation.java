@@ -1,8 +1,10 @@
 package com.hyperbrain.planner.domain.model;
 
 /**
- * One planner block of a local day as seen at rollup time (H0 telemetry, #17): whether it reserved
- * the WIG (F1) and how many minutes of it were actually executed. The execution signal is the
+ * One block of a local day as seen at rollup time (H0 telemetry, #17): whether it reserved the WIG
+ * (F1) and how many minutes of it were actually executed. Who composed the block is not part of the
+ * observation — a block the user arranged himself held the day just as one the planner laid did, and
+ * adherence measures the day that happened. The execution signal is the
  * settled {@code core_time_block.actual_duration_minutes} — the concrete, in-production record of a
  * block that reached {@code ACTIVE} and was frozen by a focus switch (SETTLED) or by the expiry
  * sweep (EXPIRED). It is null when the block was never executed (still PLANNED, or EXPIRED without

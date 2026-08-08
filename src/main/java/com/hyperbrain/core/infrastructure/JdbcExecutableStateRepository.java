@@ -167,9 +167,19 @@ class JdbcExecutableStateRepository implements ExecutableStateRepository {
         """;
 
     /**
-     * The hand-over of a block the user rearranged by hand. Guarded to the regenerable set inside the
-     * predicate, so it is race-safe and a second observation of the same edit writes nothing: once the
-     * block is his, it is no longer {@code PLANNER}.
+     * The hand-over of a block the user rearranged by hand: planner-authored and still {@code PLANNED},
+     * which is the whole guard. It sits inside the predicate, so the write is race-safe and a second
+     * observation of the same edit changes nothing — once the block is his, it is no longer
+     * {@code PLANNER}.
+     *
+     * <p><b>Deliberately not the regenerable set.</b> That set is narrower: it also demands the block
+     * still be ahead of the run's horizon. The hour must not enter here — Daniel drops work into the
+     * window he is in, and refusing the hand-over on a block whose start has already passed would let
+     * the next replan take that membership apart, which is the exact defect this closes. What the guard
+     * protects is authority, not time: a block that is his, already under way or already closed was
+     * never the planner's to give. Claiming a past {@code PLANNED} block is inert besides — its
+     * membership is already outside the run's reach for the same reason it is outside the regenerable
+     * set — and, like every hand-over, it expires with the block's own day.
      */
     private static final String CLAIM_BLOCK_FOR_USER_SQL = """
         UPDATE core_executable

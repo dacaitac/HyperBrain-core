@@ -141,9 +141,11 @@ public interface ExecutableStateRepository {
      * the answer, and it is what makes the anchor expire on its own: a block belongs to one day, so
      * tomorrow's plan is composed freely from fresh blocks, with nothing accumulated.
      *
-     * <p>Guarded to exactly the regenerable set ({@code PLANNER} + {@code PLANNED}): a block that is
-     * already the user's, already under way or already closed has nothing to hand over, and a
-     * {@code FOCUS} accounting row is never touched.
+     * <p>Guarded to authorship and state ({@code PLANNER} + {@code PLANNED}): a block that is already
+     * the user's, already under way or already closed has nothing to hand over, and a {@code FOCUS}
+     * accounting row is never touched. The hour is deliberately absent from the guard — a block whose
+     * window has already begun still hands over, because he arranges the window he is in — so this is
+     * a slightly wider set than the regenerable one, which also demands the block be still ahead.
      *
      * @param blockId the {@code TIME_BLOCK} whose contents the user rearranged; never null
      * @return true when this call handed the block over (false when it was not the planner's to give)

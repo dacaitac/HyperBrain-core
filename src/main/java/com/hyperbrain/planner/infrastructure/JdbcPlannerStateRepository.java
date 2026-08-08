@@ -277,13 +277,25 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      *
      * <p><b>Selector signals.</b> The hysteresis flag ({@code received_block_yesterday}) and the
      * release-valve streak ({@code degraded_days_without_block}, a bounded consecutive block-less day
-     * count) still mean exactly what they did — "did this lead measure get a Planner block", read over
-     * the recent past — but they are derived from the deployed model (ADR-039): the lead measure is
-     * held by a {@code TIME_BLOCK} executable through its own {@code container_block_id}, not by an
-     * anchor row in the frozen {@code core_time_block} table. Containment is monovalent, so the trail
-     * is the lead measure's <em>latest</em> container: that is exactly the most recent block, which is
-     * what the streak measures, while the yesterday flag turns false once a same-day replan has already
+     * count) answer one question — "did this lead measure get a window of time?" — read over the recent
+     * past. They are derived from the deployed model (ADR-039): the lead measure is held by a
+     * {@code TIME_BLOCK} executable through its own {@code container_block_id}, not by an anchor row in
+     * the frozen {@code core_time_block} table. Containment is monovalent, so the trail is the lead
+     * measure's <em>latest</em> container: that is exactly the most recent block, which is what the
+     * streak measures, while the yesterday flag turns false once a same-day replan has already
      * re-contained the lead measure into today's block.
+     *
+     * <p><b>Who composed the window does not enter the question, and demanding {@code PLANNER} inverted
+     * the answer.</b> {@code origin} says whose the block is to re-place, not whether a block is there.
+     * A window is a window: one the planner laid and then handed over when Daniel put work in it by hand
+     * ({@code USER}), and one he creates himself in Notion (no origin at all), both fed the goal exactly
+     * as a planner block does. While the read demanded {@code PLANNER}, the night he spent feeding his
+     * main goal by hand was read as famine: the flag came back false, the block-less streak saturated,
+     * and the required pace and the release valve both fired — the system concluded the goal was starving
+     * <em>because</em> he was tending it. {@code FOCUS} is the single exclusion, as it is in
+     * {@link #OCCUPIED_BLOCKS_SQL} and in the candidate guard: a focus row is retrospective accounting of
+     * work already running, never a window somebody reserved. It is written as {@code IS DISTINCT FROM}
+     * rather than a whitelist because a block born in Notion carries no origin.
      */
     private static final String WIG_PORTFOLIO_SQL = """
         WITH RECURSIVE mci AS (
@@ -344,7 +356,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                    JOIN core_executable b ON b.id = lm.container_block_id
                    WHERE lm.id = l.lead_measure_id
                      AND b.type = 'TIME_BLOCK'
-                     AND b.origin = 'PLANNER'
+                     AND b.origin IS DISTINCT FROM 'FOCUS'
                      AND (b.start_time AT TIME ZONE ?)::date = ?::date - 1
                )                                           AS received_block_yesterday,
                LEAST(
@@ -355,7 +367,7 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
                        JOIN core_executable b ON b.id = lm.container_block_id
                        WHERE lm.id = l.lead_measure_id
                          AND b.type = 'TIME_BLOCK'
-                         AND b.origin = 'PLANNER'
+                         AND b.origin IS DISTINCT FROM 'FOCUS'
                          AND (b.start_time AT TIME ZONE ?)::date < ?::date
                    ), ?)
                )                                           AS degraded_days_without_block
@@ -551,6 +563,18 @@ class JdbcPlannerStateRepository implements PlannerStateRepository {
      * Re-reads the day's persisted planner blocks with one row per member, each joined to its display
      * name, for the agenda write-back (HU-01b). A block with no members still yields one row (LEFT
      * JOIN), so an empty window is never silently lost from the delivery.
+     *
+     * <p><b>Here the {@code PLANNER} filter is deliberate, unlike in the two selector signals above.</b>
+     * The signals ask "did this lead measure get a window?", where a window is a window whoever composed
+     * it. This read asks a different question — "which of the day's blocks are mine to deliver?" — and
+     * authorship is exactly the right answer to it: a block Daniel made in Notion, or one the planner
+     * handed over to him, already lives in his satellites through the ordinary executable mirror, so
+     * announcing it again would deliver him his own arrangement a second time. The same reasoning keeps
+     * {@code status = 'PLANNED'}: what is delivered is the plan, not what already closed.
+     *
+     * <p>The read has no caller in {@code src/main}: the write-back that consumed it is not wired today,
+     * and this is left in place with its contract intact rather than tightened on speculation. When a
+     * caller returns, the question above is the one to re-ask against it.
      */
     private static final String PLANNED_BLOCKS_FOR_DAY_SQL = """
         SELECT b.id,

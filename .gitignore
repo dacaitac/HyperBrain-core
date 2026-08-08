@@ -44,3 +44,5 @@ Thumbs.db
 # Claude Code — commit settings.json + hooks/; ignore local overrides and runtime marker (ADR-017)
 .claude/settings.local.json
 .claude/.build-passed
+# Working trees of parallel subagents: never part of a commit, and a `git add -A` would swallow one whole
+.claude/worktrees/

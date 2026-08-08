@@ -468,7 +468,56 @@ class JdbcPlannerStateRepositoryIT {
     }
 
     @Test
-    @DisplayName("a FOCUS block held by the lead measure feeds neither signal (only PLANNER blocks do)")
+    @DisplayName("hysteresis: the window he took over by hand fed the goal just as the planner's would")
+    void a_handed_over_block_still_counts_as_a_window() {
+        // The production case: Daniel feeds his main goal by hand, dropping it the night before into a
+        // block that the hand-over then made his (origin USER). While the read demanded PLANNER, the
+        // night he spent on the goal read as famine — the flag false, the streak saturated, the release
+        // valve firing precisely because he was tending it.
+        UUID mci = insertActiveMci();
+        UUID leadMeasure = insertLeadMeasure(mci);
+        UUID handedOver = insertTimeBlock("Ventana suya", "PLANNED", "USER",
+            at(21, 0).minusDays(1), at(23, 0).minusDays(1));
+        contain(leadMeasure, handedOver);
+
+        MciWig wig = onlyWig();
+
+        assertThat(wig.receivedBlockYesterday()).isTrue();
+        assertThat(wig.degradedDaysWithoutBlock()).isZero();
+    }
+
+    @Test
+    @DisplayName("hysteresis: a block he created himself in Notion feeds the goal too, origin or not")
+    void a_notion_born_block_still_counts_as_a_window() {
+        UUID mci = insertActiveMci();
+        UUID leadMeasure = insertLeadMeasure(mci);
+        // Born through the ordinary ingestion of an executable: no origin at all, initial status.
+        UUID handMade = insertUserBlock("Hyperbrain", at(19, 0).minusDays(1), at(22, 0).minusDays(1));
+        contain(leadMeasure, handMade);
+
+        MciWig wig = onlyWig();
+
+        assertThat(wig.receivedBlockYesterday()).isTrue();
+        assertThat(wig.degradedDaysWithoutBlock()).isZero();
+    }
+
+    @Test
+    @DisplayName("release valve: the streak counts days since the last window, whoever composed it")
+    void the_streak_counts_days_since_the_last_window_of_any_authorship() {
+        UUID mci = insertActiveMci();
+        UUID leadMeasure = insertLeadMeasure(mci);
+        UUID hisOwn = insertUserBlock("Ventana suya",
+            at(9, 0).minusDays(3), at(10, 0).minusDays(3));
+        contain(leadMeasure, hisOwn);
+
+        MciWig wig = onlyWig();
+
+        assertThat(wig.receivedBlockYesterday()).isFalse();
+        assertThat(wig.degradedDaysWithoutBlock()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("a FOCUS block held by the lead measure feeds neither signal: it reserves no time")
     void focus_containment_does_not_feed_the_signals() {
         UUID mci = insertActiveMci();
         UUID leadMeasure = insertLeadMeasure(mci);
