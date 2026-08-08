@@ -29,10 +29,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <ul>
  *   <li><b>D6 — slot authority / user override.</b> Work the user timed by hand — held by a
- *       {@code USER}-origin block, or by one already under way — is not even offered to the floor, so a
- *       replan cannot quietly pull it out of the block the user put it in. Containment being monovalent
- *       (ADR-039), that guard has to live in the admission, not in the persistence: by the time a block
- *       is written the move has already happened.</li>
+ *       {@code USER}-origin block, by a block he made himself in Notion, by one already under way or by
+ *       one already closed — is not even offered to the floor, so a replan cannot quietly pull it out of
+ *       the block the user put it in. Containment being monovalent (ADR-039), that guard has to live in
+ *       the admission, not in the persistence: by the time a block is written the move has already
+ *       happened. The set that <em>does</em> give its members up is exactly the regenerable one — the
+ *       blocks this run is about to re-place — because no state of a real block means «this membership
+ *       is free».</li>
  * </ul>
  */
 @IntegrationTest
@@ -84,6 +87,54 @@ class RescheduleAndSlotAuthorityIT {
         UUID task = insertTask("Planner-timed task");
         UUID plannerBlock = insertPlannerBlock(at(2026, 7, 10, 9), at(2026, 7, 10, 10));
         contain(plannerBlock, task);
+
+        List<SchedulableExecutable> ranked =
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd(), dayStart());
+
+        assertThat(ranked).singleElement().satisfies(executable ->
+            assertThat(executable.id()).isEqualTo(task));
+    }
+
+    @Test
+    @DisplayName("a block he made by hand holds its work whatever state it is in — TODO is not «free»")
+    void work_in_a_hand_made_block_is_not_a_candidate() {
+        UUID task = insertTask("Facturas");
+        // A block Daniel creates in Notion is born through the ordinary ingestion of an executable: it
+        // arrives as TODO, with no origin at all. A status whitelist did not recognise it, so every
+        // replan emptied his blocks and dealt their work around the day.
+        UUID handMade = insertHandMadeBlock(at(2026, 7, 10, 19), at(2026, 7, 10, 22));
+        contain(handMade, task);
+
+        List<SchedulableExecutable> ranked =
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd(), dayStart());
+
+        assertThat(ranked).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a closed block keeps its work too: only the blocks this run may re-place give theirs up")
+    void work_in_a_closed_block_is_not_a_candidate() {
+        UUID task = insertTask("Ya hecha dentro de un bloque cerrado");
+        UUID closed = insertBlockExecutable("PLANNER", "DONE", at(2026, 7, 10, 9), at(2026, 7, 10, 10));
+        contain(closed, task);
+
+        List<SchedulableExecutable> ranked =
+            repository.loadRankedExecutables(USER, dayStart(), dayEnd(), dayStart());
+
+        assertThat(ranked).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a FOCUS row holds nothing: the task it accounts for is still the day's to place")
+    void work_pointed_at_by_a_focus_row_is_still_a_candidate() {
+        // FOCUS is the one exclusion of the guard, and it has to stay one. A focus row is retrospective
+        // accounting of work already running, never an arrangement of the user's — treating it as a
+        // holder would take a task he started this morning out of the day for good, since nothing ever
+        // releases it.
+        UUID task = insertTask("Lo que estoy ejecutando ahora");
+        UUID focus = insertBlockExecutable("FOCUS", "IN_PROGRESS",
+            at(2026, 7, 10, 9), at(2026, 7, 10, 10));
+        contain(focus, task);
 
         List<SchedulableExecutable> ranked =
             repository.loadRankedExecutables(USER, dayStart(), dayEnd(), dayStart());
@@ -150,13 +201,28 @@ class RescheduleAndSlotAuthorityIT {
         return insertBlockExecutable("PLANNER", start, end);
     }
 
+    /** A block as it arrives from Notion: the initial status of any executable, and no origin. */
+    private UUID insertHandMadeBlock(OffsetDateTime start, OffsetDateTime end) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time)
+            VALUES (?, ?, 'Oficio', 'TIME_BLOCK', 'TODO', ?, ?)
+            """, id, USER, start, end);
+        return id;
+    }
+
     private UUID insertBlockExecutable(String origin, OffsetDateTime start, OffsetDateTime end) {
+        return insertBlockExecutable(origin, "PLANNED", start, end);
+    }
+
+    private UUID insertBlockExecutable(String origin, String status, OffsetDateTime start,
+                                       OffsetDateTime end) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
             INSERT INTO core_executable
                 (id, user_id, name, type, status, origin, start_time, end_time)
-            VALUES (?, ?, ?, 'TIME_BLOCK', 'PLANNED', ?, ?, ?)
-            """, id, USER, origin + " block", origin, start, end);
+            VALUES (?, ?, ?, 'TIME_BLOCK', ?, ?, ?, ?)
+            """, id, USER, origin + " block", status, origin, start, end);
         return id;
     }
 

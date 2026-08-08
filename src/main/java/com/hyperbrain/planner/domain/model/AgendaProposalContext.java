@@ -10,7 +10,7 @@ import java.util.UUID;
  * The LLM-facing read model of one day's planning state (#61, HU-01c H3) — the input the cognitive
  * proposer turns into a prompt. It is the realization of the {@code UserStateReadModel} the planner
  * out-port refers to: a read-only projection assembled by {@code planner.application} from the day the
- * deterministic floor already resolved, plus the executable titles (the only extra read), so the
+ * deterministic floor already resolved, plus the display names of everything it refers to, so the
  * cognitive tier never reaches into planner persistence.
  *
  * <p><b>What the LLM may rearrange vs. what is a fixed wall</b> (ADR-009, authority model 2026-07-21):
@@ -50,6 +50,14 @@ import java.util.UUID;
  * {@code titles} is <b>untrusted content</b> (iOS/Notion display names): the prompt fences it in a
  * delimited section so it can never be read as instructions (anti prompt-injection).
  *
+ * <p><b>The walls travel named and with their contents</b> ({@code titles} covers them too, and
+ * {@code wallMembers} says what each one holds). A wall reduced to bare geometry only says «this hour
+ * is taken», and that is not what the day the user pre-organised means: his blocks and the commitments
+ * standing on the day are the signal of what today actually <em>is</em> — whether there is a stand-up
+ * at eight and a review at half past two, or whether it is a Saturday with none of them. The template
+ * is a generic reference; this is the day. It is context for the model's judgement, exactly like the
+ * sleep windows: nothing extra is re-imposed by the guard, which keeps re-imposing the geometry alone.
+ *
  * @param candidateBlocks  the run's block set (floor output); never null, one block per executable id
  * @param frontierStart    the sleep-frontier lower edge (wake); never null
  * @param frontierEnd      the sleep-frontier upper edge (bedtime); never null, after {@code frontierStart}
@@ -62,6 +70,8 @@ import java.util.UUID;
  * @param bands            block id → the band it may be retimed within; never null, may be partial
  * @param sleepSessions    when the user slept over the last day (night + naps), chronological; never
  *                         null, empty when nothing was recorded
+ * @param wallMembers      wall id → what that window already holds, in container order; never null,
+ *                         partial (a commitment holds nothing, and neither does an empty block)
  */
 public record AgendaProposalContext(
     List<AgendaBlock> candidateBlocks,
@@ -74,7 +84,8 @@ public record AgendaProposalContext(
     String energyCriterion,
     Map<UUID, String> titles,
     Map<UUID, RetimingBand> bands,
-    List<SleepSession> sleepSessions
+    List<SleepSession> sleepSessions,
+    Map<UUID, List<UUID>> wallMembers
 ) {
 
     public AgendaProposalContext {
@@ -98,6 +109,17 @@ public record AgendaProposalContext(
         titles = titles == null ? Map.of() : Map.copyOf(titles);
         bands = bands == null ? Map.of() : Map.copyOf(bands);
         sleepSessions = sleepSessions == null ? List.of() : List.copyOf(sleepSessions);
+        wallMembers = wallMembers == null ? Map.of() : Map.copyOf(wallMembers);
+    }
+
+    /**
+     * What an already-occupied window holds.
+     *
+     * @param wallId the wall's executable id
+     * @return its members in container order, or an empty list when it holds nothing
+     */
+    public List<UUID> membersOf(UUID wallId) {
+        return wallMembers.getOrDefault(wallId, List.of());
     }
 
     /**

@@ -128,6 +128,31 @@ public interface ExecutableStateRepository {
     boolean assignContainer(UUID memberId, UUID blockId, Integer plannedMinutes, int ord);
 
     /**
+     * Hands a planner-authored block over to the user: its {@code origin} becomes {@code USER}, which
+     * is the same thing the block Daniel opens himself already says. From that moment the planner
+     * stops treating the block as a draft of its own — it is no longer regenerable, so this run and
+     * every replan of the day leave its hour and its membership exactly as he arranged them, and the
+     * candidate guard keeps its members out of the deal.
+     *
+     * <p><b>Why the whole block and not the one task.</b> Authority over a block's contents is not
+     * something two owners can hold at once (containment is monovalent and the plan is rebuilt whole),
+     * and {@code origin} is how every reader already asks the question — "is this mine to re-place?",
+     * never "who typed the row". Handing the container over is therefore the existing vocabulary for
+     * the answer, and it is what makes the anchor expire on its own: a block belongs to one day, so
+     * tomorrow's plan is composed freely from fresh blocks, with nothing accumulated.
+     *
+     * <p>Guarded to authorship and state ({@code PLANNER} + {@code PLANNED}): a block that is already
+     * the user's, already under way or already closed has nothing to hand over, and a {@code FOCUS}
+     * accounting row is never touched. The hour is deliberately absent from the guard — a block whose
+     * window has already begun still hands over, because he arranges the window he is in — so this is
+     * a slightly wider set than the regenerable one, which also demands the block be still ahead.
+     *
+     * @param blockId the {@code TIME_BLOCK} whose contents the user rearranged; never null
+     * @return true when this call handed the block over (false when it was not the planner's to give)
+     */
+    boolean claimBlockForUser(UUID blockId);
+
+    /**
      * Detaches an executable from its container (clears the containment columns). The
      * hard-copied schedule values PERSIST by design (ADR-039: detach keeps the copied date).
      *

@@ -13,7 +13,7 @@ import java.util.List;
  * and framework-free (wired as a bean in {@code PlannerConfig}): a deterministic function of its
  * inputs, so the formula is unit-tested in isolation.
  *
- * <p>Adherence is block-level: the fraction of planner blocks executed past the temporal tolerance.
+ * <p>Adherence is block-level: the fraction of the day's blocks executed past the temporal tolerance.
  * The lead measures ride on the same execution signal — {@code wigHit} is the reserved WIG block
  * having been executed, and {@code abandoned} distinguishes a day let go (low adherence, no replan)
  * from one actively re-adjusted (a replan happened).
@@ -31,7 +31,7 @@ public class AdherenceCalculator {
      *
      * @param date            the local day covered; never null
      * @param zone            the user's timezone the day is reasoned in; never null
-     * @param blocks          the day's planner blocks; never null (empty when nothing was planned)
+     * @param blocks          the day's blocks; never null (empty when nothing was planned)
      * @param replanCount     the count of {@code REPLAN_AGENDA} commands issued that day; &ge; 0
      * @param ritualCompleted the ADR-018 ritual proxy for the day, or null when deferred/unknown
      * @return the computed rollup

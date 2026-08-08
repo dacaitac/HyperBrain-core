@@ -109,7 +109,7 @@ public class ContainmentCopyRule implements DomainRule {
             && Objects.equals(merged.cycleId(), asserted0.cycleId())) {
             return merged;
         }
-        boolean humanMove = isHumanSource(origin) && previous != null
+        boolean humanMove = origin.isHumanEdit() && previous != null
             && scheduleMoved(previous, merged);
         ExecutableSnapshot asserted = withSchedule(
             merged, asserted0.startTime(), asserted0.endTime(), asserted0.cycleId());
@@ -144,10 +144,6 @@ public class ContainmentCopyRule implements DomainRule {
         return !sameInstant(before.startTime(), after.startTime())
             || !sameInstant(before.endTime(), after.endTime())
             || !Objects.equals(before.cycleId(), after.cycleId());
-    }
-
-    private static boolean isHumanSource(ExternalSystem origin) {
-        return origin == ExternalSystem.APPLE || origin == ExternalSystem.NOTION;
     }
 
     private static boolean sameInstant(OffsetDateTime a, OffsetDateTime b) {

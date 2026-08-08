@@ -20,8 +20,23 @@ import java.util.UUID;
 public class JdbcDailyTelemetryRepository implements DailyTelemetryRepository {
 
     /**
-     * The day's planner blocks with their WIG flag and settled execution signal. A block reserves the
-     * WIG when its executable is the F1 lead measure ({@code type = 'LEAD_MEASURE'}).
+     * The day's blocks with their WIG flag and settled execution signal. A block reserves the WIG when
+     * its executable is the F1 lead measure ({@code type = 'LEAD_MEASURE'}).
+     *
+     * <p><b>Adherence measures the day that happened, not who composed it.</b> The read used to demand
+     * {@code origin = 'PLANNER'}, which silently dropped from both the numerator and the denominator
+     * every block the planner handed over when the user arranged it by hand ({@code USER}) and every
+     * block he created himself (no origin at all) — the day he ran best scored as the day he had no
+     * plan. {@code FOCUS} stays out, as everywhere else: it is retrospective accounting of work already
+     * running, not a window of the day.
+     *
+     * <p><b>This read is anchored to the frozen {@code core_time_block} table and is therefore inert on
+     * the deployed model.</b> Since ADR-039 the block IS a {@code core_executable} and nothing writes
+     * that table any more, so the rollup observes an empty day; ADR-040 D13 additionally retired the
+     * focus register, leaving {@code actual_duration_minutes} unwritten on the live path. Re-pointing it
+     * at the deployed model needs the execution signal to be defined first (what "executed" means for a
+     * block that closes as {@code DONE} when its window elapses) — a domain decision, not a mechanical
+     * port, so the origin criterion is corrected here and travels with the read when it moves.
      */
     private static final String PLANNER_BLOCKS_SQL = """
         SELECT b.actual_duration_minutes            AS actual_minutes,
@@ -29,7 +44,7 @@ public class JdbcDailyTelemetryRepository implements DailyTelemetryRepository {
         FROM core_time_block b
         JOIN core_executable e ON e.id = b.executable_id
         WHERE e.user_id = ?
-          AND b.origin = 'PLANNER'
+          AND b.origin IS DISTINCT FROM 'FOCUS'
           AND (b.date_start AT TIME ZONE ?)::date = ?::date
         """;
 
@@ -48,7 +63,7 @@ public class JdbcDailyTelemetryRepository implements DailyTelemetryRepository {
     }
 
     @Override
-    public List<DailyBlockObservation> loadPlannerBlockObservations(UUID userId, LocalDate day, ZoneId zone) {
+    public List<DailyBlockObservation> loadBlockObservations(UUID userId, LocalDate day, ZoneId zone) {
         return jdbcTemplate.query(
             PLANNER_BLOCKS_SQL,
             (rs, rowNum) -> new DailyBlockObservation(

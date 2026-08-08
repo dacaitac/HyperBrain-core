@@ -222,4 +222,17 @@ public interface PlannerStateRepository {
      * @return a map from executable id to display name; never null, missing ids simply absent
      */
     Map<UUID, String> loadExecutableTitles(Collection<UUID> executableIds);
+
+    /**
+     * Reads what each of the given blocks currently holds, in container order — the membership of the
+     * day the user pre-organised himself. Read on the LLM path only, and for one reason: a wall the
+     * model sees as bare geometry says «this hour is taken», while the same wall with its name and its
+     * contents says what the day actually <em>is</em> — that «Oficio» from seven to ten is where the
+     * two invoices already live, and that today has a stand-up at eight. The model plans the rest of
+     * the day around a real day instead of around a template with holes cut in it.
+     *
+     * @param blockIds the blocks whose membership to read; never null, may be empty
+     * @return block id → its members in container order; never null, blocks holding nothing are absent
+     */
+    Map<UUID, List<UUID>> loadBlockMembers(Collection<UUID> blockIds);
 }

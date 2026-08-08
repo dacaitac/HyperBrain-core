@@ -180,7 +180,155 @@ class ContainmentCopyIT {
         assertThat(events).isEqualTo(1);
     }
 
+    @Test
+    @DisplayName("a task he drags into a planner block hands that block over to him for the rest of its day")
+    void a_hand_placement_hands_the_planner_block_over() {
+        UUID block = insertBlock();
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);
+
+        // The block stops being the planner's draft, so the run no longer rebuilds its membership and
+        // the task stays where he put it. Nothing is dated: the anchor dies with the block's own day.
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, block)).isEqualTo("USER");
+    }
+
+    @Test
+    @DisplayName("the echo of the planner's own containment leaves the block the planner's")
+    void an_echo_leaves_the_block_with_the_planner() {
+        UUID block = insertBlock();
+        UUID task = insertTask("Planned work", null, null, null);
+        stateRepo.assignContainer(task, block, 60, 0);
+
+        // Our own containment is mirrored to Notion and read straight back: same container, no change.
+        processor.process(taskSnapshot(task, block), taskSnapshot(task, block), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, block))
+            .isEqualTo("PLANNER");
+    }
+
+    @Test
+    @DisplayName("a block whose hour has already gone by still hands over: the guard is authority, not the clock")
+    void a_block_whose_window_already_passed_still_hands_over() {
+        // He arranges the window he is in, so the hand-over must not ask what time it is. The regenerable
+        // set is narrower than this guard on purpose — it also demands the block be still ahead — and
+        // reading that extra condition into the hand-over would let the next replan take apart the
+        // membership he just arranged, which is the exact defect this closes.
+        //
+        // The hour is taken relative to now, not from the fixture's fixed instant: "already gone by" is
+        // a statement about the clock the guard would read, so the only way the case keeps its meaning
+        // on every run is for the window to be behind whatever «now» is. The assertion itself stays
+        // deterministic — the statement has no clock in it, which is precisely what is being pinned.
+        OffsetDateTime past = OffsetDateTime.now(ZoneOffset.UTC).minusDays(1);
+        UUID block = insertBlock();
+        jdbcTemplate.update(
+            "UPDATE core_executable SET start_time = ?, end_time = ? WHERE id = ?",
+            past, past.plusHours(1), block);
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, block)).isEqualTo("USER");
+    }
+
+    @Test
+    @DisplayName("a block already under way is not handed over — it was never the planner's to give")
+    void a_started_block_is_left_alone() {
+        UUID block = insertBlock();
+        jdbcTemplate.update("UPDATE core_executable SET status = 'IN_PROGRESS' WHERE id = ?", block);
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, block))
+            .isEqualTo("PLANNER");
+    }
+
+    @Test
+    @DisplayName("seeing the same edit twice changes nothing the second time: the block is already his")
+    void a_second_observation_of_the_same_edit_writes_nothing() {
+        // SQS delivers at-least-once and Notion re-sends a page on any edit, so the same hand placement
+        // is observed more than once. The guard lives inside the predicate: once the block is his it is
+        // no longer PLANNER, so the second observation matches no row.
+        UUID block = insertBlock();
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, block), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, block)).isEqualTo("USER");
+    }
+
+    @Test
+    @DisplayName("a FOCUS row is never handed over: it accounts for work, it arranges nothing")
+    void a_focus_block_is_never_handed_over() {
+        UUID focus = insertFocusBlock();
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, focus), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, focus))
+            .isEqualTo("FOCUS");
+    }
+
+    @Test
+    @DisplayName("a block he made himself needs no hand-over — it was never the planner's to begin with")
+    void a_hand_made_block_is_left_as_it_was_born() {
+        // A block Daniel creates in Notion arrives through the ordinary ingestion of an executable, so
+        // it carries no origin at all. It is already outside the regenerable set, and the hand-over
+        // deliberately does not normalise it: nothing about it is the planner's to change.
+        UUID handMade = insertHandMadeBlock();
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, handMade), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, handMade)).isNull();
+    }
+
+    @Test
+    @DisplayName("a containment pointing at something that is not a block flips no row's origin")
+    void a_containment_on_a_non_block_hands_nothing_over() {
+        // The Notion relation is overloaded (ADR-039) and a stale or half-resolved target could name a
+        // row that is not a window at all. The type guard is what keeps a hand-over from rewriting the
+        // authority of an ordinary task.
+        UUID notABlock = insertTask("Tarea que no es un bloque", null, null, null);
+        UUID task = insertTask("Facturas", null, null, null);
+
+        processor.process(taskSnapshot(task, null), taskSnapshot(task, notABlock), ExternalSystem.NOTION);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT origin FROM core_executable WHERE id = ?", String.class, notABlock)).isNull();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    private UUID insertFocusBlock() {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, origin, start_time, end_time, system_generated)
+            VALUES (?, ?, 'Focus', 'TIME_BLOCK', 'PLANNED', 'FOCUS', ?, ?, false)
+            """, id, userId, BLOCK_START, BLOCK_END);
+        return id;
+    }
+
+    /** A block as Daniel's own is born: from Notion, with no origin and the initial status. */
+    private UUID insertHandMadeBlock() {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, start_time, end_time, system_generated)
+            VALUES (?, ?, 'Oficio', 'TIME_BLOCK', 'TODO', ?, ?, false)
+            """, id, userId, BLOCK_START, BLOCK_END);
+        return id;
+    }
 
     private UUID insertBlock() {
         UUID id = UUID.randomUUID();
@@ -217,6 +365,13 @@ class ContainmentCopyIT {
         return new ExecutableSnapshot(id, userId, parentId, cycle, "Subtask", null,
             "TASK", "TODO", null, null, null, false, null, start, null, null,
             null, null, null, false, null);
+    }
+
+    /** A reminder-backed task as it arrives from Notion, contained or not. */
+    private ExecutableSnapshot taskSnapshot(UUID id, UUID containerBlockId) {
+        return new ExecutableSnapshot(id, userId, null, null, "Facturas", null,
+            "TASK", "TODO", null, null, null, false, null, null, null, null,
+            null, null, null, false, containerBlockId);
     }
 
     private ExecutableSnapshot blockSnapshot(UUID id, OffsetDateTime start, OffsetDateTime end) {

@@ -16,9 +16,12 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 
 /**
  * Verifies that the Planner's read side sees the <b>deployed</b> block model against a real
@@ -465,7 +468,56 @@ class JdbcPlannerStateRepositoryIT {
     }
 
     @Test
-    @DisplayName("a FOCUS block held by the lead measure feeds neither signal (only PLANNER blocks do)")
+    @DisplayName("hysteresis: the window he took over by hand fed the goal just as the planner's would")
+    void a_handed_over_block_still_counts_as_a_window() {
+        // The production case: Daniel feeds his main goal by hand, dropping it the night before into a
+        // block that the hand-over then made his (origin USER). While the read demanded PLANNER, the
+        // night he spent on the goal read as famine — the flag false, the streak saturated, the release
+        // valve firing precisely because he was tending it.
+        UUID mci = insertActiveMci();
+        UUID leadMeasure = insertLeadMeasure(mci);
+        UUID handedOver = insertTimeBlock("Ventana suya", "PLANNED", "USER",
+            at(21, 0).minusDays(1), at(23, 0).minusDays(1));
+        contain(leadMeasure, handedOver);
+
+        MciWig wig = onlyWig();
+
+        assertThat(wig.receivedBlockYesterday()).isTrue();
+        assertThat(wig.degradedDaysWithoutBlock()).isZero();
+    }
+
+    @Test
+    @DisplayName("hysteresis: a block he created himself in Notion feeds the goal too, origin or not")
+    void a_notion_born_block_still_counts_as_a_window() {
+        UUID mci = insertActiveMci();
+        UUID leadMeasure = insertLeadMeasure(mci);
+        // Born through the ordinary ingestion of an executable: no origin at all, initial status.
+        UUID handMade = insertUserBlock("Hyperbrain", at(19, 0).minusDays(1), at(22, 0).minusDays(1));
+        contain(leadMeasure, handMade);
+
+        MciWig wig = onlyWig();
+
+        assertThat(wig.receivedBlockYesterday()).isTrue();
+        assertThat(wig.degradedDaysWithoutBlock()).isZero();
+    }
+
+    @Test
+    @DisplayName("release valve: the streak counts days since the last window, whoever composed it")
+    void the_streak_counts_days_since_the_last_window_of_any_authorship() {
+        UUID mci = insertActiveMci();
+        UUID leadMeasure = insertLeadMeasure(mci);
+        UUID hisOwn = insertUserBlock("Ventana suya",
+            at(9, 0).minusDays(3), at(10, 0).minusDays(3));
+        contain(leadMeasure, hisOwn);
+
+        MciWig wig = onlyWig();
+
+        assertThat(wig.receivedBlockYesterday()).isFalse();
+        assertThat(wig.degradedDaysWithoutBlock()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("a FOCUS block held by the lead measure feeds neither signal: it reserves no time")
     void focus_containment_does_not_feed_the_signals() {
         UUID mci = insertActiveMci();
         UUID leadMeasure = insertLeadMeasure(mci);
@@ -490,6 +542,65 @@ class JdbcPlannerStateRepositoryIT {
 
         assertThat(wig.receivedBlockYesterday()).isFalse();
         assertThat(wig.degradedDaysWithoutBlock()).isEqualTo(STREAK_BOUND);
+    }
+
+    // ─── what the day's walls already hold ─────────────────────────────────────
+
+    @Test
+    @DisplayName("a wall answers with what it holds, in the order the user arranged it")
+    void block_members_are_read_in_container_order() {
+        UUID block = insertUserBlock("Oficio", at(7, 0), at(10, 0));
+        UUID first = insertTask("Factura A");
+        UUID second = insertTask("Factura B");
+        // Written out of order on purpose: the answer is the arrangement, not the insertion.
+        containAt(second, block, 1);
+        containAt(first, block, 0);
+
+        assertThat(repository.loadBlockMembers(List.of(block)))
+            .containsExactly(entry(block, List.of(first, second)));
+    }
+
+    @Test
+    @DisplayName("a wall that holds nothing is simply absent — an empty window is not an empty answer")
+    void a_block_holding_nothing_is_absent() {
+        UUID empty = insertUserBlock("Ventana vacía", at(7, 0), at(10, 0));
+        UUID unknown = UUID.randomUUID();
+
+        assertThat(repository.loadBlockMembers(List.of(empty, unknown))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a day with no walls asks for nothing and gets nothing — no query, no empty IN list")
+    void no_blocks_asked_yields_an_empty_map() {
+        // The placeholder list is built from the argument, so an empty ask must short-circuit rather
+        // than reach PostgreSQL with «IN ()».
+        assertThat(repository.loadBlockMembers(List.of())).isEmpty();
+    }
+
+    @Test
+    @DisplayName("each wall answers for itself: two blocks never pool their membership")
+    void members_are_grouped_by_their_own_block() {
+        UUID morning = insertUserBlock("Oficio", at(7, 0), at(10, 0));
+        UUID evening = insertUserBlock("Torbellino", at(19, 0), at(21, 0));
+        UUID invoice = insertTask("Factura");
+        UUID errand = insertTask("Recado");
+        containAt(invoice, morning, 0);
+        containAt(errand, evening, 0);
+
+        assertThat(repository.loadBlockMembers(List.of(morning, evening)))
+            .containsOnly(entry(morning, List.of(invoice)), entry(evening, List.of(errand)));
+    }
+
+    @Test
+    @DisplayName("the membership handed out is nobody's to mutate: the floor and the prompt share it")
+    void the_membership_read_is_immutable() {
+        UUID block = insertUserBlock("Oficio", at(7, 0), at(10, 0));
+        containAt(insertTask("Factura"), block, 0);
+
+        Map<UUID, List<UUID>> members = repository.loadBlockMembers(List.of(block));
+
+        assertThatThrownBy(() -> members.get(block).add(UUID.randomUUID()))
+            .isInstanceOf(UnsupportedOperationException.class);
     }
 
     // ─── fixtures ──────────────────────────────────────────────────────────────
@@ -572,6 +683,12 @@ class JdbcPlannerStateRepositoryIT {
     private void contain(UUID memberId, UUID blockId) {
         jdbcTemplate.update("UPDATE core_executable SET container_block_id = ? WHERE id = ?",
             blockId, memberId);
+    }
+
+    private void containAt(UUID memberId, UUID blockId, int ord) {
+        jdbcTemplate.update(
+            "UPDATE core_executable SET container_block_id = ?, container_ord = ? WHERE id = ?",
+            blockId, ord, memberId);
     }
 
     private void insertFrozenBlock(UUID anchorId, OffsetDateTime start, OffsetDateTime end) {

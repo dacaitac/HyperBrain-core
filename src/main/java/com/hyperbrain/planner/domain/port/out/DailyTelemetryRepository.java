@@ -8,23 +8,26 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Read-only out-port feeding the H0 adherence rollup (#17): the day's planner blocks (with their
- * settled execution signal and WIG flag) and the count of replan commands issued that day. Kept
- * separate from {@code PlannerStateRepository} (ISP) — the rollup only reads telemetry, it never
- * materializes agenda state.
+ * Read-only out-port feeding the H0 adherence rollup (#17): the day's blocks (with their settled
+ * execution signal and WIG flag) and the count of replan commands issued that day. Kept separate from
+ * {@code PlannerStateRepository} (ISP) — the rollup only reads telemetry, it never materializes agenda
+ * state.
  */
 public interface DailyTelemetryRepository {
 
     /**
-     * Loads the planner-origin blocks placed for the user on the given local day, each carrying its
-     * WIG flag and settled actual duration.
+     * Loads the blocks that held the user's time on the given local day, each carrying its WIG flag and
+     * settled actual duration.
+     *
+     * <p>Authorship is not part of the question: a block the user arranged himself held the day exactly
+     * as a planner-composed one did, so it counts on both sides of the adherence fraction.
      *
      * @param userId the owning user; never null
      * @param day    the local day to project the blocks onto; never null
      * @param zone   the user's timezone the day boundaries are computed in; never null
      * @return the day's block observations (empty when nothing was planned)
      */
-    List<DailyBlockObservation> loadPlannerBlockObservations(UUID userId, LocalDate day, ZoneId zone);
+    List<DailyBlockObservation> loadBlockObservations(UUID userId, LocalDate day, ZoneId zone);
 
     /**
      * Counts the {@code REPLAN_AGENDA} commands processed on the given local day. Single-user MVP:

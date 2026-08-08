@@ -3,6 +3,7 @@ package com.hyperbrain.core.application;
 import com.hyperbrain.core.application.rule.BlockClosureReleaseRule;
 import com.hyperbrain.core.application.rule.CompletionOutcomeRule;
 import com.hyperbrain.core.application.rule.CompletionReactivationRule;
+import com.hyperbrain.core.application.rule.ContainmentAuthorityRule;
 import com.hyperbrain.core.application.rule.ContainmentCopyRule;
 import com.hyperbrain.core.application.rule.ContainmentEligibilityRule;
 import com.hyperbrain.core.application.rule.DomainRule;
@@ -45,15 +46,20 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
         EndTimeInvariantRule endTimeInvariantRule,
         CompletionReactivationRule completionReactivationRule,
         ContainmentEligibilityRule containmentEligibilityRule,
+        ContainmentAuthorityRule containmentAuthorityRule,
         ContainmentCopyRule containmentCopyRule,
         ProgressRecalculationRule progressRecalculationRule,
         CompletionOutcomeRule completionOutcomeRule,
         RecurrenceCloneRule recurrenceCloneRule,
         BlockClosureReleaseRule blockClosureReleaseRule
     ) {
-        // Order notes: the containment-eligibility rule runs right before the hard-copy rule so an
-        // ineligible type (a calendar event / AGENDA) has its containment cleared before the copy could
-        // re-stamp a block window onto it. The hard-copy rule itself runs after DR-01, so the child
+        // Order notes: the containment-eligibility rule runs first of the containment links so an
+        // ineligible type (a calendar event / AGENDA) has its containment cleared before anything acts
+        // on it — neither the hand-over below nor the hard copy may work from a containment that is
+        // about to be dropped. The authority link comes next: by then the containment of the merged row
+        // is settled, and handing the block over to the user is a decision about the block, not about
+        // the child's schedule, so the hard-copy rule that follows is unaffected either way. The
+        // hard-copy rule itself runs after DR-01, so the child
         // schedule it asserts is already end_time-normalized. The completion-outcome rule (clock +
         // streak) runs before DR-04 cloning so the clone copies the already-updated streak
         // (never-miss-twice on any terminal).
@@ -71,6 +77,7 @@ public class CoreDomainChangeProcessor implements DomainChangeProcessor {
             endTimeInvariantRule,
             completionReactivationRule,
             containmentEligibilityRule,
+            containmentAuthorityRule,
             containmentCopyRule,
             progressRecalculationRule,
             completionOutcomeRule,

@@ -337,7 +337,7 @@ class ProposalWallGuardTest {
         SleepSession nap = new SleepSession(WAKE.plusHours(2), WAKE.plusHours(6), 3 * 3600);
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(block(A, WAKE, WAKE.plusMinutes(60))), WAKE, BEDTIME, List.of(), List.of(),
-            Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of(nap));
+            Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), List.of(nap), Map.of());
 
         // Straight on top of the nap.
         WallGuardResult result = guard.check(
@@ -354,14 +354,14 @@ class ProposalWallGuardTest {
     private static AgendaProposalContext context(List<AgendaBlock> candidates,
                                                  Map<UUID, RetimingBand> bands) {
         return new AgendaProposalContext(candidates, WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3,
-            "NEUTRAL", Map.of(), bands, List.of());
+            "NEUTRAL", Map.of(), bands, List.of(), Map.of());
     }
 
     private static AgendaProposalContext context(List<AgendaBlock> candidates, Set<UUID> wigIds,
                                                  List<OccupiedInterval> agendaWalls,
                                                  List<OccupiedInterval> occupiedWalls) {
         return new AgendaProposalContext(candidates, WAKE, BEDTIME, agendaWalls, occupiedWalls, wigIds, 3,
-            "NEUTRAL", Map.of(), Map.of(), List.of());
+            "NEUTRAL", Map.of(), Map.of(), List.of(), Map.of());
     }
 
     private static AgendaBlock block(UUID id, OffsetDateTime start, OffsetDateTime end) {

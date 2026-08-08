@@ -70,14 +70,41 @@ class AgendaProposalContextTest {
     void absent_sleep_sessions_are_an_empty_list() {
         AgendaProposalContext context = new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "reason")),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), null);
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(), null, Map.of());
 
         assertThat(context.sleepSessions()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a wall that holds nothing answers with an empty list, not with a null the prompt trips on")
+    void a_wall_holding_nothing_reports_an_empty_list() {
+        // A commitment owns its hour and holds no membership at all, so most walls are simply absent
+        // from the map: the renderer asks every one of them and must get an answer.
+        AgendaProposalContext context = withWallMembers(Map.of(A, List.of(B)));
+
+        assertThat(context.membersOf(A)).containsExactly(B);
+        assertThat(context.membersOf(B)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("an absent membership map is an empty one — a run with no walls asks all the same")
+    void a_null_wall_member_map_becomes_empty() {
+        AgendaProposalContext context = withWallMembers(null);
+
+        assertThat(context.wallMembers()).isEmpty();
+        assertThat(context.membersOf(A)).isEmpty();
+    }
+
+    private static AgendaProposalContext withWallMembers(Map<UUID, List<UUID>> wallMembers) {
+        return new AgendaProposalContext(
+            List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "reason")),
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), Map.of(),
+            List.of(), wallMembers);
     }
 
     private static AgendaProposalContext context(Map<UUID, RetimingBand> bands) {
         return new AgendaProposalContext(
             List.of(new AgendaBlock(A, WAKE, WAKE.plusMinutes(60), false, false, "reason")),
-            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), bands, List.of());
+            WAKE, BEDTIME, List.of(), List.of(), Set.of(), 3, "NEUTRAL", Map.of(), bands, List.of(), Map.of());
     }
 }
