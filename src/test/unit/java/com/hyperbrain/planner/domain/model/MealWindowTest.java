@@ -87,4 +87,54 @@ class MealWindowTest {
             LocalTime.of(11, 30), LocalTime.of(13, 0)))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("a band flush with its own meal window is legal — the enclosure is inclusive")
+    void a_band_flush_with_its_window_is_legal() {
+        // The boundary of the enclosure rule, and the shape the rigid constructor produces.
+        MealWindow flush = new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            LocalTime.of(12, 30), LocalTime.of(13, 30));
+
+        assertThat(flush.bandStart()).isEqualTo(flush.start());
+        assertThat(flush.bandEnd()).isEqualTo(flush.end());
+    }
+
+    @Test
+    @DisplayName("rejects a band with a missing edge — a half-configured band is not a band")
+    void rejects_a_half_configured_band() {
+        assertThatThrownBy(() -> new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            null, LocalTime.of(14, 30)))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            LocalTime.of(11, 30), null))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("the plausible band never moves the anchor: the wall stays the hour kept free of work")
+    void the_band_does_not_move_the_wall() {
+        // Two different things carried by one record — widening where lunch may sit must not widen the
+        // stretch the deterministic floor keeps clear.
+        MealWindow lunch = new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30),
+            LocalTime.of(11, 30), LocalTime.of(14, 30));
+        ZoneId bogota = ZoneId.of("America/Bogota");
+
+        OccupiedInterval wall = lunch.toWall(LocalDate.of(2026, 7, 10), bogota);
+
+        assertThat(wall.start())
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 12, 30, 0, 0, ZoneOffset.ofHours(-5)));
+        assertThat(wall.end())
+            .isEqualTo(OffsetDateTime.of(2026, 7, 10, 13, 30, 0, 0, ZoneOffset.ofHours(-5)));
+    }
+
+    @Test
+    @DisplayName("resolving a band without a day or a zone fails loudly")
+    void rejects_a_band_resolution_without_day_or_zone() {
+        MealWindow lunch = new MealWindow("lunch", LocalTime.of(12, 30), LocalTime.of(13, 30));
+
+        assertThatThrownBy(() -> lunch.toBand(null, ZoneId.of("America/Bogota")))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> lunch.toBand(LocalDate.of(2026, 7, 10), null))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
 }

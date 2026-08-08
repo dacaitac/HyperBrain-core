@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.hyperbrain.cognitive.domain.model.LlmPrompt;
 import com.hyperbrain.cognitive.domain.port.out.LlmGateway;
 import com.hyperbrain.planner.application.AgendaGenerationService;
+import com.hyperbrain.planner.domain.model.DayTemplate;
 import com.hyperbrain.planner.domain.model.OccupiedInterval;
+import com.hyperbrain.planner.domain.model.TemplateSlot;
 import com.hyperbrain.support.DataFixture;
 import com.hyperbrain.support.PlannerBlockView;
 import com.hyperbrain.support.IntegrationTest;
@@ -254,6 +256,61 @@ class AgendaProposalCycleIT {
         assertThat(blockStart).isAfterOrEqualTo(OffsetDateTime.of(2026, 7, 10, 9, 0, 0, 0, UTC));
     }
 
+    @Test
+    @DisplayName("two runs over the same state, with the same model, produce the same day")
+    void the_cycle_is_deterministic_across_runs() {
+        // Bands are resolved per run from the template, the wake and the bounds — nothing about them is
+        // carried over — so a redelivery of the same morning must converge instead of walking the day
+        // forward one band at a time.
+        for (int i = 0; i < 6; i++) {
+            insertTask("Task " + i, 0.90 - i * 0.01, 30);
+        }
+        gateway.respondWith(this::moveEachToItsBandStart);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+        List<OccupiedInterval> first = sortedPlannerBlockWindows();
+        service.generate(USER, DAY, UTC, NOON, false);
+        List<OccupiedInterval> second = sortedPlannerBlockWindows();
+
+        assertThat(first).isNotEmpty();
+        assertThat(second).usingRecursiveComparison().isEqualTo(first);
+    }
+
+    @Test
+    @DisplayName("every candidate reaches the model with the band it was born in, and the band holds "
+        + "the placement the floor already made")
+    void every_candidate_carries_a_band_that_holds_its_own_window() {
+        // The invariant the guard leans on, end to end and through the real wiring: if a band ever came
+        // out narrower than the window the floor laid, the model would be told a rule it cannot obey
+        // without moving the block off the hours the floor chose, and any faithful proposal would
+        // degrade the day. Asserted on the prompt, which is the only place both are stated together.
+        for (int i = 0; i < 6; i++) {
+            insertTask("Task " + i, 0.90 - i * 0.01, 30);
+        }
+        List<JsonNode> stated = new java.util.ArrayList<>();
+        gateway.respondWith(prompt -> {
+            stated.addAll(candidateBlocks(prompt, new ObjectMapper()));
+            return keepAll(prompt, COACH_NOTE);
+        });
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        assertThat(stated).isNotEmpty();
+        assertThat(stated).allSatisfy(candidate -> {
+            JsonNode band = candidate.get("band");
+            assertThat(band).as("band of block %s", candidate.get("block_id").asText()).isNotNull();
+            assertThat(OffsetDateTime.parse(band.get("earliest_start").asText()))
+                .isBeforeOrEqualTo(OffsetDateTime.parse(candidate.get("start").asText()));
+            assertThat(OffsetDateTime.parse(band.get("latest_end").asText()))
+                .isAfterOrEqualTo(OffsetDateTime.parse(candidate.get("end").asText()));
+        });
+        // The band is named as a human reads the day, never by the technical slot key.
+        List<String> readableLabels = DayTemplate.DEFAULT.slots().stream()
+            .map(TemplateSlot::label).toList();
+        assertThat(stated).extracting(candidate -> candidate.get("band").get("name").asText())
+            .isSubsetOf(readableLabels);
+    }
+
     // ─── stub proposal builders (read the run's block ids from the prompt's control data) ─────────
 
     /**
@@ -386,6 +443,14 @@ class AgendaProposalCycleIT {
             (rs, rowNum) -> new OccupiedInterval(null,
                 rs.getObject("date_start", OffsetDateTime.class),
                 rs.getObject("date_end", OffsetDateTime.class), false));
+    }
+
+    /** The persisted windows in a stable order, so two runs can be compared as whole days. */
+    private List<OccupiedInterval> sortedPlannerBlockWindows() {
+        return plannerBlockWindows().stream()
+            .sorted(java.util.Comparator.comparing(OccupiedInterval::start)
+                .thenComparing(OccupiedInterval::end))
+            .toList();
     }
 
     private void insertAgendaEvent(OffsetDateTime start, OffsetDateTime end) {
