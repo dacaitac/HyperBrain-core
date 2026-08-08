@@ -304,6 +304,6 @@ class WriteCommandFactoryTest {
         String type, String status, OffsetDateTime start, OffsetDateTime end, String sourceCalendar) {
         return new CoreExecutable(
             UUID.randomUUID(), USER_ID, "Buy groceries", "2L milk", type, status, start, end,
-            sourceCalendar, false);
+            sourceCalendar, false, null);
     }
 }

@@ -225,6 +225,6 @@ class CalendarEventHandlerTest {
 
     private static CoreExecutable executable(UUID id) {
         return new CoreExecutable(
-            id, USER_ID, "Team meeting", null, "ACTIVITY", "TODO", null, null, "Work", false);
+            id, USER_ID, "Team meeting", null, "ACTIVITY", "TODO", null, null, "Work", false, null);
     }
 }

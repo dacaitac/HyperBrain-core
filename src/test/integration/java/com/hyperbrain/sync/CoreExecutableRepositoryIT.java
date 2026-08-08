@@ -66,6 +66,38 @@ class CoreExecutableRepositoryIT {
     }
 
     @Test
+    @DisplayName("findById: origin is read back, so the write-back can tell who authored the row")
+    void find_by_id_reads_the_origin() {
+        // Given a row the planner authored — the sync pipeline never writes origin, so it is set here
+        // the way the planner sets it
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, origin, start_time, end_time)
+            VALUES (?, ?, 'Siesta', 'ACTIVITY', 'DONE', 'PLANNER', now(), now() + interval '1 hour')
+            """, id, DataFixture.SYSTEM_USER_ID);
+
+        // When
+        CoreExecutable found = repository.findById(id).orElseThrow();
+
+        // Then the provenance travels with the row: it is what separates an episode the system
+        // observed from an activity the user completed, and the Apple write-back reads it
+        assertThat(found.origin()).isEqualTo("PLANNER");
+        assertThat(found.isTimeRecord()).isTrue();
+    }
+
+    @Test
+    @DisplayName("findById: a row nobody authored has a null origin")
+    void find_by_id_reads_a_null_origin() {
+        CoreExecutable exe = task("Buy milk", "DONE", null, null, "HyperBrain");
+        repository.insert(exe);
+
+        CoreExecutable found = repository.findById(exe.id()).orElseThrow();
+
+        assertThat(found.origin()).isNull();
+        assertThat(found.isTimeRecord()).isFalse();
+    }
+
+    @Test
     @DisplayName("findById: returns empty for unknown id")
     void find_by_unknown_id_is_empty() {
         assertThat(repository.findById(UUID.randomUUID())).isEmpty();
@@ -79,7 +111,7 @@ class CoreExecutableRepositoryIT {
 
         CoreExecutable updated = new CoreExecutable(
             original.id(), original.userId(), "New title", "updated notes", original.type(), "DONE",
-            null, null, "List B", original.systemGenerated());
+            null, null, "List B", original.systemGenerated(), original.origin());
         repository.update(updated);
 
         CoreExecutable found = repository.findById(original.id()).orElseThrow();
@@ -99,7 +131,7 @@ class CoreExecutableRepositoryIT {
         CoreExecutable updated = new CoreExecutable(
             original.id(), original.userId(), original.name(), original.description(), original.type(),
             original.status(), original.startTime(), newEnd, original.sourceCalendar(),
-            original.systemGenerated());
+            original.systemGenerated(), original.origin());
         repository.update(updated);
 
         CoreExecutable found = repository.findById(original.id()).orElseThrow();
@@ -131,12 +163,12 @@ class CoreExecutableRepositoryIT {
                                        OffsetDateTime startTime, OffsetDateTime endTime,
                                        String sourceCalendar) {
         return new CoreExecutable(UUID.randomUUID(), DataFixture.SYSTEM_USER_ID,
-            name, "some notes", "TASK", status, startTime, endTime, sourceCalendar, false);
+            name, "some notes", "TASK", status, startTime, endTime, sourceCalendar, false, null);
     }
 
     private static CoreExecutable activity(String name, OffsetDateTime startTime,
                                             OffsetDateTime endTime, String calendar) {
         return new CoreExecutable(UUID.randomUUID(), DataFixture.SYSTEM_USER_ID,
-            name, null, "ACTIVITY", "TODO", startTime, endTime, calendar, false);
+            name, null, "ACTIVITY", "TODO", startTime, endTime, calendar, false, null);
     }
 }
