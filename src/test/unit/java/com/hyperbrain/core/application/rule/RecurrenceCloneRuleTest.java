@@ -166,8 +166,9 @@ class RecurrenceCloneRuleTest {
     }
 
     @Test
-    @DisplayName("ADR-040 D4: an AGENDA with a frequency closes WITHOUT cloning — the single exemption to DR-04")
-    void agenda_never_clones_even_with_frequency() {
+    @DisplayName("an AGENDA with a frequency clones on a FAILED closure — DR-04 is uniform across every type, "
+        + "even when the closure comes from the ADR-040 day-close sweep (SYSTEM origin)")
+    void agenda_with_frequency_clones_on_sweep_closure() {
         ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot()
             .type("AGENDA").status("TODO").frequency(7.0).startTime(DUE).endTime(END).build();
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
@@ -176,13 +177,16 @@ class RecurrenceCloneRuleTest {
         ExecutableSnapshot result = rule.apply(previous, merged, ExternalSystem.SYSTEM);
 
         assertThat(result).isSameAs(merged);
-        verifyNoInteractions(stateRepo);
-        verifyNoInteractions(outboxRepo);
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+        verify(stateRepo).upsertExecutable(captor.capture());
+        assertThat(captor.getValue().type()).isEqualTo("AGENDA");
+        assertThat(captor.getValue().startTime()).isEqualTo(DUE.plusDays(7));
+        verify(outboxRepo).append(org.mockito.ArgumentMatchers.any());
     }
 
     @Test
-    @DisplayName("the AGENDA exemption is a property of the type, not of the sweep: a human closing one from Notion never clones either")
-    void agenda_exemption_holds_on_the_ingestion_path() {
+    @DisplayName("the AGENDA clone holds regardless of the caller: a human closing one from Notion clones too")
+    void agenda_with_frequency_clones_on_the_ingestion_path() {
         ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot()
             .type("AGENDA").status("TODO").frequency(1.0).startTime(DUE).build();
         ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
@@ -190,12 +194,51 @@ class RecurrenceCloneRuleTest {
 
         rule.apply(previous, merged, ExternalSystem.NOTION);
 
+        verify(stateRepo).upsertExecutable(org.mockito.ArgumentMatchers.any());
+        verify(outboxRepo).append(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    @DisplayName("an AGENDA with null frequency: no clone — the FAILED outcome by itself never implied a clone")
+    void agenda_null_frequency_no_clone() {
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("FAILED").startTime(DUE).build();
+
+        rule.apply(ExecutableSnapshotBuilder.snapshot().type("AGENDA").status("TODO").build(),
+            merged, ExternalSystem.SYSTEM);
+
         verifyNoInteractions(stateRepo);
         verifyNoInteractions(outboxRepo);
     }
 
     @Test
-    @DisplayName("an ACTIVITY with a frequency still clones on a FAILED closure — only AGENDA is exempt")
+    @DisplayName("an AGENDA with frequency zero: no clone")
+    void agenda_zero_frequency_no_clone() {
+        ExecutableSnapshot merged = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("FAILED").frequency(0.0).startTime(DUE).build();
+
+        rule.apply(ExecutableSnapshotBuilder.snapshot().type("AGENDA").status("TODO").build(),
+            merged, ExternalSystem.SYSTEM);
+
+        verifyNoInteractions(stateRepo);
+        verifyNoInteractions(outboxRepo);
+    }
+
+    @Test
+    @DisplayName("re-ingesting an AGENDA already closed as FAILED does not clone a second time — idempotency guard "
+        + "holds for the sweep's SYSTEM-origin closure the same way it does for a human closing it")
+    void agenda_already_failed_previous_failed_no_clone() {
+        ExecutableSnapshot alreadyFailed = ExecutableSnapshotBuilder.snapshot()
+            .type("AGENDA").status("FAILED").frequency(7.0).startTime(DUE).build();
+
+        rule.apply(alreadyFailed, alreadyFailed, ExternalSystem.SYSTEM);
+
+        verifyNoInteractions(stateRepo);
+        verifyNoInteractions(outboxRepo);
+    }
+
+    @Test
+    @DisplayName("an ACTIVITY with a frequency clones on a FAILED closure")
     void activity_with_frequency_still_clones_on_failure() {
         ExecutableSnapshot previous = ExecutableSnapshotBuilder.snapshot()
             .type("ACTIVITY").status("TODO").frequency(2.0).startTime(DUE).endTime(END).build();

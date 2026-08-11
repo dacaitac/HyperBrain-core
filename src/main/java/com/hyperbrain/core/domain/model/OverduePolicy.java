@@ -22,7 +22,7 @@ import java.util.Set;
  *   <tr><td>{@code HABIT}</td><td>{@code FAILED}</td></tr>
  *   <tr><td>{@code LEAD_MEASURE}</td><td>{@code FAILED}</td></tr>
  *   <tr><td>{@code TASK}</td><td>re-dated to the next day (never closed, never cloned)</td></tr>
- *   <tr><td>{@code AGENDA}</td><td>{@code FAILED}, <b>never cloned</b> even with a frequency</td></tr>
+ *   <tr><td>{@code AGENDA}</td><td>{@code FAILED}, cloned when it has a frequency (same as ACTIVITY)</td></tr>
  *   <tr><td>{@code ACTIVITY}</td><td>{@code FAILED}, cloned only when it has a frequency</td></tr>
  *   <tr><td>{@code BUYING}</td><td>date cleared (back to the dateless bag)</td></tr>
  *   <tr><td>{@code TIME_BLOCK}</td><td>{@code DONE}</td></tr>

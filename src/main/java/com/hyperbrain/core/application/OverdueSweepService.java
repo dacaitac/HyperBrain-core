@@ -59,8 +59,9 @@ import java.util.UUID;
  *   <li><b>Close as a sanctioned miss</b> ({@code HABIT}, {@code LEAD_MEASURE}, {@code ACTIVITY},
  *       {@code AGENDA}) — the conditional UPDATE is the race guard; then the completion clock and
  *       the streak reset (DR-08 outcome rule) and the recurrence clone (DR-04), in the chain's own
- *       order so the clone copies the already-reset streak. {@code AGENDA} is exempt from cloning
- *       inside DR-04 itself, so the exemption also holds when a human closes one from Notion.</li>
+ *       order so the clone copies the already-reset streak. DR-04 clones any of these types alike
+ *       when it carries a frequency — {@code AGENDA} included, whether the closure came from this
+ *       sweep or from a human closing it in Notion.</li>
  *   <li><b>Re-date</b> ({@code TASK}) — the only type that moves instead of closing. Same row, new
  *       day; see {@link #reschedule} for the order of operations.</li>
  *   <li><b>Clear the date</b> ({@code BUYING}) — back to the dateless bag, from where it can enter

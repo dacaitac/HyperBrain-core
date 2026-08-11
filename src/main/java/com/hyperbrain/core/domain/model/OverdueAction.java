@@ -9,8 +9,8 @@ public enum OverdueAction {
 
     /**
      * The executable leaves the inventory as a sanctioned miss ({@code FAILED}). It stops being
-     * schedulable, its streak resets, its completion clock is stamped and — unless the type is
-     * exempt — DR-04 schedules the next occurrence.
+     * schedulable, its streak resets, its completion clock is stamped and — when it carries a
+     * frequency — DR-04 schedules the next occurrence.
      */
     CLOSE_AS_FAILED,
 

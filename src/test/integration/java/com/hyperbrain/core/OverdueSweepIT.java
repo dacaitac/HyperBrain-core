@@ -25,8 +25,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * End-to-end tests of the ADR-040 D4 day-close sweep against a real PostgreSQL: the seven
  * behaviours of the dispatch table, the idempotence of a second run, the detach-before-re-date
- * order for a contained task, the AGENDA exemption from recurrence cloning, and the fact that the
- * sweep only ever notifies the satellites — it never deletes.
+ * order for a contained task, DR-04 recurrence cloning applied uniformly across every type
+ * (AGENDA included), and the fact that the sweep only ever notifies the satellites — it never
+ * deletes.
  */
 @IntegrationTest
 @DisplayName("Day-close sweep of what expired, by type (ADR-040 D4)")
@@ -179,8 +180,8 @@ class OverdueSweepIT {
     }
 
     @Test
-    @DisplayName("an AGENDA with a frequency fails WITHOUT cloning, while a HABIT with the same frequency schedules its next occurrence")
-    void agenda_is_the_only_type_exempt_from_recurrence_cloning() {
+    @DisplayName("an AGENDA with a frequency fails and schedules its next occurrence, same as a HABIT with the same frequency")
+    void agenda_and_habit_both_clone_their_next_occurrence() {
         UUID agenda = insertRecurring("Standup", "AGENDA", YESTERDAY_AFTERNOON, 1.0);
         UUID habit = insertRecurring("Gym", "HABIT", YESTERDAY_AFTERNOON, 1.0);
 
@@ -188,7 +189,9 @@ class OverdueSweepIT {
 
         assertThat(status(agenda)).isEqualTo("FAILED");
         assertThat(status(habit)).isEqualTo("FAILED");
-        assertThat(clonesOf("Standup")).isEmpty();
+        List<OffsetDateTime> agendaClones = clonesOf("Standup");
+        assertThat(agendaClones).hasSize(1);
+        assertThat(agendaClones.get(0)).isEqualTo(YESTERDAY_AFTERNOON.plusDays(1));
         List<OffsetDateTime> habitClones = clonesOf("Gym");
         assertThat(habitClones).hasSize(1);
         assertThat(habitClones.get(0)).isEqualTo(YESTERDAY_AFTERNOON.plusDays(1));

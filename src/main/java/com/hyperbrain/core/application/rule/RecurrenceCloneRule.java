@@ -15,7 +15,6 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 
 /*
@@ -55,18 +54,10 @@ import java.util.UUID;
  * the slot is the very key that already identifies a block across regenerations.
  *
  * <p>Guards: skipped when the executable is system-generated ({@code systemGenerated = true}),
- * when {@code frequency} is null or non-positive, when its type is exempt (see below), or when the
- * status did not transition to a closed one in this ingestion (idempotency — re-ingesting an
- * already-closed row never double-clones).
- *
- * <p><b>The AGENDA exception (ADR-040 D4).</b> Until now this rule was uniform across every type.
- * {@code AGENDA} is now the single exemption: it closes like anything else, but it <b>never
- * generates its next occurrence, not even with a {@code frequency}</b>. An AGENDA row mirrors a
- * calendar event the user does not own through this system (ADR-009/ADR-028: it is the immovable
- * floor of the day, and the calendar — not the domain — owns its recurrence). Cloning it here
- * would fabricate a second, domain-authored occurrence next to the one the calendar will deliver
- * on its own. The exemption is a property of the type, not of the caller, so it holds on both
- * paths: the ingestion chain and the ADR-040 day-close sweep.
+ * when {@code frequency} is null or non-positive, or when the status did not transition to a
+ * closed one in this ingestion (idempotency — re-ingesting an already-closed row never
+ * double-clones). The rule is uniform across every type, {@code AGENDA} included: any executable
+ * with a {@code frequency} clones its next occurrence on closure, regardless of type.
  */
 @Component
 public class RecurrenceCloneRule implements DomainRule {
@@ -74,9 +65,6 @@ public class RecurrenceCloneRule implements DomainRule {
     private static final Logger log = LoggerFactory.getLogger(RecurrenceCloneRule.class);
 
     private static final String TODO = "TODO";
-
-    /** Types exempt from recurrence cloning regardless of their frequency (ADR-040 D4). */
-    private static final Set<String> NON_CLONING_TYPES = Set.of("AGENDA");
 
     private final ExecutableStateRepository stateRepo;
     private final OutboxRepository outboxRepo;
@@ -90,12 +78,6 @@ public class RecurrenceCloneRule implements DomainRule {
     public ExecutableSnapshot apply(ExecutableSnapshot previous, ExecutableSnapshot merged,
                                     ExternalSystem origin) {
         if (merged.systemGenerated() || !hasFrequency(merged) || !becameClosed(previous, merged)) {
-            return merged;
-        }
-        if (NON_CLONING_TYPES.contains(merged.type())) {
-            log.info("Executable {} of type {} closed as {} with frequency {}; recurrence cloning "
-                    + "suppressed (ADR-040 D4: the calendar owns an AGENDA's next occurrence)",
-                merged.id(), merged.type(), merged.status(), merged.frequency());
             return merged;
         }
         ExecutableSnapshot clone = withContainer(buildClone(merged), containerForClone(merged));
