@@ -1,7 +1,6 @@
 package com.hyperbrain.core.application.rule;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
@@ -48,8 +47,7 @@ class ContainmentCopyRuleTest {
     void setUp() {
         stateRepo = mock(ExecutableStateRepository.class);
         outboxRepo = mock(OutboxRepository.class);
-        rule = new ContainmentCopyRule(stateRepo, outboxRepo,
-            new ObjectMapper().registerModule(new JavaTimeModule()));
+        rule = new ContainmentCopyRule(stateRepo, outboxRepo);
     }
 
     @Test
@@ -96,8 +94,8 @@ class ContainmentCopyRuleTest {
     }
 
     @Test
-    @DisplayName("an inbound human edit of a contained child's date is re-asserted with a visible Sync Note")
-    void inbound_edit_reasserts_with_sync_note() {
+    @DisplayName("an inbound human edit of a contained child's date is re-asserted with a full mirror")
+    void inbound_edit_reasserts_with_full_mirror() {
         when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.of(
             new ContainerSchedule(BLOCK_ID, "Deep work", BLOCK_START, null, CYCLE_ID)));
         ExecutableSnapshot previous = child("TASK", BLOCK_START, null, CYCLE_ID);
@@ -109,9 +107,26 @@ class ContainmentCopyRuleTest {
         assertThat(result.startTime()).isEqualTo(BLOCK_START);
         ArgumentCaptor<OutboxEvent> captor = ArgumentCaptor.forClass(OutboxEvent.class);
         verify(outboxRepo).append(captor.capture());
-        assertThat(captor.getValue().payload())
-            .contains("\"reflection\":\"CANONICAL_STATE\"")
-            .contains("Deep work");
+        assertThat(captor.getValue().aggregateId()).isEqualTo(CHILD_ID.toString());
+        assertThat(captor.getValue().sourceSystem()).isEqualTo(ExecutableOutboxEvents.SOURCE_SYSTEM);
+        assertThat(captor.getValue().eventType()).isEqualTo("ExecutableUpdatedEvent");
+        assertThat(captor.getValue().payload()).doesNotContain("\"reflection\"");
+    }
+
+    @Test
+    @DisplayName("a first-time ingestion (no previous snapshot) that mismatches the container is "
+        + "silently corrected, without a reassertion event — there is nothing to compare a move against")
+    void first_ingestion_mismatch_is_silently_corrected() {
+        when(stateRepo.findContainerSchedule(CHILD_ID, null, null)).thenReturn(Optional.of(
+            new ContainerSchedule(BLOCK_ID, "Deep work", BLOCK_START, null, CYCLE_ID)));
+        // A human-authored row lands with no prior snapshot (e.g. a CREATE) already carrying a
+        // date that disagrees with its container — humanMove requires a `previous` to diff against.
+        ExecutableSnapshot merged = child("TASK", BLOCK_START.plusDays(1), null, CYCLE_ID);
+
+        ExecutableSnapshot result = rule.apply(null, merged, ExternalSystem.APPLE);
+
+        assertThat(result.startTime()).isEqualTo(BLOCK_START);
+        verify(outboxRepo, never()).append(any());
     }
 
     @Test

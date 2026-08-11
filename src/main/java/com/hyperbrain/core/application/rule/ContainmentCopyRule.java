@@ -1,14 +1,11 @@
 package com.hyperbrain.core.application.rule;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hyperbrain.core.application.event.ExecutableOutboxEvents;
 import com.hyperbrain.core.domain.model.ContainedSchedule;
 import com.hyperbrain.core.domain.model.ContainerSchedule;
 import com.hyperbrain.core.domain.model.ContainmentPolicy;
 import com.hyperbrain.core.domain.port.out.ExecutableStateRepository;
 import com.hyperbrain.shared.messaging.ExternalSystem;
-import com.hyperbrain.shared.outbox.OutboxEvent;
 import com.hyperbrain.shared.outbox.OutboxRepository;
 import com.hyperbrain.sync.domain.model.ExecutableSnapshot;
 import org.slf4j.Logger;
@@ -16,9 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.OffsetDateTime;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -40,9 +35,10 @@ import java.util.UUID;
  * <ul>
  *   <li><b>Child side (assert / reassert).</b> When the ingested row is contained, its date
  *       and cycle are rewritten to the container-derived values before persisting. An inbound
- *       human edit that tried to move them is re-asserted with a visible {@code Sync Note}
- *       ("the container owns the date; move it or detach"). Detaching (clearing the container
- *       or parent) keeps the copied values — they persist by design.</li>
+ *       human edit that tried to move them is re-asserted: the corrected row is re-mirrored in
+ *       full to Notion and Apple (same {@code ExecutableUpdatedEvent} the container side stages),
+ *       so the human sees the reverted date instead of the one they typed. Detaching (clearing
+ *       the container or parent) keeps the copied values — they persist by design.</li>
  *   <li><b>Container side (propagate).</b> When the ingested row's schedule or cycle changed,
  *       the copy is pushed to every transitive descendant in one batch UPDATE, with one
  *       {@code ExecutableUpdatedEvent} staged per actually-changed child so mirrors re-project
@@ -57,8 +53,8 @@ import java.util.UUID;
  * <p><b>Where the criterion lives (ADR-040 D11).</b> What the child must end up carrying is
  * {@link ContainmentPolicy#assertedSchedule} — a pure policy with two callers: this chain link,
  * and the containment operation core publishes for the Planner. This class contributes the
- * ingestion-specific parts only: the re-assertion Sync Note on a human move, and the container-side
- * fan-out.
+ * ingestion-specific parts only: staging the outbox re-mirror on a human move, and the
+ * container-side fan-out.
  */
 @Component
 public class ContainmentCopyRule implements DomainRule {
@@ -69,13 +65,10 @@ public class ContainmentCopyRule implements DomainRule {
 
     private final ExecutableStateRepository stateRepo;
     private final OutboxRepository outboxRepo;
-    private final ObjectMapper objectMapper;
 
-    public ContainmentCopyRule(ExecutableStateRepository stateRepo, OutboxRepository outboxRepo,
-                               ObjectMapper objectMapper) {
+    public ContainmentCopyRule(ExecutableStateRepository stateRepo, OutboxRepository outboxRepo) {
         this.stateRepo = stateRepo;
         this.outboxRepo = outboxRepo;
-        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -114,7 +107,7 @@ public class ContainmentCopyRule implements DomainRule {
         ExecutableSnapshot asserted = withSchedule(
             merged, asserted0.startTime(), asserted0.endTime(), asserted0.cycleId());
         if (humanMove) {
-            stageReassertion(asserted.id(), container.containerName());
+            stageChildUpdate(asserted.id());
             log.info("Contained executable {}: inbound {} edit of date/cycle re-asserted to "
                 + "container {} (ADR-039)", asserted.id(), origin, container.containerId());
         }
@@ -165,34 +158,12 @@ public class ContainmentCopyRule implements DomainRule {
             s.systemGenerated(), s.containerBlockId());
     }
 
+    /**
+     * Stages a plain SYSTEM update notification for a contained executable whose row just
+     * changed — the child-side re-assertion and the container-side fan-out both drive through
+     * here, so both directions re-mirror the corrected row in full to Notion and Apple.
+     */
     private void stageChildUpdate(UUID childId) {
         outboxRepo.append(ExecutableOutboxEvents.updated(childId));
-    }
-
-    /**
-     * Stages the visible re-assertion: a SYSTEM CANONICAL_STATE reflection whose payload
-     * carries the {@code Sync Note} text the Notion propagator writes onto the page (field
-     * scoped, so the human-edit guard never discards it).
-     */
-    private void stageReassertion(UUID executableId, String containerName) {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("local_id", executableId.toString());
-        payload.put("operation", "UPDATED");
-        payload.put("reflection", "CANONICAL_STATE");
-        payload.put("sync_note",
-            "Schedule is owned by '" + containerName + "'; move that container or remove the "
-                + "containment to reschedule this item");
-        outboxRepo.append(new OutboxEvent(
-            UUID.randomUUID(), ExecutableOutboxEvents.EXECUTABLE_AGGREGATE, executableId.toString(),
-            "ExecutableUpdatedEvent", toJson(payload),
-            ExecutableOutboxEvents.SOURCE_SYSTEM, OffsetDateTime.now()));
-    }
-
-    private String toJson(Map<String, Object> payload) {
-        try {
-            return objectMapper.writeValueAsString(payload);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("Containment reassertion payload serialization failed", ex);
-        }
     }
 }

@@ -181,6 +181,33 @@ class ContainmentCopyIT {
     }
 
     @Test
+    @DisplayName("regression: an inbound human edit of a contained child stages a plain full mirror, "
+        + "never a reflection-scoped patch (the correction was silently dropped by the Notion "
+        + "CANONICAL_STATE allowlist before this fix)")
+    void inbound_edit_reasserts_without_reflection_marker() {
+        UUID block = insertBlock();
+        UUID task = insertTask("Task", null, null, null);
+        stateRepo.assignContainer(task, block, 60, 0);
+        stateRepo.copyScheduleToContained(block, BLOCK_START, BLOCK_END, cycleId);
+        jdbcTemplate.update("DELETE FROM outbox_events");
+
+        // He drags the child to a different day in Notion; the row he sent back to the ingestion
+        // chain still carries the container's link, just a wrong date.
+        ExecutableSnapshot previous = containedTaskSnapshot(task, block, BLOCK_START, cycleId);
+        ExecutableSnapshot edited = containedTaskSnapshot(task, block, BLOCK_START.plusDays(2), cycleId);
+
+        processor.process(previous, edited, ExternalSystem.NOTION);
+
+        assertRow(task, BLOCK_START, null, cycleId);
+        String payload = jdbcTemplate.queryForObject(
+            "SELECT payload FROM outbox_events WHERE aggregate_id = ? AND event_type = 'ExecutableUpdatedEvent'",
+            String.class, task.toString());
+        // Unmarked payload ⇒ NotionEventPropagator.reflectionScope returns null ⇒ full mirror,
+        // so the corrected Date reaches Notion instead of being filtered by CANONICAL_REFLECTION_PROPS.
+        assertThat(payload).doesNotContain("\"reflection\"");
+    }
+
+    @Test
     @DisplayName("a task he drags into a planner block hands that block over to him for the rest of its day")
     void a_hand_placement_hands_the_planner_block_over() {
         UUID block = insertBlock();
@@ -371,6 +398,14 @@ class ContainmentCopyIT {
     private ExecutableSnapshot taskSnapshot(UUID id, UUID containerBlockId) {
         return new ExecutableSnapshot(id, userId, null, null, "Facturas", null,
             "TASK", "TODO", null, null, null, false, null, null, null, null,
+            null, null, null, false, containerBlockId);
+    }
+
+    /** A reminder-backed task contained in a {@code TIME_BLOCK}, carrying its own start + cycle. */
+    private ExecutableSnapshot containedTaskSnapshot(UUID id, UUID containerBlockId,
+                                                      OffsetDateTime start, UUID cycle) {
+        return new ExecutableSnapshot(id, userId, null, cycle, "Task", null,
+            "TASK", "TODO", null, null, null, false, null, start, null, null,
             null, null, null, false, containerBlockId);
     }
 
