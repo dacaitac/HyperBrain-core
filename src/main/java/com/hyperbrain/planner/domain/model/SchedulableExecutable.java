@@ -25,12 +25,12 @@ import java.util.UUID;
  * @param estimatedMinutes     {@code core_execution_profile.estimated_minutes}; used by the
  *                             without-subtasks branch; null when unestimated
  * @param dueInstant           the executable's due timestamp ({@code COALESCE(end_time, start_time)});
- *                             when non-null it scopes WHICH day the executable is schedulable (the
- *                             admission rule in {@code AgendaGenerationService}, ADR-040 D3: today's
- *                             items plus the dateless bag, nothing else). Since ADR-026 D4 it does not
- *                             seed WHERE inside the day the work lands, and since the window model it
- *                             does not seed anything at all — work sits at the start of the window that
- *                             holds it. Null when no due date is set
+ *                             it scopes WHICH day the executable is schedulable (the admission rule in
+ *                             {@code AgendaGenerationService}, ADR-040 D3 as amended: the day's items
+ *                             and nothing else — a null due instant is inventory, never a candidate).
+ *                             Since ADR-026 D4 it does not seed WHERE inside the day the work lands,
+ *                             and since the window model it does not seed anything at all — work sits
+ *                             at the start of the window that holds it. Null when no due date is set
  * @param cycleId              the {@code core_executable.cycle_id} this executable belongs to; the
  *                             context key the humanized floor batches on (same Cycle/type placed
  *                             adjacently to cut context-switching, H1 rule 4); null when the executable

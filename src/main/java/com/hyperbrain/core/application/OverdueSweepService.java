@@ -37,9 +37,9 @@ import java.util.UUID;
  * ADR-040 D4 — the retirement of work that is not going to happen, dispatched by type.
  *
  * <p><b>Why this runs before the window model.</b> The admission rule only lets the target day's
- * items and the dateless ones into a day (ADR-040 D3). Without this an item left undone stays stuck
- * in the past and never becomes a candidate again. This is what leaves the bag the next run draws
- * from clean.
+ * items into a day (ADR-040 D3, as amended). Without this an item left undone stays stuck in the
+ * past and never becomes a candidate again — re-dating it here is the only road back onto a plan.
+ * This is what leaves the bag the next run draws from clean.
  *
  * <p><b>Two selectors, one policy</b> (Daniel, 2026-08-07). What is retired is chosen in two
  * independent ways, and both hand the same candidates to the same table:
@@ -64,8 +64,8 @@ import java.util.UUID;
  *       sweep or from a human closing it in Notion.</li>
  *   <li><b>Re-date</b> ({@code TASK}) — the only type that moves instead of closing. Same row, new
  *       day; see {@link #reschedule} for the order of operations.</li>
- *   <li><b>Clear the date</b> ({@code BUYING}) — back to the dateless bag, from where it can enter
- *       any day. A shopping list has no day.</li>
+ *   <li><b>Clear the date</b> ({@code BUYING}) — back to the dateless bag, where it waits without
+ *       pressing on any day. A shopping list has no day.</li>
  * </ul>
  *
  * <p><b>Idempotence</b> is a property of every write, not of a marker column: the candidate query

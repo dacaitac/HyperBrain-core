@@ -334,15 +334,18 @@ public class AgendaGenerationService {
 
         OffsetDateTime dayStart = targetDay.atStartOfDay(zone).toOffsetDateTime();
         OffsetDateTime dayEnd = targetDay.plusDays(1).atStartOfDay(zone).toOffsetDateTime();
-        // Admission (ADR-040 D3): the day takes what is dated FOR it, plus the dateless bag it draws
-        // from. Nothing else — an overdue item is not dragged forward here, because the day-close sweep
-        // (D4) is what re-dates it; pulling the past into today as well would double-count it and undo
-        // the sweep's work. A future-dated item waits for its own day.
+        // Admission (ADR-040 D3, as amended): the day takes what is dated FOR it, and nothing else —
+        // neither the dateless bag nor the past. A dateless executable is inventory, not a candidate:
+        // it enters a day only once it carries that day's date, which keeps what the day holds a
+        // decision the user made and not one the run improvises. An overdue item is not dragged forward
+        // here either, because the day-close sweep (D4) is what re-dates it; pulling the past into today
+        // as well would double-count it and undo the sweep's work. A future-dated item waits for its
+        // own day.
         List<SchedulableExecutable> ranked = repository.loadRankedExecutables(userId, dayStart, dayEnd, window.lowerBound())
             .stream()
             .filter(e -> !excludedIds.contains(e.id()))
-            .filter(e -> e.dueInstant() == null
-                      || e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
+            .filter(e -> e.dueInstant() != null
+                      && e.dueInstant().atZoneSameInstant(zone).toLocalDate().equals(targetDay))
             .toList();
         List<MciWig> wigPortfolio = repository.loadWigPortfolio(userId, now);
         List<OccupiedInterval> occupied = new ArrayList<>(repository.loadOccupiedIntervals(

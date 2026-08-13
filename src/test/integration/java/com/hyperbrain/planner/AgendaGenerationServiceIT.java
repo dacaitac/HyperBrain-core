@@ -607,7 +607,7 @@ class AgendaGenerationServiceIT {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
         for (int i = 0; i < 15; i++) {
-            insertTask("Task " + i, 0.99 - i * 0.02, 60);
+            insertTaskDueOn("Task " + i, 0.99 - i * 0.02, 60, LocalDate.of(2026, 7, 22));
         }
         // 2026-07-22T09:23:36Z = 2026-07-22 04:23 America/Bogota → today = 07-22.
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 9, 23, 36, 0, UTC);
@@ -616,7 +616,8 @@ class AgendaGenerationServiceIT {
 
         int todayBlocks = localDayCount(bogota, 2026, 7, 22);
         int tomorrowBlocks = localDayCount(bogota, 2026, 7, 23);
-        // Today gets the bulk (its full window lies ahead), tomorrow only the overflow.
+        // Today gets the work, since its full window lies ahead — and it keeps all of it: what does not
+        // fit is no longer spilled onto tomorrow, because tomorrow only takes what is dated for tomorrow.
         assertThat(todayBlocks).isGreaterThan(tomorrowBlocks);
         // The day opens at 07:30 Bogota, never in the pre-wake hours: the personal-routine band runs
         // 07:00–08:00 from the local wake, and the breakfast anchor (07:00–07:30) takes its first half
@@ -644,7 +645,7 @@ class AgendaGenerationServiceIT {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
         for (int i = 0; i < 20; i++) {
-            insertTask("Task " + i, 0.99 - i * 0.01, 60);
+            insertTaskDueOn("Task " + i, 0.99 - i * 0.01, 60, LocalDate.of(2026, 7, 22));
         }
         // Morning dispatch (full-day) fills today near the occupancy cap.
         OffsetDateTime dispatch = OffsetDateTime.of(2026, 7, 22, 12, 0, 0, 0, UTC); // 07:00 Bogota
@@ -666,21 +667,39 @@ class AgendaGenerationServiceIT {
     void task_due_in_start_time_is_scheduled_on_its_due_day() {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
-        UUID undated = insertTask("Undated task", 0.90, 30);
-        UUID dueTomorrow = insertTask("Sleep management", 0.95, 30);
-        // DR-01: a TASK's due date lives in start_time (end_time is forbidden). Due tomorrow.
-        jdbcTemplate.update("UPDATE core_executable SET start_time = ?, end_time = NULL WHERE id = ?",
-            OffsetDateTime.of(2026, 7, 23, 15, 0, 0, 0, UTC), dueTomorrow); // 10:00 Bogota tomorrow
+        LocalDate today = LocalDate.of(2026, 7, 22);
+        UUID dueToday = insertTaskDueOn("Facturas", 0.90, 30, today);
+        UUID dueTomorrow = insertTaskDueOn("Sleep management", 0.95, 30, today.plusDays(1));
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 12, 0, 0, 0, UTC); // 07:00 Bogota today
 
-        service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, false);
+        service.generate(USER, today, bogota, occurredAt, false);
 
         // The tomorrow-due task is not scheduled today (its start_time due date is respected)...
         assertThat(count("SELECT count(*) FROM planner_blocks WHERE executable_id = ?", dueTomorrow))
             .isZero();
-        // ...while the undated task is planned today.
-        assertThat(count("SELECT count(*) FROM planner_blocks WHERE executable_id = ?", undated))
+        // ...while the one dated for today is.
+        assertThat(count("SELECT count(*) FROM planner_blocks WHERE executable_id = ?", dueToday))
             .isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("admission: an undated task is inventory — no day ever takes it")
+    void an_undated_task_is_never_admitted() {
+        // The decision Daniel took on 2026-08-13, reversing the dateless half of ADR-040 D3: a day is
+        // planned out of what is dated FOR it and nothing else. Drawing from the dateless bag filled the
+        // day with work he had never put on it, so a task with no date now waits in inventory until it
+        // gets one — by his hand or by the day-close sweep's re-dating.
+        UUID undated = insertUndatedTask("Pedir cita en movilidad", 0.99, 30);
+        UUID dated = insertTask("Facturas", 0.10, 30);
+
+        service.generate(USER, DAY, UTC, NOON, false);
+
+        // Even at the top of the ranking it is left out, while the lowest-ranked dated task is planned:
+        // an empty day would satisfy the first assertion for the wrong reason.
+        assertThat(scheduledExecutableIds()).contains(dated).doesNotContain(undated);
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT container_block_id FROM core_executable WHERE id = ?", UUID.class, undated))
+            .isNull();
     }
 
     private int count(String sql, Object arg) {
@@ -693,14 +712,12 @@ class AgendaGenerationServiceIT {
     void an_overdue_task_is_not_admitted() {
         jdbcTemplate.update("UPDATE sys_user SET timezone = 'America/Bogota' WHERE id = ?", USER);
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
-        UUID overdue = insertTask("Overdue", 0.9, 30);
-        jdbcTemplate.update("UPDATE core_executable SET end_time = ? WHERE id = ?",
-            OffsetDateTime.of(2026, 7, 21, 17, 0, 0, 0, UTC), overdue); // due yesterday
+        UUID overdue = insertTaskDueOn("Overdue", 0.9, 30, LocalDate.of(2026, 7, 21)); // due yesterday
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 12, 0, 0, 0, UTC); // 07:00 Bogota
 
         service.generate(USER, java.time.LocalDate.of(2026, 7, 22), bogota, occurredAt, true);
 
-        // The day takes what is dated FOR it plus the dateless bag, and nothing else (ADR-040 D3).
+        // The day takes what is dated FOR it, and nothing else (ADR-040 D3, as amended).
         // What was left undone yesterday returns through the day-close sweep, which re-dates it to
         // today; pulling it forward here as well would double-count it and undo the sweep's work.
         assertThat(jdbcTemplate.queryForObject(
@@ -728,7 +745,8 @@ class AgendaGenerationServiceIT {
     @DisplayName("end-of-day replan plans the NEXT day: the 48h window skips today's empty window and "
         + "materializes tomorrow")
     void replan_at_bedtime_plans_the_next_day() {
-        UUID task = insertTask("Work", 0.9, 60);
+        // Dated for tomorrow: today has no forward window left, and a day only takes its own items.
+        UUID task = insertTaskDueOn("Work", 0.9, 60, DAY.plusDays(1));
         OffsetDateTime bedtime = OffsetDateTime.of(2026, 7, 10, 23, 0, 0, 0, UTC);
 
         boolean replanned = service.materializeReplanIfNew(USER, bedtime, UTC);
@@ -782,8 +800,11 @@ class AgendaGenerationServiceIT {
         service.generate(USER, DAY, UTC, NOON, true);
         assertThat(scheduledExecutableIds()).doesNotContain(habit);
 
-        // The next day it is due again: its completion clock is now before the day, so it returns.
+        // The next day it is due again — the recurrence (DR-04) carries its date forward, which is what
+        // makes it a candidate at all — and its completion clock is now before the day, so it returns.
         LocalDate nextDay = DAY.plusDays(1);
+        jdbcTemplate.update("UPDATE core_executable SET start_time = ? WHERE id = ?",
+            nextDay.atTime(12, 0).atOffset(UTC), habit);
         service.generate(USER, nextDay, UTC,
             OffsetDateTime.of(2026, 7, 11, 12, 0, 0, 0, UTC), false);
         assertThat(scheduledExecutableIds()).contains(habit);
@@ -905,13 +926,11 @@ class AgendaGenerationServiceIT {
     private UUID insertHabit(String name, double priority, int estimatedMinutes) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, frequency)
-            VALUES (?, ?, ?, 'HABIT', 'IN_PROGRESS', ?, 1)
-            """, id, USER, name, priority);
-        jdbcTemplate.update("""
-            INSERT INTO core_execution_profile (executable_id, estimated_minutes)
-            VALUES (?, ?)
-            """, id, estimatedMinutes);
+            INSERT INTO core_executable
+                (id, user_id, name, type, status, priority_score, frequency, start_time)
+            VALUES (?, ?, ?, 'HABIT', 'IN_PROGRESS', ?, 1, ?)
+            """, id, USER, name, priority, DAY.atTime(12, 0).atOffset(UTC));
+        insertProfile(id, estimatedMinutes);
         return id;
     }
 
@@ -921,17 +940,42 @@ class AgendaGenerationServiceIT {
                 + "AND status = 'PLANNED'", UUID.class, executableId);
     }
 
+    /**
+     * A task dated FOR the day under test — which is what makes it a candidate at all: admission takes
+     * the day's own items and nothing else (ADR-040 D3, as amended). DR-01 puts a TASK's due date in
+     * {@code start_time}; the hour is irrelevant, since the due instant scopes the day and never seeds
+     * where inside it the work lands.
+     */
     private UUID insertTask(String name, double priority, int estimatedMinutes) {
+        return insertTaskDueOn(name, priority, estimatedMinutes, DAY);
+    }
+
+    /** An undated task: inventory, never a candidate — the admission rule leaves it out of every day. */
+    private UUID insertUndatedTask(String name, double priority, int estimatedMinutes) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
             INSERT INTO core_executable (id, user_id, name, type, status, priority_score)
             VALUES (?, ?, ?, 'TASK', 'TODO', ?)
             """, id, USER, name, priority);
+        insertProfile(id, estimatedMinutes);
+        return id;
+    }
+
+    private UUID insertTaskDueOn(String name, double priority, int estimatedMinutes, LocalDate dueDay) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, start_time)
+            VALUES (?, ?, ?, 'TASK', 'TODO', ?, ?)
+            """, id, USER, name, priority, dueDay.atTime(12, 0).atOffset(UTC));
+        insertProfile(id, estimatedMinutes);
+        return id;
+    }
+
+    private void insertProfile(UUID executableId, int estimatedMinutes) {
         jdbcTemplate.update("""
             INSERT INTO core_execution_profile (executable_id, estimated_minutes)
             VALUES (?, ?)
-            """, id, estimatedMinutes);
-        return id;
+            """, executableId, estimatedMinutes);
     }
 
     private UUID insertTaskDueAt(String name, double priority, int estimatedMinutes,

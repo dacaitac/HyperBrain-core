@@ -130,7 +130,7 @@ class AgendaProposalCycleIT {
         jdbcTemplate.update("DELETE FROM planner_agenda_materialization");
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
         for (int i = 0; i < 15; i++) {
-            insertTask("NoDate " + i, 0.90 - i * 0.01, 30);
+            insertTaskDueOn("Task " + i, 0.90 - i * 0.01, 30, LocalDate.of(2026, 7, 22));
         }
         // The LLM drops every candidate every day (the pathology that produced "today → 2"). The backstop
         // sees > max-drop-fraction and degrades each day to the humanized floor, which fills today.
@@ -141,7 +141,7 @@ class AgendaProposalCycleIT {
 
         int today = localDayCount(bogota, 2026, 7, 22);
         int tomorrow = localDayCount(bogota, 2026, 7, 23);
-        assertThat(today).isGreaterThan(tomorrow);   // bulk on today, coherent overflow to tomorrow
+        assertThat(today).isGreaterThan(tomorrow);   // today's work stays on today, never spilled forward
         assertThat(today).isGreaterThan(5);           // a full-ish day — never the gutted 2
     }
 
@@ -153,7 +153,7 @@ class AgendaProposalCycleIT {
         jdbcTemplate.update("DELETE FROM planner_agenda_materialization");
         java.time.ZoneId bogota = java.time.ZoneId.of("America/Bogota");
         for (int i = 0; i < 15; i++) {
-            insertTask("NoDate " + i, 0.90 - i * 0.01, 30);
+            insertTaskDueOn("Task " + i, 0.90 - i * 0.01, 30, LocalDate.of(2026, 7, 22));
         }
         gateway.respondWith(prompt -> keepAll(prompt, null));
         OffsetDateTime occurredAt = OffsetDateTime.of(2026, 7, 22, 9, 23, 36, 0, UTC); // 04:23 Bogota
@@ -413,12 +413,22 @@ class AgendaProposalCycleIT {
 
     // ─── fixtures ────────────────────────────────────────────────────────────────
 
+    /**
+     * A task dated FOR the day under test — the admission rule takes the day's own items and nothing
+     * else (ADR-040 D3, as amended), so a dateless task would never reach the proposal at all. DR-01
+     * puts a TASK's due date in {@code start_time}.
+     */
     private java.util.UUID insertTask(String name, double priority, int estimatedMinutes) {
+        return insertTaskDueOn(name, priority, estimatedMinutes, DAY);
+    }
+
+    private java.util.UUID insertTaskDueOn(String name, double priority, int estimatedMinutes,
+                                           LocalDate dueDay) {
         java.util.UUID id = java.util.UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_executable (id, user_id, name, type, status, priority_score)
-            VALUES (?, ?, ?, 'TASK', 'TODO', ?)
-            """, id, USER, name, priority);
+            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, start_time)
+            VALUES (?, ?, ?, 'TASK', 'TODO', ?, ?)
+            """, id, USER, name, priority, dueDay.atTime(12, 0).atOffset(UTC));
         jdbcTemplate.update(
             "INSERT INTO core_execution_profile (executable_id, estimated_minutes) VALUES (?, ?)",
             id, estimatedMinutes);

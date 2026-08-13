@@ -17,13 +17,13 @@ public enum OverdueAction {
     /**
      * The executable is <b>moved</b> to the sweep's reference day instead of being closed: same
      * row, new date. This is what makes an undone item a candidate again, since the admission rule
-     * only admits today's items and the dateless ones (ADR-040 D3).
+     * only admits the day's own items (ADR-040 D3, as amended).
      */
     RESCHEDULE,
 
     /**
-     * The executable loses its date and returns to the dateless bag, from which it may enter any
-     * day. A shopping list has no day.
+     * The executable loses its date and returns to the dateless bag, where it waits without pressing
+     * on any day. A shopping list has no day.
      */
     CLEAR_DATE,
 

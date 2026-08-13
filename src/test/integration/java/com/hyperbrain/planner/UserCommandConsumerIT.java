@@ -731,12 +731,17 @@ class UserCommandConsumerIT {
             """, UUID.randomUUID(), USER, startTime, endTime, score, collectedAt);
     }
 
+    /**
+     * A task dated FOR the day the replan lands on: admission takes the day's own items and nothing
+     * else (ADR-040 D3, as amended), so a dateless task would never be planned. DR-01 puts a TASK's
+     * due date in {@code start_time}.
+     */
     private void insertTask(String name, double priority, int estimatedMinutes) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_executable (id, user_id, name, type, status, priority_score)
-            VALUES (?, ?, ?, 'TASK', 'TODO', ?)
-            """, id, USER, name, priority);
+            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, start_time)
+            VALUES (?, ?, ?, 'TASK', 'TODO', ?, ?)
+            """, id, USER, name, priority, DAY.atTime(12, 0).atOffset(ZoneOffset.UTC));
         jdbcTemplate.update("""
             INSERT INTO core_execution_profile (executable_id, estimated_minutes)
             VALUES (?, ?)

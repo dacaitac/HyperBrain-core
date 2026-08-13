@@ -163,12 +163,16 @@ class AgendaJobConsumerIT {
             """.formatted(USER, USER, referenceInstant);
     }
 
+    /**
+     * A task dated FOR the day the job materializes: admission takes the day's own items and nothing
+     * else (ADR-040 D3, as amended). DR-01 puts a TASK's due date in {@code start_time}.
+     */
     private void insertTask(String name, double priority, int estimatedMinutes) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("""
-            INSERT INTO core_executable (id, user_id, name, type, status, priority_score)
-            VALUES (?, ?, ?, 'TASK', 'TODO', ?)
-            """, id, USER, name, priority);
+            INSERT INTO core_executable (id, user_id, name, type, status, priority_score, start_time)
+            VALUES (?, ?, ?, 'TASK', 'TODO', ?, ?)
+            """, id, USER, name, priority, DUE_NOW.withHour(12).withMinute(0));
         jdbcTemplate.update("""
             INSERT INTO core_execution_profile (executable_id, estimated_minutes)
             VALUES (?, ?)
