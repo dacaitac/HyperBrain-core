@@ -15,6 +15,7 @@ import com.hyperbrain.core.domain.model.ReleaseCause;
 import com.hyperbrain.core.domain.port.in.ExecutableContainmentService;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
+import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
 import com.hyperbrain.sync.support.ExecutableSnapshotBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,6 +25,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.UUID;
@@ -42,6 +44,7 @@ class CalendarEventHandlerTest {
     private OutboxRepository outboxRepo;
     private OnIngestionPriorityReflector priorityReflector;
     private ExecutableContainmentService containment;
+    private WriteCommandLogRepository commandLogRepo;
     private CalendarEventHandler handler;
 
     private static final UUID USER_ID =
@@ -55,10 +58,14 @@ class CalendarEventHandlerTest {
         outboxRepo = mock(OutboxRepository.class);
         priorityReflector = mock(OnIngestionPriorityReflector.class);
         containment = mock(ExecutableContainmentService.class);
+        commandLogRepo = mock(WriteCommandLogRepository.class);
+        // No write of ours matches, unless a test says otherwise: an inbound event is a new one.
+        when(commandLogRepo.findCalendarWriteByContent(any(), any(), any(), any()))
+            .thenReturn(Optional.empty());
         PayloadParser parser = new PayloadParser(new ObjectMapper().registerModule(new JavaTimeModule()));
         handler = new CalendarEventHandler(executableRepo, snapshotRepo, syncMappingRepo,
             outboxRepo, new EndTimeInvariantRule()::apply, priorityReflector, parser,
-            containment, USER_ID);
+            containment, commandLogRepo, USER_ID, Duration.ofMinutes(10));
     }
 
     @Test
@@ -185,6 +192,56 @@ class CalendarEventHandlerTest {
 
         verify(outboxRepo).append(captor.capture());
         assertThat(captor.getValue().sourceSystem()).isEqualTo("APPLE");
+    }
+
+    @Test
+    @DisplayName("echo of our own write under a reassigned id updates OUR row — never a second one")
+    void echo_under_reassigned_id_is_adopted() {
+        // The production failure: an executable that becomes AGENDA mid-ingestion re-homes its event
+        // from the iCloud calendar to the Google one; EventKit cannot move an event across accounts, so
+        // it recreates it with a new identifier and our own write comes back as an unknown CREATED.
+        UUID agenda = UUID.randomUUID();
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-reborn"))
+            .thenReturn(Optional.empty());
+        // The parser normalises the payload's offset, so the window is matched by instant.
+        when(commandLogRepo.findCalendarWriteByContent(
+            eq("Team meeting"),
+            argThat(start -> start.isEqual(OffsetDateTime.parse("2026-07-07T09:00:00-05:00"))),
+            argThat(end -> end.isEqual(OffsetDateTime.parse("2026-07-07T10:00:00-05:00"))),
+            any())).thenReturn(Optional.of(agenda));
+        when(snapshotRepo.findExecutable(agenda)).thenReturn(Optional.of(
+            ExecutableSnapshotBuilder.snapshot().id(agenda).userId(USER_ID)
+                .type("AGENDA").status("TODO").build()));
+        when(syncMappingRepo.findByExternalSystemAndLocalId("APPLE", agenda))
+            .thenReturn(Optional.of(syncMapping("EKEvent-dead", agenda, "x")));
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+
+        handler.handle(calendarEvent("EKEvent-reborn", Operation.CREATED, calendarPayload("DanielC")));
+
+        // The agenda entry keeps its identity AND its type: no duplicate, and no demotion to ACTIVITY.
+        verify(executableRepo).upsert(captor.capture());
+        assertThat(captor.getValue().id()).isEqualTo(agenda);
+        assertThat(captor.getValue().type()).isEqualTo("AGENDA");
+        // And the mapping now points at the live identifier: the dead one is dropped first, so the
+        // executable is never left holding two.
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(syncMappingRepo);
+        order.verify(syncMappingRepo).deleteByExternalSystemAndId("APPLE", "EKEvent-dead");
+        order.verify(syncMappingRepo).insert(argThat(m ->
+            m.externalId().equals("EKEvent-reborn") && m.localId().equals(agenda)));
+    }
+
+    @Test
+    @DisplayName("an event nobody wrote is still a new ACTIVITY — adoption never invents an owner")
+    void unrelated_event_is_created_as_new() {
+        when(syncMappingRepo.findByExternalSystemAndId("APPLE", "EKEvent-foreign"))
+            .thenReturn(Optional.empty());
+        ArgumentCaptor<ExecutableSnapshot> captor = ArgumentCaptor.forClass(ExecutableSnapshot.class);
+
+        handler.handle(calendarEvent("EKEvent-foreign", Operation.CREATED, calendarPayload("Work")));
+
+        verify(executableRepo).upsert(captor.capture());
+        assertThat(captor.getValue().type()).isEqualTo("ACTIVITY");
+        verify(syncMappingRepo, never()).deleteByExternalSystemAndId(any(), any());
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

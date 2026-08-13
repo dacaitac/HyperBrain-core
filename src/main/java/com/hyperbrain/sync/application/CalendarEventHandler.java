@@ -17,6 +17,7 @@ import com.hyperbrain.sync.domain.port.in.IEventHandler;
 import com.hyperbrain.sync.domain.port.out.CoreExecutableRepository;
 import com.hyperbrain.sync.domain.port.out.SyncMappingRepository;
 import com.hyperbrain.sync.domain.port.out.SyncSnapshotRepository;
+import com.hyperbrain.sync.domain.port.out.WriteCommandLogRepository;
 import com.hyperbrain.sync.domain.service.SourceAwareMerge;
 import com.hyperbrain.sync.infrastructure.PayloadParser;
 import org.slf4j.Logger;
@@ -24,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.UUID;
@@ -38,6 +40,12 @@ import java.util.UUID;
  * {@link OnIngestionPriorityReflector} (#66a, ADR-020 D2) → Outbox. For this APPLE origin the
  * reflector stages no SYSTEM event; the APPLE event carries the fresh score to Notion (see
  * {@link ReminderEventHandler}).
+ *
+ * <p><b>An unmapped event is not necessarily a new one.</b> Before creating a row, the handler asks
+ * whether the event is our own write coming back under an identifier EventKit reassigned when the
+ * event moved between accounts — see {@link #adoptEcho}. Without that question an agenda entry the
+ * user creates is duplicated as an activity, and the mapping we hold is left pointing at an event
+ * that no longer exists.
  */
 @Component
 public class CalendarEventHandler implements IEventHandler {
@@ -56,7 +64,9 @@ public class CalendarEventHandler implements IEventHandler {
     private final OnIngestionPriorityReflector priorityReflector;
     private final PayloadParser payloadParser;
     private final ExecutableContainmentService containment;
+    private final WriteCommandLogRepository commandLogRepo;
     private final UUID defaultUserId;
+    private final Duration echoWindow;
 
     public CalendarEventHandler(
         CoreExecutableRepository executableRepo,
@@ -67,7 +77,9 @@ public class CalendarEventHandler implements IEventHandler {
         OnIngestionPriorityReflector priorityReflector,
         PayloadParser payloadParser,
         ExecutableContainmentService containment,
-        @Value("${app.sync.default-user-id}") UUID defaultUserId
+        WriteCommandLogRepository commandLogRepo,
+        @Value("${app.sync.default-user-id}") UUID defaultUserId,
+        @Value("${app.sync.apple.echo-window:PT10M}") Duration echoWindow
     ) {
         this.executableRepo = executableRepo;
         this.snapshotRepo = snapshotRepo;
@@ -77,7 +89,9 @@ public class CalendarEventHandler implements IEventHandler {
         this.priorityReflector = priorityReflector;
         this.payloadParser = payloadParser;
         this.containment = containment;
+        this.commandLogRepo = commandLogRepo;
         this.defaultUserId = defaultUserId;
+        this.echoWindow = echoWindow;
     }
 
     @Override
@@ -108,8 +122,13 @@ public class CalendarEventHandler implements IEventHandler {
             return;
         }
 
-        UUID executableId = existing.map(SyncMapping::localId).orElseGet(UUID::randomUUID);
-        ExecutableSnapshot current = existing.isPresent()
+        // An unmapped event may still be one of ours under a new identifier (see adoptEcho).
+        Optional<UUID> adopted = existing.isEmpty() ? adoptEcho(event, payload) : Optional.empty();
+
+        UUID executableId = existing.map(SyncMapping::localId)
+            .or(() -> adopted)
+            .orElseGet(UUID::randomUUID);
+        ExecutableSnapshot current = existing.isPresent() || adopted.isPresent()
             ? snapshotRepo.findExecutable(executableId).orElse(null)
             : null;
         ExecutableSnapshot merged =
@@ -122,6 +141,10 @@ public class CalendarEventHandler implements IEventHandler {
         priorityReflector.reflect(executableId, ExternalSystem.APPLE);
 
         if (existing.isEmpty()) {
+            // An adopted echo carries the dead mapping of the identifier EventKit discarded. It goes
+            // first: leaving it would give the executable two APPLE mappings, and the write-back reads
+            // one of them — the dead one half the time, which is the state this whole path repairs.
+            adopted.ifPresent(this::dropStaleMapping);
             syncMappingRepo.insert(buildSyncMapping(executableId, event.entityId(), checksum));
         } else {
             syncMappingRepo.update(buildSyncMapping(executableId, event.entityId(), checksum));
@@ -130,6 +153,50 @@ public class CalendarEventHandler implements IEventHandler {
         outboxRepo.append(buildOutboxEvent(event, executableId, "CalendarEventSyncedEvent"));
         log.info("CALENDAR_EVENT {} ({}) persisted as executable {}",
             event.entityId(), event.operation(), executableId);
+    }
+
+    /**
+     * Recognises an unmapped inbound event as one of <em>our own</em> writes, returning the executable
+     * it belongs to so the ingestion updates that row instead of creating a second one.
+     *
+     * <p><b>Why an event of ours arrives unrecognisable.</b> EventKit cannot move an event between
+     * accounts: re-targeting one from a calendar on one source to a calendar on another deletes it and
+     * creates it again, with a <b>new identifier</b>. That is what a type change does here — an
+     * executable that becomes {@code AGENDA} mid-ingestion re-homes its event from the iCloud calendar
+     * to the Google one — and it is not hypothetical: the burst of Notion webhooks that follows creating
+     * a page walks the row through more than one type, so the event is written, then moved. What comes
+     * back is a {@code CREATED} for an identifier nobody has ever seen, while the mapping we hold points
+     * at an event that no longer exists. Left alone the ingestion does the only thing it can with an
+     * unknown event: it creates a row — typed {@code ACTIVITY}, because that is what an unknown calendar
+     * event is — and the user sees their agenda entry duplicated as an activity.
+     *
+     * <p><b>Identity by content, and only just after a write.</b> The write log is the only place that
+     * remembers the event was ours; the payload is the only thing that survives the reassignment. The
+     * match is exact on title and window and bounded to the echo window, so an event the user creates by
+     * hand is adopted only if it is identical to something we wrote moments ago — in which case treating
+     * the two as one is the right answer anyway. Ambiguity is refused, never guessed.
+     *
+     * @return the executable to update, or empty when this really is a new event
+     */
+    private Optional<UUID> adoptEcho(SentinelEvent event, CalendarEventPayload payload) {
+        Optional<UUID> owner = commandLogRepo.findCalendarWriteByContent(
+            payload.title(), payload.startTime(), payload.endTime(),
+            OffsetDateTime.now().minus(echoWindow));
+        owner.ifPresent(localId -> log.warn(
+            "CALENDAR_EVENT {} is our own write of executable {} under a reassigned identifier "
+                + "(event moved between accounts); adopting it instead of creating a duplicate",
+            event.entityId(), localId));
+        return owner;
+    }
+
+    /** Removes the executable's APPLE mapping to the identifier EventKit discarded, if it still holds one. */
+    private void dropStaleMapping(UUID localId) {
+        syncMappingRepo.findByExternalSystemAndLocalId(EXTERNAL_SYSTEM, localId)
+            .ifPresent(stale -> {
+                syncMappingRepo.deleteByExternalSystemAndId(EXTERNAL_SYSTEM, stale.externalId());
+                log.info("Dropped dead APPLE mapping {} of executable {}",
+                    stale.externalId(), localId);
+            });
     }
 
     /**

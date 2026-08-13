@@ -219,6 +219,84 @@ class CalendarEventHandlerIT {
     }
 
     @Test
+    @DisplayName("echo: our own event coming back under a reassigned id updates the AGENDA, never duplicating it as an ACTIVITY")
+    void echo_under_reassigned_identifier_is_adopted() {
+        // The production failure of 2026-08-13, reproduced. An AGENDA is written to its Google
+        // calendar while its event already lived on an iCloud one; EventKit cannot move an event
+        // across accounts, so it recreates it — new identifier — and our own write comes back looking
+        // like somebody else's event. Ingesting it blindly gave Daniel a duplicate typed ACTIVITY and
+        // left the mapping pointing at an event that no longer existed.
+        UUID agenda = UUID.randomUUID();
+        String deadId = "EKEvent-dead-" + UUID.randomUUID();
+        String rebornId = "EKEvent-reborn-" + UUID.randomUUID();
+        insertAgendaWithMapping(agenda, deadId, "Reunion Metlife",
+            "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00");
+        insertAppliedCalendarWrite(agenda, "Reunion Metlife",
+            "2026-07-07T14:00:00Z", "2026-07-07T15:00:00Z");
+
+        send(calendarEventBody(UUID.randomUUID().toString(), rebornId, "Reunion Metlife",
+            "DanielC", "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00", "CREATED"),
+            rebornId, UUID.randomUUID().toString());
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+            assertThat(countSyncMapping(rebornId)).isEqualTo(1));
+        // One row, still the agenda entry, now reachable through the live identifier...
+        assertThat(countExecutablesNamed("Reunion Metlife")).isEqualTo(1);
+        assertThat(queryExecutable(rebornId)).isNotNull().containsEntry("type", "AGENDA");
+        assertThat(localIdOf(rebornId)).isEqualTo(agenda);
+        // ...and the dead mapping is gone, so the write-back stops aiming at a deleted event.
+        assertThat(countSyncMapping(deadId)).isZero();
+    }
+
+    @Test
+    @DisplayName("echo: two writes sharing title and window are ambiguous — the event is ingested as new, never merged into one of them")
+    void ambiguous_echo_is_refused() {
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        String incomingId = "EKEvent-ambiguous-" + UUID.randomUUID();
+        insertAgendaWithMapping(first, "EKEvent-a-" + UUID.randomUUID(), "Daily",
+            "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00");
+        insertAgendaWithMapping(second, "EKEvent-b-" + UUID.randomUUID(), "Daily",
+            "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00");
+        insertAppliedCalendarWrite(first, "Daily", "2026-07-07T14:00:00Z", "2026-07-07T15:00:00Z");
+        insertAppliedCalendarWrite(second, "Daily", "2026-07-07T14:00:00Z", "2026-07-07T15:00:00Z");
+
+        send(calendarEventBody(UUID.randomUUID().toString(), incomingId, "Daily",
+            "DanielC", "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00", "CREATED"),
+            incomingId, UUID.randomUUID().toString());
+
+        // Adopting either one would silently merge two distinct events, so a third row is the honest
+        // outcome: a wrong merge is unrecoverable, a duplicate is visible and fixable.
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+            assertThat(queryExecutable(incomingId)).isNotNull());
+        assertThat(queryExecutable(incomingId)).containsEntry("type", "ACTIVITY");
+        assertThat(localIdOf(incomingId)).isNotIn(first, second);
+    }
+
+    @Test
+    @DisplayName("echo: a matching write older than the echo window is not adopted — an event created by hand much later stays its own")
+    void write_outside_the_echo_window_is_not_adopted() {
+        UUID agenda = UUID.randomUUID();
+        String incomingId = "EKEvent-late-" + UUID.randomUUID();
+        insertAgendaWithMapping(agenda, "EKEvent-old-" + UUID.randomUUID(), "Psyco",
+            "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00");
+        insertAppliedCalendarWrite(agenda, "Psyco", "2026-07-07T14:00:00Z", "2026-07-07T15:00:00Z");
+        // The write happened hours ago: whatever arrives now is a new event that merely looks alike.
+        jdbcTemplate.update(
+            "UPDATE sync_write_commands SET created_at = now() - interval '3 hours' WHERE local_id = ?",
+            agenda);
+
+        send(calendarEventBody(UUID.randomUUID().toString(), incomingId, "Psyco",
+            "DanielC", "2026-07-07T09:00:00-05:00", "2026-07-07T10:00:00-05:00", "CREATED"),
+            incomingId, UUID.randomUUID().toString());
+
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+            assertThat(queryExecutable(incomingId)).isNotNull());
+        assertThat(localIdOf(incomingId)).isNotEqualTo(agenda);
+        assertThat(countExecutablesNamed("Psyco")).isEqualTo(2);
+    }
+
+    @Test
     @DisplayName("REMINDER_LIST and CALENDAR events are routed without error (no persistence)")
     void reminder_list_and_calendar_entities_are_accepted() {
         String listId = "EKCalList-" + UUID.randomUUID();
@@ -255,6 +333,45 @@ class CalendarEventHandlerIT {
             WHERE m.external_system = 'APPLE' AND m.external_id = ?
             """, externalId);
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private void insertAgendaWithMapping(UUID localId, String externalId, String name,
+                                         String startTime, String endTime) {
+        jdbcTemplate.update("""
+            INSERT INTO core_executable (id, user_id, name, type, status, start_time, end_time,
+                                         source_calendar)
+            VALUES (?, ?, ?, 'AGENDA', 'TODO', ?::timestamptz, ?::timestamptz, 'DanielC')
+            """, localId, DataFixture.SYSTEM_USER_ID, name, startTime, endTime);
+        jdbcTemplate.update("""
+            INSERT INTO sync_mappings (id, user_id, local_id, external_system, external_id,
+                                       last_known_checksum, sync_status)
+            VALUES (?, ?, ?, 'APPLE', ?, 'stale-checksum', 'SYNCED')
+            """, UUID.randomUUID(), DataFixture.SYSTEM_USER_ID, localId, externalId);
+    }
+
+    /** The write-log row our own event is recognised by: title + window, as the payload carried them. */
+    private void insertAppliedCalendarWrite(UUID localId, String title,
+                                            String startTime, String endTime) {
+        String payload = """
+            {"title": "%s", "start_time": "%s", "end_time": "%s", "calendar_name": "DanielC"}
+            """.formatted(title, startTime, endTime);
+        jdbcTemplate.update("""
+            INSERT INTO sync_write_commands
+                (command_id, user_id, local_id, command_type, operation, entity_id, payload, status)
+            VALUES (?, ?, ?, 'CALENDAR_EVENT', 'CREATED', 'dead-entity', ?::jsonb, 'APPLIED')
+            """, UUID.randomUUID(), DataFixture.SYSTEM_USER_ID, localId, payload);
+    }
+
+    private UUID localIdOf(String externalId) {
+        return jdbcTemplate.queryForObject(
+            "SELECT local_id FROM sync_mappings WHERE external_system='APPLE' AND external_id=?",
+            UUID.class, externalId);
+    }
+
+    private int countExecutablesNamed(String name) {
+        Integer n = jdbcTemplate.queryForObject(
+            "SELECT count(*) FROM core_executable WHERE name = ?", Integer.class, name);
+        return n == null ? 0 : n;
     }
 
     private int countSyncMapping(String externalId) {

@@ -52,6 +52,23 @@ class JdbcWriteCommandLogRepository implements WriteCommandLogRepository {
         LIMIT 1
         """;
 
+    /**
+     * Candidate owners of an event we wrote, by title and window. Two rows are read on purpose: a
+     * second distinct local id means the match is ambiguous, and the caller refuses rather than guesses.
+     * The end time is compared null-safely — an event written without one matches a payload without one.
+     */
+    private static final String FIND_CALENDAR_WRITE_BY_CONTENT_SQL = """
+        SELECT DISTINCT local_id
+        FROM sync_write_commands
+        WHERE command_type = 'CALENDAR_EVENT'
+          AND operation IN ('CREATED', 'UPDATED')
+          AND created_at >= ?
+          AND payload->>'title' = ?
+          AND (payload->>'start_time')::timestamptz = ?
+          AND (payload->>'end_time')::timestamptz IS NOT DISTINCT FROM ?
+        LIMIT 2
+        """;
+
     private static final String MARK_APPLIED_SQL = """
         UPDATE sync_write_commands
         SET status = 'APPLIED', entity_id = ?, error = NULL, resolved_at = ?
@@ -105,6 +122,18 @@ class JdbcWriteCommandLogRepository implements WriteCommandLogRepository {
         List<CommandType> rows = jdbcTemplate.query(FIND_LAST_WRITTEN_TYPE_SQL,
             (rs, rowNum) -> CommandType.valueOf(rs.getString("command_type")), localId);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+    }
+
+    @Override
+    public Optional<UUID> findCalendarWriteByContent(
+        String title, OffsetDateTime startTime, OffsetDateTime endTime, OffsetDateTime since) {
+        if (title == null || startTime == null) {
+            return Optional.empty();
+        }
+        List<UUID> rows = jdbcTemplate.query(FIND_CALENDAR_WRITE_BY_CONTENT_SQL,
+            (rs, rowNum) -> rs.getObject("local_id", UUID.class),
+            toTimestamp(since), title, toTimestamp(startTime), toTimestamp(endTime));
+        return rows.size() == 1 ? Optional.of(rows.get(0)) : Optional.empty();
     }
 
     @Override

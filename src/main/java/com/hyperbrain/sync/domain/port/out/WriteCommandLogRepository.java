@@ -53,6 +53,31 @@ public interface WriteCommandLogRepository {
     Optional<CommandType> findLastWrittenCommandTypeByLocalId(UUID localId);
 
     /**
+     * Returns the executable a calendar event we wrote ourselves belongs to, matched by <b>content</b>
+     * rather than by identifier: the local id of a recent {@code CALENDAR_EVENT} command whose payload
+     * carries exactly this title and window.
+     *
+     * <p><b>Why identity by content.</b> EventKit reassigns an event's identifier when the event moves
+     * between accounts — it cannot relocate one across sources, so it deletes and recreates it. Our own
+     * write is then echoed back as a {@code CREATED} carrying an identifier nobody has ever seen, and
+     * the mapping we hold points at an event that no longer exists. The write log is the only place
+     * that knows the event was ours, and the payload is the only thing that survives the reassignment.
+     *
+     * <p>Both {@code CREATED} and {@code UPDATED} are searched: the reassignment is triggered by the
+     * update that re-targets the calendar, not by the creation. Ambiguity is not resolved but refused —
+     * when more than one executable matches the same title and window the caller gets nothing, because
+     * adopting the wrong one would silently merge two distinct events.
+     *
+     * @param title     the event title as written
+     * @param startTime the start instant as written; never null
+     * @param endTime   the end instant as written, or null when the payload carried none
+     * @param since     lower bound on the command's creation instant (the echo window)
+     * @return the single matching local id, or empty when there is none or more than one
+     */
+    Optional<UUID> findCalendarWriteByContent(
+        String title, OffsetDateTime startTime, OffsetDateTime endTime, OffsetDateTime since);
+
+    /**
      * Marks a command as successfully applied, recording the EventKit identifier it resolved to.
      *
      * @param commandId  the correlation id

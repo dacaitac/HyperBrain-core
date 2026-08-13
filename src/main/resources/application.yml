@@ -143,6 +143,14 @@ app:
         # NOTE: every AGENDA write-back targets DanielC regardless of the calendar it was synced
         # from, so an AGENDA that came from another Google calendar is (re)written to DanielC.
         AGENDA: DanielC
+      # How long after writing a calendar event an unmapped inbound CREATED with the same title and
+      # window is still read as the echo of that write (CalendarEventHandler.adoptEcho). EventKit
+      # reassigns an event's identifier when it moves between accounts — which is exactly what the
+      # AGENDA routing above does when a row becomes AGENDA after its event was already written to an
+      # iCloud calendar — so our own event comes back wearing an identifier nobody has seen. Wide
+      # enough to cover the satellite's notification lag, short enough that an unrelated event created
+      # by hand later is never adopted.
+      echo-window: ${SYNC_APPLE_ECHO_WINDOW:PT10M}
     # Notion write-back (HU-10). Disabled unless a token is provisioned (SOPS in Infra, CA-12);
     # the data source ids are the Tasks/Cycles collections verified in issue #15.
     notion:
